@@ -1,0 +1,1294 @@
+"""Configuration — the single source of truth.
+
+`docs/CONFIG.md` and `config.example.toml` are *generated* from the schema
+below by `scripts/gen_config_docs.py`, and CI fails when the committed files
+drift from it. A setting documented in one place and implemented in another
+will eventually disagree; here there is only one place.
+
+Precedence, highest first: explicit arguments, `VOGT_*` environment
+variables, the TOML file named by `VOGT_CONFIG_FILE`, then the schema
+defaults.
+
+## The default policy
+
+Every field declares what its value *decides*, because that — not whether it
+is a number — is what determines whether it may carry a default:
+
+- `exposure` — a public hostname, a bind address, a published port, a URL a
+  client will trust. **Never defaulted**, anywhere: code, images, docs, or
+  examples.
+- `allocation` — a path or a slot on a host the operator owns. **Always
+  defaulted**, so a deployment does not fail merely because the example did
+  not know its host's filesystem layout.
+- `behaviour` — tuning that decides neither of the above; unconstrained.
+
+`tests/test_config.py` asserts the first two rules against the live schema,
+so the policy is enforced before there is an exposure field to get wrong.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+from vogt.core.branches import DEFAULT_BRANCH_PATTERNS, DEFAULT_BRANCH_TEMPLATE
+
+ENV_PREFIX = "VOGT_"
+CONFIG_FILE_ENV = "VOGT_CONFIG_FILE"
+
+DefaultPolicy = Literal["exposure", "allocation", "behaviour"]
+LogLevel = Literal["debug", "info", "warning", "error"]
+
+DECLARED_DB_NAME = "declared.sqlite3"
+OBSERVED_DB_NAME = "observed.sqlite3"
+BACKUPS_DIR_NAME = "backups"
+IMPORT_DIR_NAME = "repos"
+
+
+def default_data_dir() -> Path:
+    """Where an instance lives when the operator has not said otherwise.
+
+    An allocation value: it names a directory on a host the operator owns,
+    and gating it would only produce a tool that refuses to start.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "vogt"
+
+
+class UsageAccount(BaseModel):
+    """One provider account the usage board reads (`usage_accounts`, WI-2040).
+
+    `agent` names the transcript shape: a Claude Code config directory (its
+    `projects/` holds the transcripts) or a Codex home (its `sessions/`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The account's name, e.g. `acct2`.")
+    agent: Literal["claude", "codex"]
+    dir: Path = Field(
+        description="The account's config directory (`CLAUDE_CONFIG_DIR` or "
+        "`CODEX_HOME`)."
+    )
+
+
+class UsageKey(BaseModel):
+    """One LiteLLM virtual key whose spend the usage board reads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The key's name, e.g. `deepseek`.")
+    key_env: str = Field(
+        min_length=1,
+        description="Environment variable holding the key. Its value is sent "
+        "to LiteLLM's `/key/info` and never stored or returned.",
+    )
+    daily_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description="Alert when the key's day spend reaches this; overrides "
+        "`usage_daily_spend_alert_usd`.",
+    )
+
+
+class DeployLane(BaseModel):
+    """One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
+
+    Configuration only: a lane names *where* its evidence lives, never a
+    hostname Vogt knows by itself. Two sources, either or both:
+
+    - a **receipt** — a JSON file in a forge repository (`receipt_repo` +
+      `receipt_path`) a deploy pipeline writes, carrying at least
+      `source_sha` (and optionally `source_tag`, `timestamp`, a `status` or
+      `live_smoke.status`). Read through the forge configured for that
+      repository's host, with its credential.
+    - a **version URL** — a public JSON endpoint of the running instance
+      (Vogt's own front door answers `/api/config` with `source_sha` and
+      `product_version`). Read without credentials.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The lane's name, e.g. `dev`.")
+    project: str = Field(
+        min_length=1,
+        description="Slug of the registered project the lane deploys.",
+    )
+    branch: str = Field(
+        default="main",
+        min_length=1,
+        description="The branch the lane is expected to track.",
+    )
+    receipt_repo: str | None = None
+    receipt_path: str | None = None
+    version_url: str | None = None
+
+    @model_validator(mode="after")
+    def _has_a_source(self) -> DeployLane:
+        if (self.receipt_repo is None) != (self.receipt_path is None):
+            msg = (
+                f"deploy lane {self.name!r}: give receipt_repo and receipt_path "
+                "together"
+            )
+            raise ValueError(msg)
+        if self.receipt_repo is None and self.version_url is None:
+            msg = f"deploy lane {self.name!r} names no receipt and no version_url"
+            raise ValueError(msg)
+        if self.version_url is not None and not self.version_url.startswith(
+            ("https://", "http://")
+        ):
+            msg = f"deploy lane {self.name!r}: version_url must be http(s)"
+            raise ValueError(msg)
+        return self
+
+
+class _TomlFileSource(PydanticBaseSettingsSource):
+    """Reads the optional TOML file named by ``VOGT_CONFIG_FILE``."""
+
+    def _values(self) -> dict[str, Any]:
+        raw = os.environ.get(CONFIG_FILE_ENV)
+        if not raw:
+            return {}
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            return {}
+        with path.open("rb") as handle:
+            loaded: dict[str, Any] = tomllib.load(handle)
+        return loaded
+
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Any, str, bool]:
+        return self._values().get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        known = set(VogtConfig.model_fields)
+        return {k: v for k, v in self._values().items() if k in known}
+
+
+class VogtConfig(BaseSettings):
+    """The configuration of one Vogt instance."""
+
+    model_config = SettingsConfigDict(
+        env_prefix=ENV_PREFIX,
+        extra="forbid",
+        frozen=True,
+    )
+
+    data_dir: Path = Field(
+        default_factory=default_data_dir,
+        description=(
+            "Directory holding declared.sqlite3, observed.sqlite3 and backups. "
+            "One instance per directory."
+        ),
+        json_schema_extra={"default_policy": "allocation"},
+    )
+    import_root: Path | None = Field(
+        default=None,
+        description=(
+            "Directory imported repositories are cloned into, one per project "
+            "slug. An allocation value, so it has a default rather "
+            "than a gate: unset means `<data_dir>/repos`, which keeps the "
+            "clone with the instance that registered it. Deployments that "
+            "observe a workspace on a mounted host directory point this at "
+            "that workspace instead, so an imported project lands where the "
+            "rest of the work already lives."
+        ),
+        json_schema_extra={"default_policy": "allocation"},
+    )
+    public_url: str | None = Field(
+        default=None,
+        description=(
+            "The URL clients reach this instance at, e.g. "
+            "`https://vogt.example.com`. An exposure value, so it "
+            "has no default and is never guessed: the process binds "
+            "`0.0.0.0:8000` inside a container and is published somewhere "
+            "else entirely, so the server cannot know its own address — only "
+            "the operator does. Unset means `connect` reports that nobody has "
+            "said, which is a different answer from reporting a URL that does "
+            "not work."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
+    fronted: bool = Field(
+        default=False,
+        description=(
+            "Whether this instance runs behind an optional front door that "
+            "publishes it at a different address and mount points. When true, "
+            "`connect` and "
+            "`/connection-info` render against the identity the door states "
+            "per request (`X-Vogt-Public-Url`, `X-Vogt-Api-Path`, "
+            "`X-Vogt-Mcp-Path`), because the door is the only thing that "
+            "knows where clients arrive. Off by default and "
+            "never inferred: an instance that has not been told it is fronted "
+            "ignores those headers entirely, so nobody who can reach it can "
+            "make `connect` render a client configuration — a document meant "
+            "to be pasted next to a token — against an address they chose."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_level: LogLevel = Field(
+        default="info",
+        description=(
+            "Verbosity of Vogt's own diagnostics — the `vogt.*` logger "
+            "namespace, not its dependencies'."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_format: Literal["text", "json"] = Field(
+        default="text",
+        description=(
+            "How each line is rendered. `text` is for a person reading "
+            "`docker logs`; `json` is one object per line for a log that is "
+            "queried rather than read (Loki). The fields are the same either "
+            "way, so a query written against one describes the other."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_requests: bool = Field(
+        default=True,
+        description=(
+            "Whether every served request produces an access line carrying "
+            "its duration. On by default: stock uvicorn access lines carry no "
+            "timing at all, so a single slow endpoint would leave no trace. "
+            "Turning this off still leaves correlation ids honoured and "
+            "echoed."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_slow_request_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "A request whose response takes longer than this to *start* is "
+            "logged at WARNING rather than INFO. Judged on time to "
+            "first byte, so a long-lived `/mcp` stream is not reported as a "
+            "pathological request every time it ends."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_quiet_paths: tuple[str, ...] = Field(
+        default=("/health/live", "/health/ready", "/version"),
+        description=(
+            "Paths whose access lines drop to DEBUG. Probes, by "
+            "default: an orchestrator calls them every few seconds forever, "
+            "and a log that is 100% `/healthz` with no application output in "
+            "it is not a log. Suppressed and not dropped — a probe that "
+            "crosses `log_slow_request_ms` still warns."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_required_files: tuple[str, ...] = Field(
+        default=("AGENTS.md", "README.md", "LICENSE"),
+        description=(
+            "Files a compliant project must contain. The contract is "
+            "a value you read, never a barrier you pass: changing this "
+            "changes what `contract check` reports and gates nothing."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_required_dirs: tuple[str, ...] = Field(
+        default=("docs", "design", "src"),
+        description="Directories a compliant project must contain.",
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_required_meta: tuple[str, ...] = Field(
+        default=("name", "lifecycle_state", "owner"),
+        description=(
+            "Metadata keys a compliant project must declare. Read "
+            "from the project's own manifest, not from Vogt's registration."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_version: str = Field(
+        default="v1",
+        description=(
+            "Names which contract a recorded compliance status was evaluated "
+            "against. If the rules above differ from the "
+            "built-in defaults and this is left at its own default, Vogt "
+            "appends a short digest of the rules — a status must never claim "
+            "to be the stock `v1` when it is not, and an operator who edits "
+            "the rules should not have to remember to rename them."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    marker_promotion_patterns: tuple[str, ...] = Field(
+        default=("TODO(vogt)", "FIXME(vogt)"),
+        description=(
+            "Source markers containing one of these enter backlog and bug "
+            "views. Every other marker is still observed, still "
+            "queryable and still counted; it just does not claim to be work. "
+            "Widening this is how you drown the ranked view."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    inbox_bot_logins: tuple[str, ...] = Field(
+        default=("dependabot", "renovate", "renovate-bot", "github-actions"),
+        description=(
+            "Forge logins the Inbox treats as bots even when the forge does "
+            "not mark them as one. Matched case-insensitively, with or "
+            "without a `[bot]` suffix. An account the forge reports as a "
+            "`Bot`, or whose login ends in `[bot]`, is a bot regardless. "
+            "Bots are never 'external', so this list is what keeps "
+            "automation out of the Inbox's *External people only* filter. "
+            "Applied when the Inbox is read, so a change here needs no "
+            "re-sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_alert_branches: tuple[str, ...] = Field(
+        default=("main", "master", "prod"),
+        description=(
+            "Branches (glob patterns) whose failed CI runs raise an Inbox "
+            "alert. Only pushed, scheduled and manually dispatched runs "
+            "count — a pull-request run never alerts, whatever its branch. "
+            "An alert names the failing jobs, links the log, and clears "
+            "itself when a later run of the same workflow on the same "
+            "branch succeeds."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_alert_tags: tuple[str, ...] = Field(
+        default=("v*",),
+        description=(
+            "Tags (glob patterns) whose failed CI runs raise an Inbox alert "
+            "— the release workflows a tag push starts, which block no pull "
+            "request and so fail silently otherwise. Tags are one lane per "
+            "workflow: a later tag's successful run of the same workflow "
+            "clears an earlier tag's failure, because the release it would "
+            "have shipped has been superseded."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_watch_notify_sessions: bool = Field(
+        default=True,
+        description=(
+            "When CI finishes on a branch bound to a work item "
+            "(`work.bind_branch`), type a one-line pass/fail notice into "
+            "each live session started for that item, so an agent wakes on "
+            "the result instead of polling. Sent once per run conclusion, "
+            "by the sweep that observed it. The Inbox entry is raised "
+            "either way; this only turns the session nudge off."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    autopilot_done_requires_result_report: bool = Field(
+        default=False,
+        description=(
+            "When true, the session sweep treats an `AUTOPILOT: DONE` as done "
+            "only if the session posted a `result` report (`session.report`) "
+            "since its turn began; otherwise the row reads `waiting` with the "
+            "reason `done without a result report`, so oversight asks for one "
+            "instead of trusting the line. Off by default."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    deploy_lanes: tuple[DeployLane, ...] = Field(
+        default=(),
+        description=(
+            "Deployment lanes `deployed_versions` reports on, each a table "
+            "with `name`, `project` (a registered slug), `branch` (default "
+            "`main`), and a source: `receipt_repo` + `receipt_path` (a JSON "
+            "receipt a deploy pipeline commits, read through the configured "
+            "forge) and/or `version_url` (a running instance's public JSON "
+            "version endpoint, e.g. Vogt's `/api/config`). Empty means the "
+            "`deploy-lanes` collector is not registered and deployed "
+            "versions are reported as not configured. A receipt whose "
+            "status says the deploy or its smoke test failed raises an "
+            "Inbox alert."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_accounts: tuple[UsageAccount, ...] = Field(
+        default=(),
+        description=(
+            "Provider accounts `usage.board` reports on, each a table with "
+            "`name`, `agent` (`claude` or `codex`) and `dir` (that account's "
+            "config directory). Read on request only: the newest limit and "
+            "reset the account's own transcripts recorded. Empty, no account "
+            "is reported."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of a LiteLLM proxy whose keys' spend `usage.board` "
+            "reads through `/key/info`. Unset, no key spend is read."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_litellm_keys: tuple[UsageKey, ...] = Field(
+        default=(),
+        description=(
+            "LiteLLM keys `usage.board` reports spend for: `name`, `key_env` "
+            "(the environment variable holding the key) and an optional "
+            "`daily_alert_usd`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    usage_daily_spend_alert_usd: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Default day-spend alert threshold, in USD, for every LiteLLM key "
+            "without its own `daily_alert_usd`. Unset, no alert is raised."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    marker_file_extensions: tuple[str, ...] = Field(
+        default=(
+            ".py",
+            ".rs",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".java",
+            ".rb",
+            ".sh",
+            ".sql",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".md",
+        ),
+        description=(
+            "File types the marker collector reads. Configuration rather "
+            "than a hard-coded list, because which extensions hold source "
+            "is a workspace's business, not Vogt's."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    branch_binding_patterns: tuple[str, ...] = Field(
+        default=DEFAULT_BRANCH_PATTERNS,
+        description=(
+            "Regular expressions that recognise which work item a git branch "
+            "belongs to. A branch whose name matches one is that item's "
+            "branch: the default set reads `wi-7/…` and `feature/WI-7-…` (the "
+            "vogt work-item number, via a `n` capture group) and `gh-264-…` "
+            "(a linked project's forge issue number, via a `forge` group). "
+            "The `git-local` collector applies these to every branch it "
+            "observes and records the match; widening the set is how a team "
+            "teaches Vogt its own branch conventions. Reported, never enforced: "
+            "matching a branch never creates, renames or deletes one."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    branch_binding_template: str = Field(
+        default=DEFAULT_BRANCH_TEMPLATE,
+        description=(
+            "The branch a session started from Vogt for a work item declares "
+            "it will use, formatted with a single `{number}` field: "
+            "`WI-7` becomes `wi-7`. This is the *declared* half of the branch "
+            "binding, recorded on the item's overlay and kept separate from "
+            "what a sweep observes — an upstream item always declares the "
+            "forge form `gh-<number>` regardless of this template, because "
+            "that is the shape its own default project recognises."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    retention_days: int = Field(
+        default=180,
+        ge=1,
+        description=(
+            "How long observation *history* is kept. The newest "
+            "observation per subject is kept indefinitely regardless, and so "
+            "is anything a drift proposal references."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing a GitHub token. Its absence is what "
+            "switches the optional forge adapter off, so there is no default: "
+            "not configured is the ordinary case, and it means forge subjects "
+            "are 'not collected' rather than absent. A file rather than an "
+            "environment variable or an argument, so the token never appears "
+            "in a process listing."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_id: str | None = Field(
+        default=None,
+        description=(
+            "The ID or the client ID of a GitHub App for the forge adapter "
+            "to authenticate as; GitHub accepts either as the JWT issuer. "
+            "With `github_app_private_key_file` also set, GitHub reads and "
+            "writes use short-lived installation tokens, which have their own "
+            "rate limit, instead of `github_token_file`. The notifications "
+            "collector stays on `github_token_file`, because notifications "
+            "belong to a user and an App cannot read them. Not a secret, so "
+            "plain config is fine. Setup, including the permissions the App "
+            "needs, is in docs/GITHUB_APP.md."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_installation_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Pin every GitHub request to one installation of "
+            "`github_app_id`. Unset, the installation is discovered per "
+            "repository owner (`GET /repos/{owner}/{repo}/installation`, "
+            "then `/orgs/{owner}/installation` or "
+            "`/users/{owner}/installation`) and remembered, so one App "
+            "installed on several accounts or organisations covers them all; "
+            "an owner without the App is read with `github_token_file`. "
+            "Publishing a new repository needs an owner to create it under: "
+            "this installation's account or, unset, the App's only "
+            "installation. An App with several installations must set this "
+            "to publish."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_app_private_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the GitHub App's PEM private key, which signs the "
+            "short-lived JWT exchanged for installation tokens. A file for "
+            "the same reason as `github_token_file`: the key never appears "
+            "in the environment or a process listing. When this and "
+            "`github_app_id` are set, the App takes precedence over "
+            "`github_token_file` for every GitHub read and write except "
+            "notifications. Unset, or unreadable, the personal token is used "
+            "as before."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    forge_account_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding a urlsafe-base64 Fernet key, used to "
+            "encrypt per-actor forge Personal Access Tokens at rest. A "
+            "linked PAT must be *recoverable* to call the upstream "
+            "API on the actor's behalf, which is the deliberate opposite of "
+            "the vogt-issued tokens in `0005_tokens` — those store only a "
+            "hash because they never need recovery. Its absence is what "
+            "switches account linking off: with no key there is nowhere safe "
+            "to keep a token, so the feature is disabled rather than insecure, "
+            "and the file-token fallback (`github_token_file`) keeps working "
+            "for sweeps and unlinked actors. A file rather than an environment "
+            "variable, so the key never appears in a process listing."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    forge_token_files: dict[str, Path] = Field(
+        default_factory=dict,
+        description=(
+            "Per-host forge token files, mapping a forge host to a file "
+            "holding a token for it — a TOML table `[forge_token_files]` with, "
+            'e.g., `"github.com" = "/run/secrets/github_token"`. This is the '
+            "general form of `github_token_file`, which stays as the alias for "
+            "github.com; a host set here wins over the alias. A host absent "
+            "from this map has no provider registered, which is what keeps its "
+            "subjects 'not collected' rather than reported as absent — the same "
+            "honesty rule the single-token field has always followed. Files "
+            "rather than environment variables or arguments, so a token never "
+            "appears in a process listing."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_activity_roots: dict[str, Path] = Field(
+        default_factory=dict,
+        description=(
+            "Agent transcript directories to index, by format — a TOML table "
+            '`[agent_activity_roots]` with `claude = "~/.claude/projects"` '
+            'and/or `codex = "~/.codex/sessions"`. Empty, the `agent-activity` '
+            "collector is not registered and nothing is read: transcripts hold "
+            "credentials, so indexing them is opt-in. Configured, each sweep "
+            "reads new transcript lines incrementally into the observed "
+            "store's activity index, redacting before anything is kept; "
+            "search it with `agent_activity.search` and `.summary`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    session_transcript_roots: dict[str, Path] = Field(
+        default_factory=lambda: {
+            "claude": Path("~/.claude/projects"),
+            "codex": Path("~/.codex/sessions"),
+        },
+        description=(
+            "Where `session.last_reply` and the `last_reply_excerpt` in "
+            "`session.list` look for a session's own agent transcript, by "
+            "agent (`claude`, `codex`). Read on request only — the last few "
+            "assistant messages of the conversation a session runs, redacted "
+            "— never indexed. The defaults are the agents' own directories "
+            "under the home of the user the core runs as, which in the "
+            "all-in-one stack is the user its sessions run as; a missing "
+            "directory makes the reply honestly unavailable. An empty table "
+            "turns both off."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_activity_max_bytes_per_sweep: int = Field(
+        default=32 * 1024 * 1024,
+        ge=4096,
+        description=(
+            "The most transcript bytes one sweep reads, newest files first. "
+            "A first sweep over months of transcripts catches up over several "
+            "sweeps rather than holding the schedule; the backlog still "
+            "waiting is in the sweep's stats."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_activity_services: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Extra service tags for the agent activity index, mapping a tag "
+            "to a case-insensitive regular expression over a tool call's name "
+            "and input — e.g. `ci = 'ci\\.example\\.org'`. Merged over the "
+            "built-in table (github, docker, komodo, infisical, …); an empty "
+            "pattern removes a built-in tag. Applies to calls indexed after "
+            "the change."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    engine_url: str | None = Field(
+        default=None,
+        description=(
+            "Where the session engine listens, e.g. `http://127.0.0.1:8910`. "
+            "The engine is the other half of the merged product: it owns the "
+            "PTYs a work item's session runs in. Unset means the "
+            "`session.*` operations report that no engine is configured — "
+            "absence of the engine costs sessions and nothing else. An "
+            "exposure value, so it is never "
+            "guessed: co-located today, its address is still the operator's "
+            "to state."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
+    session_scratch_project: str | None = Field(
+        default=None,
+        description=(
+            "The project slug a session with no work item and no project "
+            "resolves to. It exists for the spoken request that has "
+            "no subject — 'research the best risotto in Wollongong' — which "
+            "still needs a registered working tree to open in. Unset means "
+            "such a request is refused by name rather than opened somewhere "
+            "guessed: the working directory "
+            "comes from the registry, and a scratch project is a registered "
+            "project like any other."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    engine_state_dir: Path | None = Field(
+        default=None,
+        description=(
+            "The session engine's state directory, when this process can read "
+            "it — the merged deployment runs both halves in one container, so "
+            "it usually can. `backup` copies it and `restore` puts it back, "
+            "because half a restore is the failure to prevent: "
+            "the work items come back and the terminals' history, push "
+            "subscriptions and agent tasks do not. Its absence is what makes "
+            "a backup a core-only backup, so there is no default — the same "
+            "reason `github_token_file` has none. Unset, the manifest says "
+            "'not configured' rather than quietly covering less than it "
+            "appears to."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    engine_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing the credential Vogt calls the engine "
+            "with. Unset, `bootstrap_core_token_file` is used: the one stack "
+            "secret both halves share is recognised by the engine as the "
+            "core's own identity, so a deployment needs no second token for "
+            "this direction. Set it only to give the core a distinct engine "
+            "credential. A file rather than an environment variable, for the "
+            "same reason as `github_token_file` — a token in the environment "
+            "is a token in every `docker inspect`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_core_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding the core token the front door will "
+            "present, adopted at `init` if no token with that secret exists "
+            "yet. This is what lets a fronted deployment come up in one "
+            "deploy: without it the token can only be minted by a running "
+            "core, so the front door's `/api/vogt` answers 401 until somebody "
+            "execs in, mints one, edits the configuration and deploys again. "
+            "Supplying it is the same act as choosing "
+            "`engine_token_file`'s value — the mirror of this token, which "
+            "has always been operator-chosen. Idempotent: a boot that finds "
+            "the secret already present changes nothing. Unset, the mint-then-"
+            "configure path is unchanged."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_core_token_actor: str = Field(
+        default="agent:vogt-engine",
+        description=(
+            "Identity the adopted core token is bound to, created if absent. "
+            "Audit rows name it, so it should say which front door acted — "
+            "not a person, and not something shared with another instance."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_core_token_scopes: str = Field(
+        default="read,work.write,project.write",
+        description=(
+            "Scopes for the adopted core token. Everything in the pod runs as "
+            "one uid and can read the token file, so this scope *is* that "
+            "pod's blast radius — narrow it to what the front door actually "
+            "needs. `admin` is deliberately not the default."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_session_scopes: str = Field(
+        default="read,work.write,project.write,writeback",
+        description=(
+            "Scopes every agent session's own token holds — one deployment "
+            "decision for what a session may do, applied the same however the "
+            "session was launched. Comma-separated, parsed with the same rules "
+            "as any token's scopes. The default is everything except `admin`, "
+            "which gates only token minting, actor creation and instance ops "
+            "(init/migrate/backup/restore/serve) that no session needs. Scopes "
+            "are instance-wide and everything in the pod shares one uid, so a "
+            "narrower set here is more a rule to explain than a boundary it "
+            "enforces (FR-S10) — narrow it only if this instance truly wants to. "
+            "`admin` is accepted if an operator writes it: that is consent, not "
+            "a mistake to guard against. Per-session attribution is unchanged — "
+            "each session still mints its own actor-bound token; only the scope "
+            "set is shared."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_agent_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding the brokered agent token adopted at `init` — "
+            "the session-side mirror of `bootstrap_core_token_file` (#199). It "
+            "lets the pod-wide token an engine default shell or a command-launched "
+            "session brokers be a deploy-time secret instead of something minted "
+            "by a running core (an `admin` op plus an Infisical rotation plus an "
+            "engine restart). Its scopes are `agent_session_scopes` — the same "
+            "knob as `session.start` — so widening what sessions may do is "
+            "'change the secret, redeploy'. Idempotent: a boot that finds the "
+            "secret already present changes nothing. Unset, the mint-then-"
+            "configure path is unchanged."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_agent_token_actor: str = Field(
+        default="agent:vogt-sessions",
+        description=(
+            "Identity the adopted agent token is bound to, created if absent. "
+            "Audit rows name it, so it should say this stack's sessions acted — "
+            "not a person, and not something shared with another instance. "
+            "It must be an agent: every session's agent presents this token, "
+            "and bound to a person it would count as that person (granting "
+            "`bypass`, writing as them), so an existing person here fails "
+            "start-up (WI-926)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    session_ttl_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        description=(
+            "How long a session minted by a password login (`auth.login`) "
+            "stays valid without being used. The expiry slides: once less than "
+            "half of it is left, an authenticated request extends it to this "
+            "many days from then, so a device in regular use stays signed in. "
+            "A session is a token like any other — revocable by `auth.logout` "
+            "or `token.revoke` — so a browser or phone that is lost, or simply "
+            "left unused for this long, stops working on its own."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    install_bootstrap_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the unauthenticated first-run install bootstrap "
+            "(`POST /api/install/bootstrap`) may mint the first admin token "
+            "while no person holds a credential (agent-bound tokens such as "
+            "the adopted stack secret do not count). It is safe on the loopback "
+            "topology `serve` defaults to — only parties who could already "
+            "mint a token over loopback reach it — but a fronted deployment "
+            "proxies it through the public front door, so on every fresh "
+            "deploy or store reset there is a window where any internet caller "
+            "can take the instance. A deployment that creates its first "
+            "operator another way (`vogt user create --scopes admin` in the "
+            "container) never needs the HTTP bootstrap: set this `false` to "
+            "refuse it outright and close that window. When disabled the "
+            "status route reports the mode closed."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    sqlite_synchronous: Literal["off", "normal", "full", "extra"] = Field(
+        default="normal",
+        description=(
+            "How hard SQLite works to survive a power cut. `normal` is the "
+            "standard pairing for WAL and the default here; `full` fsyncs the "
+            "write-ahead log on every commit, which on a contended disk costs "
+            "tens of milliseconds per write. Under `normal` a power loss or "
+            "OS crash can lose the last few committed transactions — the "
+            "database is never corrupted, and an application crash loses "
+            "nothing. Set `full` if you would rather pay that cost per write."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    sweep_interval_seconds: int = Field(
+        default=900,
+        ge=0,
+        description=(
+            "How often `serve` runs collectors in the background. "
+            "Zero disables the schedule, leaving sweeps on-demand only. A "
+            "default rather than a required value because an instance that "
+            "never looks is the failure this product exists to prevent: "
+            "stale evidence and no evidence are indistinguishable from the "
+            "outside, so the safe default is to keep looking."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    watch_interval_seconds: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "How often `serve` evaluates armed watches (WI-2036) and wakes the "
+            "sessions whose trigger fired. Zero disables the loop: watches are "
+            "stored but nothing wakes. Vogt-side triggers (a work item's "
+            "state, a session ending) fire within this interval; forge "
+            "triggers read what the sweep observed, so they also wait on "
+            "`sweep_interval_seconds`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_compaction: bool = Field(
+        default=False,
+        description=(
+            "Cache-aware compaction on a cold wake (WI-2037). When on, waking "
+            "a hibernated session whose provider prompt cache has expired "
+            "(hibernated longer than its `cold_wake_ttl_seconds`) and whose "
+            "context is at least `cold_wake_threshold_tokens` starts a fresh "
+            "conversation seeded with a structured summary — task, state, "
+            "decisions, files, branch, next step — instead of resuming the "
+            "transcript at full uncached price. Off by default; a session "
+            "opts out with `cold_wake_opt_out` at start or hibernate."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_threshold_tokens: int = Field(
+        default=100_000,
+        ge=0,
+        description=(
+            "The context size, in tokens, at or above which a cold wake is "
+            "compacted (WI-2037). A smaller conversation is cheap enough to "
+            "re-read and is resumed as it is."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    cold_wake_ttl_seconds: dict[str, int] = Field(
+        default={"anthropic": 300, "deepseek": 300},
+        description=(
+            "Prompt-cache lifetime per provider, in seconds (WI-2037): a "
+            "session hibernated longer than this is treated as cold. Keys are "
+            "`anthropic`, `openai`, `deepseek`, `google`, … A provider with no "
+            "entry is never compacted, because its cache cannot be judged. "
+            "Anthropic's 1-hour cache tier is `anthropic = 3600`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    forge_posture_interval_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "How often the forge posture collector re-reads a repository's "
+            "update-automation settings (version-update config, vulnerability "
+            "alerts, automated security fixes). Posture changes rarely and "
+            "cost several API calls per repository, so the default is daily; "
+            "sweeps in between skip it. Zero reads it on every sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_rate_limit_floor: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "When GitHub reports fewer core API requests than this left in "
+            "the hour, forge reads stop until the limit resets instead of "
+            "spending the rest. The limit is per GitHub user and shared with "
+            "every other tool on that account. Zero never pauses early."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    verify_horizon_hours: int = Field(
+        default=24,
+        ge=1,
+        description=(
+            "How recently a subject must have been observed for a linked "
+            "declared entity to count as `verified` rather than `stale`. "
+            "Trust is computed from this, never hand-set."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    image_digest: str | None = Field(
+        default=None,
+        description=(
+            "The digest of the image this instance runs, as the deployment "
+            "pinned it (e.g. `sha256:...`), reported by "
+            "`instance.diagnostics`. A running container cannot see its own "
+            "digest, so the deployment states it — typically by setting "
+            "`VOGT_IMAGE_DIGEST` from the same value Compose pins. Unset is "
+            "reported as unknown, never guessed."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    diagnostics_peer_url: str | None = Field(
+        default=None,
+        description=(
+            "The REST base of a peer Vogt instance (e.g. prod for a dev "
+            "instance) that `instance.diagnostics --peer` asks for its "
+            "diagnostics: the core's `/api` prefix, or a front door's "
+            "`/api/vogt`, e.g. `https://vogt.example.com/api/vogt`. Lets an "
+            "agent confirm a peer's deploy without tailnet or orchestrator "
+            "access. An exposure value, so it is never guessed; unset means "
+            "the peer half of the answer says it is not configured."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
+    diagnostics_peer_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding a read-scoped token for "
+            "`diagnostics_peer_url`. A file rather than an environment "
+            "variable for the same reason as `github_token_file`. Unset sends "
+            "no credential, which a peer that requires authentication refuses."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+
+    @field_validator("agent_activity_roots")
+    @classmethod
+    def _known_transcript_formats(cls, roots: dict[str, Path]) -> dict[str, Path]:
+        unknown = sorted(set(roots) - {"claude", "codex"})
+        if unknown:
+            msg = (
+                f"transcript root keys must be 'claude' or 'codex', "
+                f"not {', '.join(map(repr, unknown))}"
+            )
+            raise ValueError(msg)
+        return roots
+
+    @field_validator("session_transcript_roots")
+    @classmethod
+    def _known_session_agents(cls, roots: dict[str, Path]) -> dict[str, Path]:
+        unknown = sorted(set(roots) - {"claude", "codex"})
+        if unknown:
+            msg = (
+                f"session transcript root keys must be 'claude' or 'codex', "
+                f"not {', '.join(map(repr, unknown))}"
+            )
+            raise ValueError(msg)
+        return roots
+
+    @field_validator("agent_activity_services")
+    @classmethod
+    def _compilable_service_patterns(cls, patterns: dict[str, str]) -> dict[str, str]:
+        for name, pattern in patterns.items():
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                msg = f"agent_activity_services[{name!r}] is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        return patterns
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            _TomlFileSource(settings_cls),
+            file_secret_settings,
+        )
+
+    @property
+    def declared_db_path(self) -> Path:
+        return self.resolved_data_dir / DECLARED_DB_NAME
+
+    @property
+    def observed_db_path(self) -> Path:
+        return self.resolved_data_dir / OBSERVED_DB_NAME
+
+    @property
+    def backups_dir(self) -> Path:
+        return self.resolved_data_dir / BACKUPS_DIR_NAME
+
+    @property
+    def resolved_data_dir(self) -> Path:
+        return self.data_dir.expanduser()
+
+    @property
+    def resolved_import_root(self) -> Path:
+        """Where `project.import` clones to.
+
+        Derived from `data_dir` when unset, which is why the field itself is
+        optional while the *value* always exists: a default factory cannot
+        see another field, and an allocation value must never be a gate.
+        """
+        if self.import_root is not None:
+            return self.import_root.expanduser()
+        return self.resolved_data_dir / IMPORT_DIR_NAME
+
+
+def load_config(**overrides: Any) -> VogtConfig:
+    """Build the configuration, applying the documented precedence."""
+    return VogtConfig(**overrides)
+
+
+@dataclass(frozen=True)
+class FieldDoc:
+    """One documented configuration field, as the generators see it."""
+
+    name: str
+    env_var: str
+    type_label: str
+    default_label: str
+    policy: DefaultPolicy
+    description: str
+
+
+_SCALAR_NAMES = {str: "string", int: "integer", float: "number", bool: "boolean"}
+
+
+def _label_for(annotation: Any) -> str:
+    """Name one type in prose, never by its module path.
+
+    `str(annotation)` is not usable here: it renders `Path` as
+    `pathlib.Path` on Python 3.11 and `pathlib._local.Path` on 3.13, so the
+    generated documentation differed by interpreter and the drift check
+    failed on one version of the CI matrix and not the other. Documentation
+    should not leak where the standard library happens to keep a class.
+    """
+    if annotation is Path:
+        return "path"
+    if annotation in _SCALAR_NAMES:
+        return _SCALAR_NAMES[annotation]
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return "one of " + ", ".join(f"`{arg}`" for arg in args)
+    if origin in (tuple, list, set, frozenset):
+        inner = args[0] if args else str
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            return f"list of `{inner.__name__}` tables"
+        return f"list of {_SCALAR_NAMES.get(inner, 'values')}s"
+    if origin is dict:
+        key, value = (args[0], args[1]) if len(args) == 2 else (str, str)
+        return f"map of {_label_for(key)} to {_label_for(value)}"
+    if origin in (Union, UnionType):
+        present = [arg for arg in args if arg is not type(None)]
+        rendered = " or ".join(_label_for(arg) for arg in present)
+        return f"{rendered}, optional" if len(present) < len(args) else rendered
+    return getattr(annotation, "__name__", "value")
+
+
+def _type_label(field: FieldInfo) -> str:
+    """Describe a field's type in prose that survives a Markdown table.
+
+    Deliberately not `repr(annotation)`: a `Literal` renders as
+    `'debug' | 'info' | ...`, and those pipes silently split the generated
+    table into extra columns. The generated docs are the only description of
+    these settings there is, so they have to be right.
+    """
+    return _label_for(field.annotation)
+
+
+def _default_label(name: str, field: FieldInfo) -> str:
+    if field.default_factory is not None:
+        if name == "data_dir":
+            return "`$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt`"
+        if name in (
+            "forge_token_files",
+            "agent_activity_roots",
+            "agent_activity_services",
+        ):
+            return "*(empty)*"
+        if name == "session_transcript_roots":
+            return '`claude = "~/.claude/projects"`, `codex = "~/.codex/sessions"`'
+        return "computed"  # pragma: no cover - no other factory fields yet
+    if name == "import_root":
+        # Derived from another field, so it cannot be a factory — but it is
+        # an allocation value and documenting it as "no default" would be a
+        # lie the policy test would rightly fail on.
+        return "`<data_dir>/repos`"
+    if field.default is None:
+        return "*(no default — must be set)*"
+    if isinstance(field.default, tuple):
+        if not field.default:
+            return "*(empty)*"
+        return ", ".join(f"`{entry}`" for entry in field.default)
+    return f"`{field.default}`"
+
+
+def _policy_of(field: FieldInfo) -> DefaultPolicy:
+    extra = field.json_schema_extra
+    if isinstance(extra, dict):
+        value = extra.get("default_policy")
+        if value == "exposure":
+            return "exposure"
+        if value == "allocation":
+            return "allocation"
+        if value == "behaviour":
+            return "behaviour"
+    msg = "every config field must declare a default_policy"
+    raise ValueError(msg)
+
+
+def describe_fields() -> list[FieldDoc]:
+    """Introspect the schema — the input to every generated artefact."""
+    docs: list[FieldDoc] = []
+    for name, field in VogtConfig.model_fields.items():
+        docs.append(
+            FieldDoc(
+                name=name,
+                env_var=f"{ENV_PREFIX}{name.upper()}",
+                type_label=_type_label(field),
+                default_label=_default_label(name, field),
+                policy=_policy_of(field),
+                description=field.description or "",
+            )
+        )
+    return docs
+
+
+_GENERATED_BANNER = (
+    "<!-- Generated by scripts/gen_config_docs.py from src/vogt/config.py. "
+    "Do not edit by hand; CI fails on drift. -->"
+)
+
+
+def render_config_reference() -> str:
+    """Render `docs/CONFIG.md` from the schema."""
+    fields = describe_fields()
+    lines = [
+        _GENERATED_BANNER,
+        "",
+        "# Vogt — Configuration Reference",
+        "",
+        "Every value below comes from `src/vogt/config.py`, which is the",
+        "single source of truth. Precedence, highest first:",
+        "explicit arguments, `VOGT_*` environment variables, the TOML file",
+        f"named by `{CONFIG_FILE_ENV}`, then the defaults shown here.",
+        "",
+        "## Settings",
+        "",
+        "| Setting | Env var | Type | Default | Default policy |",
+        "|---|---|---|---|---|",
+    ]
+    for field in fields:
+        lines.append(
+            f"| `{field.name}` | `{field.env_var}` | {field.type_label} "
+            f"| {field.default_label} | {field.policy} |"
+        )
+    lines += ["", "## What each setting decides", ""]
+    for field in fields:
+        lines += [f"### `{field.name}`", "", field.description, ""]
+    lines += [
+        "## Default policy",
+        "",
+        "- **exposure** — hostnames, bind addresses, published ports, URLs a",
+        "  client will trust. These never carry a default, in code, images,",
+        "  docs or examples.",
+        "- **allocation** — paths and slots on a host the operator owns.",
+        "  These always carry a default: gating them produces broken deploys,",
+        "  not safety (`DEPLOYMENT.md`, Configuration).",
+        "- **behaviour** — tuning that decides neither; unconstrained.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_example_config() -> str:
+    """Render `config.example.toml` from the schema."""
+    fields = describe_fields()
+    lines = [
+        "# Generated by scripts/gen_config_docs.py from src/vogt/config.py.",
+        "# Do not edit by hand; CI fails on drift.",
+        "#",
+        "# Every setting is commented out and shows its default. Point Vogt at",
+        f"# a copy of this file with {CONFIG_FILE_ENV}=/path/to/vogt.toml.",
+        "",
+    ]
+    for field in fields:
+        lines += [f"# {field.description}", f"# default policy: {field.policy}"]
+        example = _example_value(field)
+        lines += [f"# {field.name} = {example}", ""]
+    return "\n".join(lines)
+
+
+def _example_value(field: FieldDoc) -> str:
+    """Render a field's default the way a TOML file would spell it."""
+    default = VogtConfig.model_fields[field.name].default
+    if field.name == "data_dir":
+        return '"/var/lib/vogt"'
+    if field.name == "import_root":
+        return '"/var/lib/vogt/repos"'
+    if field.name == "forge_token_files":
+        # An inline table shows the shape an operator gets wrong — the host is
+        # the key, the token *file* the value — where an empty `{}` would not.
+        return '{ "github.com" = "/run/secrets/github_token" }'
+    if field.name == "agent_activity_roots":
+        return '{ claude = "~/.claude/projects", codex = "~/.codex/sessions" }'
+    if field.name == "session_transcript_roots":
+        return '{ claude = "~/.claude/projects", codex = "~/.codex/sessions" }'
+    if field.name == "agent_activity_services":
+        return "{ ci = 'ci\\.example\\.org' }"
+
+    if field.name == "deploy_lanes":
+        return (
+            '[{ name = "dev", project = "my-app", version_url = '
+            '"https://dev.example.com/api/config" }]'
+        )
+    if field.name == "public_url":
+        # Shown as an example rather than `null`, because an exposure value
+        # with no default still has a *shape*, and the shape is the part an
+        # operator gets wrong.
+        return '"https://vogt.example.com"'
+    if isinstance(default, tuple):
+        rendered = ", ".join(json.dumps(entry) for entry in default)
+        return f"[{rendered}]"
+    if isinstance(default, bool):
+        return "true" if default else "false"
+    if isinstance(default, int):
+        return str(default)
+    return json.dumps(default)
+
+
+def config_artifacts(root: Path) -> Mapping[Path, str]:
+    """The generated files, keyed by their committed location."""
+    return {
+        root / "docs" / "CONFIG.md": render_config_reference(),
+        root / "config.example.toml": render_example_config(),
+    }

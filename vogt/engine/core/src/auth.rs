@@ -1,0 +1,433 @@
+//! Authorization. Ports `src/vogt/core/auth.py`.
+//!
+//! A token is 256 bits of randomness, so it is hashed with plain SHA-256: the
+//! digest of an existing token must match one the Python core stored, or the
+//! swap locks everyone out. A password is chosen by a person, so it gets
+//! scrypt, in the same `scrypt$n$r$p$salt$hash` form.
+
+#![allow(dead_code)]
+use subtle::ConstantTimeEq;
+
+pub const ALL_SCOPES: [&str; 5] = ["read", "work.write", "project.write", "admin", "writeback"];
+pub const TOKEN_PREFIX: &str = "vogt_";
+pub const MIN_ADOPTED_SECRET_LEN: usize = 24;
+
+pub const PASSWORD_SCHEME: &str = "scrypt";
+pub const PASSWORD_SCRYPT_N: u32 = 1 << 15;
+pub const PASSWORD_SCRYPT_R: u32 = 8;
+pub const PASSWORD_SCRYPT_P: u32 = 1;
+const PASSWORD_HASH_BYTES: usize = 32;
+pub const MIN_PASSWORD_LEN: usize = 8;
+pub const MAX_PASSWORD_LEN: usize = 1024;
+
+pub const USERNAME_MIN_LEN: usize = 2;
+pub const USERNAME_MAX_LEN: usize = 64;
+
+/// SHA-256 hex of the UTF-8 secret. `hashlib.sha256`.
+pub fn hash_token(secret: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
+
+/// Constant-time comparison of a secret against a stored token hash.
+pub fn matches(secret: &str, token_hash: &str) -> bool {
+    constant_time_eq(hash_token(secret).as_bytes(), token_hash.as_bytes())
+}
+
+/// Take an operator-supplied secret as a credential. Under 24 characters is
+/// refused, with the message `adopt` raises.
+pub fn adopt(secret: &str) -> Result<String, String> {
+    if secret.chars().count() < MIN_ADOPTED_SECRET_LEN {
+        return Err(format!(
+            "a supplied token must be at least {MIN_ADOPTED_SECRET_LEN} characters, not {} — \
+             generate one with `openssl rand -hex 32`",
+            secret.chars().count()
+        ));
+    }
+    Ok(hash_token(secret))
+}
+
+/// 32 bytes of randomness, the same length `secrets.token_urlsafe` draws.
+pub const TOKEN_ENTROPY_BYTES: usize = 32;
+
+/// Mint a new token. The secret is returned once, beside the hash that is all
+/// this database keeps. The randomness comes from the caller, so a test hands
+/// in fixed bytes and a deployment hands in the output of the system RNG.
+pub fn issue(entropy: &[u8; TOKEN_ENTROPY_BYTES]) -> (String, String) {
+    use base64::Engine;
+    let secret = format!(
+        "{TOKEN_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entropy)
+    );
+    (secret.clone(), hash_token(&secret))
+}
+
+/// A comma-separated scope list. Unknown and empty are both errors.
+pub fn parse_scopes(raw: &str) -> Result<Vec<&str>, String> {
+    let mut parsed = Vec::new();
+    for part in raw.split(',') {
+        let candidate = part.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if !ALL_SCOPES.contains(&candidate) {
+            return Err(format!(
+                "unknown scope '{candidate}' (known: {})",
+                ALL_SCOPES.join(", ")
+            ));
+        }
+        parsed.push(candidate);
+    }
+    if parsed.is_empty() {
+        return Err("a token needs at least one scope".to_string());
+    }
+    Ok(parsed)
+}
+
+/// What each scope grants, including itself. `admin` grants everything; the
+/// three write scopes each grant `read` and nothing else.
+const IMPLIED: [(&str, &[&str]); 5] = [
+    ("admin", &ALL_SCOPES),
+    ("project.write", &["project.write", "read"]),
+    ("work.write", &["work.write", "read"]),
+    ("writeback", &["writeback", "read"]),
+    ("read", &["read"]),
+];
+
+pub const WRITES_DISABLED: &str = "writes_disabled";
+pub const MISSING_SCOPE: &str = "missing_scope";
+pub const TOKEN_OK: &str = "token_valid";
+
+/// Whether a grant permits an operation. Writes are refused before scopes are
+/// consulted, because no token can grant a write the process refuses to make.
+pub fn allows(
+    scopes: &[&str],
+    writes_enabled: bool,
+    scope: &str,
+    mutating: bool,
+) -> (bool, &'static str) {
+    if mutating && !writes_enabled {
+        return (false, WRITES_DISABLED);
+    }
+    let granted = effective(scopes);
+    if granted.iter().any(|held| held == &scope) {
+        (true, TOKEN_OK)
+    } else {
+        (false, MISSING_SCOPE)
+    }
+}
+
+pub fn effective<'a>(scopes: &[&'a str]) -> Vec<&'a str> {
+    let mut granted = Vec::new();
+    for scope in scopes {
+        let implied: &[&str] = IMPLIED
+            .iter()
+            .find(|(name, _)| name == scope)
+            .map(|(_, implied)| *implied)
+            .unwrap_or(&[]);
+        let itself: &[&str] = &[scope];
+        let implied = if implied.is_empty() { itself } else { implied };
+        for scope in implied {
+            if !granted.contains(scope) {
+                granted.push(*scope);
+            }
+        }
+    }
+    granted
+}
+
+pub fn is_expired(expires_at: Option<crate::core::Moment>, now: crate::core::Moment) -> bool {
+    expires_at.is_some_and(|expires| expires <= now)
+}
+
+/// The later expiry a session token in use earns. Only a `session` whose
+/// remaining life is at most half its ttl slides; anything else is unchanged.
+pub fn renewed_expiry(
+    kind: &str,
+    expires_at: Option<crate::core::Moment>,
+    now: crate::core::Moment,
+    ttl_seconds: i64,
+) -> Option<crate::core::Moment> {
+    if kind != "session" {
+        return None;
+    }
+    let expires = expires_at?;
+    let remaining = expires.seconds_since(now);
+    if remaining <= 0.0 || remaining > ttl_seconds as f64 / 2.0 {
+        return None;
+    }
+    Some(crate::core::Moment::from_unix(
+        now.unix_seconds() + ttl_seconds,
+        now.nanos(),
+    ))
+}
+
+/// `scrypt$n$r$p$<salt>$<hash>`, the form `hash_password` stores.
+pub fn hash_password(password: &str, salt: &[u8]) -> Result<String, String> {
+    hash_password_at(
+        password,
+        salt,
+        PASSWORD_SCRYPT_N,
+        PASSWORD_SCRYPT_R,
+        PASSWORD_SCRYPT_P,
+    )
+}
+
+/// The same stored form at a chosen cost. Tests pass a small `n` so a suite
+/// does not pay the production scrypt five times over; nothing else should.
+pub fn hash_password_at(
+    password: &str,
+    salt: &[u8],
+    n: u32,
+    r: u32,
+    p: u32,
+) -> Result<String, String> {
+    check_password_length(password)?;
+    let digest = scrypt_of(password, salt, n, r, p).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "{PASSWORD_SCHEME}${n}${r}${p}${}${}$",
+        b64(salt),
+        b64(&digest)
+    )
+    .trim_end_matches('$')
+    .to_string())
+}
+
+/// A malformed stored value verifies as false rather than raising.
+pub fn verify_password(password: &str, stored: &str) -> bool {
+    let Ok(stored) = parse_stored(stored) else {
+        return false;
+    };
+    let Ok(candidate) = scrypt_of(password, &stored.salt, stored.n, stored.r, stored.p) else {
+        return false;
+    };
+    constant_time_eq(&candidate, &stored.expected)
+}
+
+struct StoredPassword {
+    salt: Vec<u8>,
+    expected: Vec<u8>,
+    n: u32,
+    r: u32,
+    p: u32,
+}
+
+fn parse_stored(stored: &str) -> Result<StoredPassword, String> {
+    let mut parts = stored.split('$');
+    let scheme = parts.next().ok_or("short")?;
+    let n: u32 = parts.next().ok_or("short")?.parse().map_err(|_| "n")?;
+    let r: u32 = parts.next().ok_or("short")?.parse().map_err(|_| "r")?;
+    let p: u32 = parts.next().ok_or("short")?.parse().map_err(|_| "p")?;
+    let salt = unb64(parts.next().ok_or("short")?)?;
+    let expected = unb64(parts.next().ok_or("short")?)?;
+    if scheme != PASSWORD_SCHEME || parts.next().is_some() {
+        return Err("malformed".to_string());
+    }
+    Ok(StoredPassword {
+        salt,
+        expected,
+        n,
+        r,
+        p,
+    })
+}
+
+fn check_password_length(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "a password must be at least {MIN_PASSWORD_LEN} characters"
+        ));
+    }
+    if password.chars().count() > MAX_PASSWORD_LEN {
+        return Err(format!(
+            "a password must be at most {MAX_PASSWORD_LEN} characters"
+        ));
+    }
+    Ok(())
+}
+
+fn scrypt_of(password: &str, salt: &[u8], n: u32, r: u32, p: u32) -> Result<Vec<u8>, String> {
+    // hashlib.scrypt refuses an n that is not a power of two of at least 2, and
+    // bounds memory with maxmem=128*n*r*2. The rust crate has no such bound, so
+    // a stored row — which is untrusted — is refused before it can allocate.
+    if n < 2 || !n.is_power_of_two() || r == 0 || p == 0 {
+        return Err("scrypt parameters rejected".to_string());
+    }
+    let memory = 128u128 * n as u128 * r as u128 * 2;
+    if memory > 128 * (PASSWORD_SCRYPT_N as u128) * (PASSWORD_SCRYPT_R as u128) * 2 {
+        return Err("scrypt parameters exceed the memory cap".to_string());
+    }
+    let params = scrypt::Params::new(n.ilog2() as u8, r, p).map_err(|err| err.to_string())?;
+    let mut out = vec![0u8; PASSWORD_HASH_BYTES];
+    scrypt::scrypt(password.as_bytes(), salt, &params, &mut out).map_err(|err| err.to_string())?;
+    Ok(out)
+}
+
+fn b64(raw: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+fn unb64(text: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .map_err(|err| err.to_string())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.ct_eq(right).into()
+}
+
+/// Lower-case letters, digits, dots, dashes and underscores, 2 to 64 long,
+/// starting with a letter or digit.
+pub fn normalise_username(raw: &str) -> Result<String, String> {
+    let username = raw.trim().to_lowercase();
+    if !(USERNAME_MIN_LEN..=USERNAME_MAX_LEN).contains(&username.chars().count()) {
+        return Err(format!(
+            "a username is {USERNAME_MIN_LEN} to {USERNAME_MAX_LEN} characters, not {}",
+            username.chars().count()
+        ));
+    }
+    let ok = username
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || "._-".contains(ch));
+    if !ok || "._-".contains(username.chars().next().unwrap_or(' ')) {
+        return Err(
+            "a username is lower-case letters, digits, '.', '-' and '_', starting with a letter \
+             or digit"
+                .to_string(),
+        );
+    }
+    Ok(username)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_hashes_to_the_python_digest() {
+        // hashlib.sha256 of this secret, computed by the Python core.
+        assert_eq!(
+            hash_token("vogt_test-secret-0123456789abcdef"),
+            "daf738d90b35de22b4c68868489cfb8a3a5be6951876c7f6dab581140d56e2f9"
+        );
+        assert!(matches(
+            "vogt_test-secret-0123456789abcdef",
+            "daf738d90b35de22b4c68868489cfb8a3a5be6951876c7f6dab581140d56e2f9"
+        ));
+        assert!(!matches(
+            "vogt_other",
+            &hash_token("vogt_test-secret-0123456789abcdef")
+        ));
+        let (secret, hash) = issue(&[0; TOKEN_ENTROPY_BYTES]);
+        assert!(secret.starts_with(TOKEN_PREFIX));
+        assert_eq!(hash, hash_token(&secret));
+        assert!(matches(&secret, &hash));
+    }
+
+    #[test]
+    fn a_password_verifies_against_a_python_stored_hash() {
+        // hash_password("correct horse") from the Python core.
+        let stored =
+            "scrypt$32768$8$1$D6LetWsIp8LWFkbfFhFTGQ$AgKiDhUsl0ma6jQJK3pav_4a0C7pVZTBpGRxhth5aOg";
+        assert!(verify_password("correct horse", stored));
+        assert!(!verify_password("wrong horse", stored));
+        assert!(!verify_password("correct horse", "not-a-hash"));
+        assert!(!verify_password("correct horse", "bcrypt$1$2$3$aa$bb"));
+        // n=0 panics in ilog2, and n=32769 is not a power of two. Python
+        // returns False for both; so must this.
+        let tail = stored.split_once('$').unwrap().1.split_once('$').unwrap().1;
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$0${tail}")
+        ));
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$32769${tail}")
+        ));
+        // A stored n above the shipped parameters would allocate without bound.
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$65536${tail}")
+        ));
+    }
+
+    #[test]
+    fn adopt_refuses_a_short_secret_and_scopes_reject_the_unknown() {
+        let err = adopt("changeme").unwrap_err();
+        assert!(err.contains("at least 24 characters, not 8"), "{err}");
+        assert!(parse_scopes("read, work.write").is_ok());
+        let err = parse_scopes("read, sudo").unwrap_err();
+        assert!(err.contains("unknown scope 'sudo'"), "{err}");
+        assert!(parse_scopes(" , ")
+            .unwrap_err()
+            .contains("at least one scope"));
+    }
+
+    #[test]
+    fn lengths_count_characters_not_bytes() {
+        // Seven characters, fourteen bytes. Python refuses it; so must this.
+        assert!(hash_password("äääääää", b"0123456789abcdef").is_err());
+        assert!(adopt("ääääääääääää").is_err());
+        let err = normalise_username("ä").unwrap_err();
+        assert!(err.contains("not 1"), "{err}");
+    }
+
+    #[test]
+    fn every_scope_implies_exactly_what_python_says() {
+        // admin grants all five; each write scope grants itself and read;
+        // read grants only itself. Writes are refused before scopes.
+        // The full 5×5 of held × wanted, plus a write refused on every scope.
+        let scopes = ["admin", "project.write", "work.write", "writeback", "read"];
+        let grants: [&[&str]; 5] = [
+            &["admin", "project.write", "work.write", "writeback", "read"],
+            &["project.write", "read"],
+            &["work.write", "read"],
+            &["writeback", "read"],
+            &["read"],
+        ];
+        for (held, granted) in scopes.iter().zip(grants) {
+            for wanted in scopes {
+                assert_eq!(
+                    allows(&[held], true, wanted, false).0,
+                    granted.contains(&wanted),
+                    "{held}->{wanted}"
+                );
+            }
+            assert_eq!(
+                allows(&[held], false, held, true).1,
+                WRITES_DISABLED,
+                "{held} write"
+            );
+        }
+        // A scope the table does not know implies itself, matching Python's
+        // frozenset({scope}) fallback.
+        assert!(allows(&["legacy"], true, "legacy", false).0);
+        assert_eq!(
+            allows(&["read"], true, "work.write", false).1,
+            MISSING_SCOPE
+        );
+    }
+
+    #[test]
+    fn a_username_is_folded_and_bounded() {
+        assert_eq!(normalise_username(" Ada ").unwrap(), "ada");
+        assert!(normalise_username(".ada").is_err());
+        assert!(normalise_username("a").is_err());
+        assert!(normalise_username("ada lovelace").is_err());
+    }
+
+    #[test]
+    fn only_a_session_past_half_its_life_slides() {
+        let now = crate::core::from_iso("2026-01-02T00:00:00Z").unwrap();
+        let soon = crate::core::Moment::from_unix(now.unix_seconds() + 1000, 0);
+        let fresh = crate::core::Moment::from_unix(now.unix_seconds() + 9000, 0);
+        let ttl = 3600;
+        assert!(renewed_expiry("session", Some(soon), now, ttl).is_some());
+        assert!(renewed_expiry("session", Some(fresh), now, ttl).is_none());
+        assert!(renewed_expiry("api", Some(soon), now, ttl).is_none());
+        assert!(renewed_expiry("session", None, now, ttl).is_none());
+    }
+}

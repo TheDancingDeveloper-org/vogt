@@ -1,0 +1,172 @@
+# Read-only MCP tools the suite calls with the smallest plausible arguments.
+#
+# A 4xx (or a typed `isError` refusal) is an acceptable answer here: the check
+# is that the surface does not 5xx or crash on ordinary use, not that this
+# instance has data. A 5xx, a transport failure or an HTML body is a failure.
+#
+# `requirement` is the matrix row the call is evidence for.
+
+[[call]]
+tool = "project_list"
+args = {}
+requirement = "T1"
+
+[[call]]
+tool = "project_get"
+args = { slug = "vogt" }
+requirement = "T1"
+
+[[call]]
+tool = "work_list"
+args = {}
+requirement = "T1"
+
+[[call]]
+tool = "work_get"
+args = { ref = "WI-1" }
+requirement = "T1"
+
+[[call]]
+tool = "board_list"
+args = { cells = [] }
+requirement = "T1"
+
+[[call]]
+tool = "backlog"
+args = {}
+requirement = "T1"
+
+[[call]]
+tool = "bugs"
+args = {}
+requirement = "T1"
+
+[[call]]
+tool = "status"
+args = {}
+requirement = "O1"
+
+[[call]]
+tool = "registry_dump"
+args = {}
+requirement = "W1"
+
+[[call]]
+tool = "instance_diagnostics"
+args = {}
+requirement = "O1"
+
+[[call]]
+tool = "engine_status"
+args = {}
+requirement = "O1"
+
+[[call]]
+tool = "session_list"
+args = {}
+requirement = "S1"
+
+[[call]]
+tool = "session_sweep"
+args = { states = [] }
+requirement = "S1"
+
+[[call]]
+tool = "session_template_list"
+args = {}
+requirement = "S6"
+
+[[call]]
+tool = "label_list"
+args = {}
+requirement = "T2"
+
+[[call]]
+tool = "initiative_list"
+args = {}
+requirement = "T2"
+
+[[call]]
+tool = "actor_list"
+args = {}
+requirement = "T2"
+
+[[call]]
+tool = "workflow_list"
+args = {}
+requirement = "T2"
+
+[[call]]
+tool = "coverage"
+args = {}
+requirement = "O3"
+
+[[call]]
+tool = "observations_list"
+args = {}
+requirement = "O3"
+
+[[call]]
+tool = "drift_list"
+args = {}
+requirement = "T4"
+
+[[call]]
+tool = "inbox_list"
+args = {}
+requirement = "T5"
+
+[[call]]
+tool = "notifications"
+args = {}
+requirement = "T5"
+
+[[call]]
+tool = "deployed_versions"
+args = {}
+requirement = "R1"
+
+[[call]]
+tool = "usage_board"
+args = {}
+requirement = "B2"
+
+[[call]]
+tool = "forge_repos"
+args = {}
+requirement = "T4"
+
+[[call]]
+tool = "forge_account_status"
+args = {}
+requirement = "T4"
+
+[[call]]
+tool = "audit_list"
+args = { limit = 1 }
+requirement = "T2"
+
+[[call]]
+tool = "events_list"
+args = { limit = 1 }
+requirement = "T2"
+
+[[call]]
+tool = "session_changes"
+args = {}
+requirement = "D1"
+
+[[call]]
+tool = "place_metrics"
+args = {}
+requirement = "U1"
+
+[[call]]
+tool = "charter_get"
+args = { scope = "workspace" }
+requirement = "W1"
+
+[[call]]
+tool = "preference_get"
+args = {}
+requirement = "U1"

@@ -1,0 +1,5 @@
+{"type":"assistant","timestamp":"2026-10-11T02:00:00.000Z","message":{"content":"héllo — ✓ 😀"}}
+{"type":"user","message":{"content":[{"type":"tool_result","name":"Read","input":{"file_path":"/ü.py"},"content":"naïve café"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","name":"Grep","input":{"pattern":"é😀\n\"q\""}}]}}
+{"type":"assistant","timestamp":"2026-10-11T02:00:00.002Z","message":{"content":"ok"}}
+{"type":"assistant","timestamp":"2026-10-11T02:00:00.005Z","message":{"content":"ünïcödé"}}

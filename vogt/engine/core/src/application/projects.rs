@@ -1,0 +1,2500 @@
+//! Projects: registration, scaffolding, the per-repo brief, lifecycle.
+//! Ports `src/vogt/application/services/projects.py`.
+//!
+//! `project.import` clones, registers and, unless `consolidate: false`, reads the
+//! repository's existing forge state through `forge.onboard`.
+
+use std::path::{Component, Path, PathBuf};
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::adapters::forge::registry::{identity_for, provider_for_host, ForgeClient};
+use crate::adapters::forge::KIND_DEPLOY_LANE;
+use crate::adapters::forge::{ForgeProvider, RepoRef};
+use crate::adapters::git::CloneRequest;
+use crate::application::context::{write_of, AppContext, Built};
+use crate::application::resolve;
+use crate::application::services::{context_parts, next_id, now_of};
+use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
+use crate::core::{
+    py_repr, slugify, Clock, CodingSession, ComplianceStatus, IdFactory, InitiativeState,
+    LinkState, Moment, Project, ProjectLifecycle, TrustState, WorkItem, IN_PROGRESS, LOCAL_SCHEME,
+    TERMINAL_STATES,
+};
+use crate::decisions::{default_scaffold, roll_up, Scaffold, NOT_APPLICABLE};
+use crate::errors::VogtError;
+use crate::storage::interface::{
+    DeclaredStore, ObservedStore, ProjectUpdate, ReadView, WorkFilter, WriteTxn,
+};
+use crate::storage::sqlite::declared::SqliteDeclaredStore;
+
+/// `models.py` `DEFAULT_EXCLUSIONS`.
+const DEFAULT_EXCLUSIONS: &[&str] = &[
+    ".venv/",
+    "node_modules/",
+    "target/",
+    "dist/",
+    "build/",
+    ".git/",
+    ".claude/",
+];
+
+const PROJECT_REGISTER: &str = "project.register";
+const PROJECT_TRANSITION: &str = "project.transition";
+const PROJECT_UPDATE: &str = "project.update";
+const PROJECT_SCAFFOLD: &str = "project.scaffold";
+
+const PROJECT_REGISTERED_EVENT: &str = "project.registered";
+const PROJECT_TRANSITIONED_EVENT: &str = "project.transitioned";
+const PROJECT_UPDATED_EVENT: &str = "project.updated";
+const PROJECT_SCAFFOLDED_EVENT: &str = "project.scaffolded";
+
+/// `dep_refs.py` `KIND_DEP_SCAN`. The collector itself is not ported; the kind
+/// string is what the observed store is queried by.
+const KIND_DEP_SCAN: &str = "dep_scan";
+
+// --- parameters -------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterProjectParams {
+    name: String,
+    root_path: String,
+    #[serde(default)]
+    repo_url: Option<String>,
+    #[serde(default = "default_active")]
+    lifecycle_state: String,
+    #[serde(default)]
+    exclusions: Option<Vec<String>>,
+    reason: String,
+}
+
+fn default_active() -> String {
+    "active".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateProjectParams {
+    name: String,
+    root_path: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    repo_url: Option<String>,
+    #[serde(default = "default_incubating")]
+    lifecycle_state: String,
+    reason: String,
+}
+
+fn default_incubating() -> String {
+    "incubating".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateProjectParams {
+    slug: String,
+    #[serde(default)]
+    repo_url: Option<String>,
+    #[serde(default)]
+    exclusions: Option<Vec<String>>,
+    #[serde(default)]
+    mcp_extra: Option<Vec<String>>,
+    #[serde(default)]
+    agent_policy: Option<crate::application::models::AgentPolicy>,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransitionProjectParams {
+    slug: String,
+    to_state: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetProjectParams {
+    slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListProjectsParams {
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    mode: String,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectBriefParams {
+    slug: String,
+    #[serde(default = "default_backlog_limit")]
+    backlog_limit: i64,
+    #[serde(default = "default_mode")]
+    mode: String,
+}
+
+fn default_backlog_limit() -> i64 {
+    10
+}
+
+fn default_mode() -> String {
+    "summary".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScaffoldProjectParams {
+    project: String,
+    reason: String,
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, VogtError> {
+    serde_json::from_value(params).map_err(|err| VogtError::InvalidRequest(err.to_string()))
+}
+
+/// Pydantic aliases `project` and `id` onto `slug` before `extra=forbid` runs,
+/// so a brief that names the project that way is not an unknown field.
+fn brief_params(mut params: Value) -> Result<ProjectBriefParams, VogtError> {
+    if let Value::Object(map) = &mut params {
+        if !map.contains_key("slug") {
+            if let Some(alias) = map.remove("project").or_else(|| map.remove("id")) {
+                map.insert("slug".to_string(), alias);
+            }
+        }
+        map.remove("project");
+        map.remove("id");
+    }
+    let parsed = parse::<ProjectBriefParams>(params)?;
+    if !(1..=100).contains(&parsed.backlog_limit) {
+        return Err(VogtError::InvalidRequest(
+            "backlog_limit must be between 1 and 100".to_string(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn list_params(params: Value) -> Result<ListProjectsParams, VogtError> {
+    let parsed = parse::<ListProjectsParams>(params)?;
+    if !(1..=500).contains(&parsed.limit) {
+        return Err(VogtError::InvalidRequest(
+            "limit must be between 1 and 500".to_string(),
+        ));
+    }
+    if parsed.offset < 0 {
+        return Err(VogtError::InvalidRequest(
+            "offset must be 0 or greater".to_string(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_lifecycle(value: &str) -> Result<ProjectLifecycle, VogtError> {
+    value.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!("unknown lifecycle state {}", py_repr(value)))
+    })
+}
+
+// --- the operation arms -----------------------------------------------------
+
+pub fn register_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| register_project(ctx, params))
+}
+pub fn create_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| create_project(ctx, params))
+}
+pub fn scaffold_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| scaffold_project(ctx, params))
+}
+pub fn update_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| update_project(ctx, params))
+}
+pub fn transition_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| transition_project(ctx, params))
+}
+pub fn get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| get_project(ctx, params))
+}
+pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| list_projects(ctx, params))
+}
+pub fn brief_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| brief_project(ctx, params))
+}
+
+// --- registration -----------------------------------------------------------
+
+/// `pathlib.Path.expanduser`, without `resolve`. `~` is the current user's
+/// home; `~other` is left as written, matching Python when the name is unknown.
+fn expand_user(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let text = first.to_string_lossy();
+    if text == "~" {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        return match home {
+            Some(home) => home.join(components.as_path()),
+            None => path.to_path_buf(),
+        };
+    }
+    path.to_path_buf()
+}
+
+/// `Path.expanduser().resolve()`, which canonicalises what exists and
+/// normalises the rest.
+fn resolve_path(path: &Path) -> PathBuf {
+    let expanded = expand_user(path);
+    std::fs::canonicalize(&expanded).unwrap_or(expanded)
+}
+
+/// Python's `relative_to`: `path` is inside `root`, or is `root`.
+fn within(path: &Path, root: &Path) -> bool {
+    let path = resolve_path(path);
+    let root = resolve_path(root);
+    path.starts_with(&root)
+}
+
+/// A remote caller may only name a root inside the configured import root. A
+/// `local:` principal already owns the filesystem, so the check is skipped.
+fn guard_remote_root_path(
+    identity_ref: &str,
+    import_root: &Path,
+    root_path: &str,
+) -> Result<(), VogtError> {
+    let prefix = format!("{LOCAL_SCHEME}:");
+    if identity_ref.starts_with(&prefix) {
+        return Ok(());
+    }
+    if !within(Path::new(root_path), import_root) {
+        return Err(VogtError::InvalidRequest(format!(
+            "root_path must be within the configured import root ({}); a remote caller may not name an arbitrary server filesystem path",
+            import_root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn slug_for(name: &str) -> Result<String, VogtError> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(VogtError::InvalidRequest(format!(
+            "cannot derive a slug from name {}",
+            py_repr(name)
+        )));
+    }
+    Ok(slug)
+}
+
+/// The declared half of registration. `create` calls it with
+/// `adopts_contract`; `register` does not. The audit operation stays
+/// `project.register` for both, which is what Python records.
+struct Registration {
+    operation: &'static str,
+    event_kind: &'static str,
+    name: String,
+    root_path: String,
+    repo_url: Option<String>,
+    /// The remote's default branch, read at import (WI-4026); `None` when the
+    /// registration did not read it.
+    default_branch: Option<String>,
+    lifecycle_state: String,
+    exclusions: Option<Vec<String>>,
+    adopts_contract: bool,
+    link_state: LinkState,
+    now: crate::core::Moment,
+    project_id: String,
+}
+
+fn record_registration<C: Clock + 'static, I: IdFactory + 'static>(
+    writing: &mut WriteContext<'_, C, I, SqliteDeclaredStore<C, I>>,
+    reason: &str,
+    input: Registration,
+) -> Result<Project, VogtError> {
+    let slug = slug_for(&input.name)?;
+    let event = input.event_kind.to_string();
+    audited_write(writing, input.operation, reason, move |txn, _actor| {
+        if txn.project_by_slug(&slug)?.is_some() {
+            return Err(VogtError::Conflict(format!(
+                "a project with slug {} is already registered",
+                py_repr(&slug)
+            )));
+        }
+        let project = Project {
+            id: input.project_id,
+            slug: slug.clone(),
+            name: input.name.clone(),
+            root_path: input.root_path,
+            repo_url: input.repo_url,
+            default_branch: input.default_branch,
+            lifecycle_state: parse_lifecycle(&input.lifecycle_state)?,
+            current_version: None,
+            contract_version: None,
+            compliance_status: ComplianceStatus::NotChecked,
+            compliance_checked_at: None,
+            agent_policy: crate::core::AgentPolicy::default(),
+            contract_adopted_at: if input.adopts_contract {
+                Some(input.now)
+            } else {
+                None
+            },
+            write_back: crate::core::WriteBack::Disabled,
+            link_state: input.link_state,
+            exclusions: match input.exclusions {
+                None => DEFAULT_EXCLUSIONS
+                    .iter()
+                    .map(|entry| (*entry).to_string())
+                    .collect(),
+                Some(given) => given,
+            },
+            mcp_extra: Vec::new(),
+            trust_state: TrustState::Unverified,
+            created_at: input.now,
+            updated_at: input.now,
+        };
+        txn.insert_project(&project)?;
+        let payload = serde_json::to_value(&project).unwrap_or(Value::Null);
+        let id = project.id.clone();
+        Ok(WriteOutcome::new(
+            project,
+            "project",
+            &id,
+            payload,
+            &event,
+            json!({"slug": slug, "name": input.name}),
+        ))
+    })
+}
+
+fn register_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<RegisterProjectParams>(params)?;
+    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    guard_remote_root_path(
+        &principal.identity_ref,
+        &config.resolved_import_root(),
+        &params.root_path,
+    )?;
+    let now = now_of(&clock);
+    // Refused before an id is drawn, so a duplicate registration does not
+    // shift the ids that follow it. The write repeats the check.
+    let slug = slug_for(&params.name)?;
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
+    let project_id = next_id(&ids, "prj");
+    let mut writing = crate::application::context::write_of(ctx);
+    let project = record_registration(
+        &mut writing,
+        &params.reason,
+        Registration {
+            operation: PROJECT_REGISTER,
+            event_kind: PROJECT_REGISTERED_EVENT,
+            name: params.name,
+            root_path: params.root_path,
+            repo_url: params.repo_url,
+            default_branch: None,
+            lifecycle_state: params.lifecycle_state,
+            exclusions: params.exclusions,
+            adopts_contract: false,
+            link_state: LinkState::Unlinked,
+            now,
+            project_id,
+        },
+    )?;
+    Ok(json!({"project": project}))
+}
+
+// --- import -----------------------------------------------------------------
+
+const PROJECT_IMPORT: &str = "project.import";
+const PROJECT_IMPORTED_EVENT: &str = "project.imported";
+
+#[derive(Deserialize)]
+struct ImportProjectParams {
+    repo: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    root_path: Option<String>,
+    #[serde(default = "default_active")]
+    lifecycle_state: String,
+    #[serde(default = "default_consolidate")]
+    consolidate: bool,
+    reason: String,
+}
+
+fn default_consolidate() -> bool {
+    true
+}
+
+/// `owner/name` for GitHub, `host/owner/name` for a configured Forgejo host,
+/// and a URL is passed through as written. A bare name is never a reference.
+/// Ports `_normalise_reference`.
+fn normalise_reference(reference: &str) -> String {
+    let candidate = reference.trim();
+    let parts: Vec<&str> = candidate
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() == 2 && parts.iter().all(|part| is_forge_name(part)) {
+        let repo = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+        return format!("https://github.com/{}/{repo}", parts[0]);
+    }
+    candidate.to_string()
+}
+
+/// What a forge permits in an owner or repository name: an ASCII letter or
+/// digit first, then letters, digits, `.`, `_` or `-`. Strict on purpose, so
+/// `https://example.com` is not read as a repository.
+fn is_forge_name(part: &str) -> bool {
+    let mut chars = part.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+pub fn import_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| import_project(ctx, params))
+}
+
+/// Clone, register, and report. Ports `import_project` and `import_from_ref`.
+///
+/// Ordering is load-bearing: the clone happens before the declared write, so a
+/// half-finished import leaves a directory nobody registered, never a project
+/// pointing at nothing.
+fn import_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<ImportProjectParams>(params)?;
+    let (_, _, _, _, _, config) = context_parts(ctx);
+    let reference = normalise_reference(&params.repo);
+    let Some((_, repo)) = identity_for(Some(&reference), config, ctx.forge_transport()) else {
+        return Err(VogtError::InvalidRequest(format!(
+            "{} does not name a GitHub repository or a configured Forgejo repository; \
+             give owner/name, host/owner/name, or a repository URL",
+            py_repr(&params.repo)
+        )));
+    };
+    let provider = provider_for_host(&repo.host, config, ctx.forge_transport())?;
+    import_repository(
+        ctx,
+        &repo,
+        provider,
+        ImportRequest {
+            name: params.name,
+            root_path: params.root_path,
+            lifecycle_state: params.lifecycle_state,
+            consolidate: params.consolidate,
+            reason: &params.reason,
+            operation: PROJECT_IMPORT,
+            event_kind: PROJECT_IMPORTED_EVENT,
+        },
+    )
+}
+
+/// What one import asks for. Shared by `project.import` and `forge.import`.
+pub(crate) struct ImportRequest<'a> {
+    pub name: Option<String>,
+    pub root_path: Option<String>,
+    pub lifecycle_state: String,
+    pub consolidate: bool,
+    pub reason: &'a str,
+    pub operation: &'static str,
+    pub event_kind: &'static str,
+}
+
+/// Clone the repository, register it, and consolidate it when asked. Ports
+/// `imports.py`'s `import_from_ref`, which both `project.import` and
+/// `forge.import` share. The caller resolves `provider`: the instance file token
+/// for `project.import`, the acting actor's linked credential for `forge.import`.
+/// `None` is the honest unconfigured case: a public repository still clones, and
+/// consolidation is skipped with a "not collected" detail.
+///
+/// Ordering is load-bearing. The clone happens before the declared write, so a
+/// half-finished import leaves a directory nobody registered, never a project
+/// pointing at nothing.
+pub(crate) fn import_repository<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    repo: &RepoRef,
+    provider: Option<ForgeClient>,
+    request: ImportRequest<'_>,
+) -> Result<Value, VogtError> {
+    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    if let Some(root) = &request.root_path {
+        guard_remote_root_path(
+            &principal.identity_ref,
+            &config.resolved_import_root(),
+            root,
+        )?;
+    }
+    let Some((identity_provider, _)) = identity_for(
+        Some(&format!(
+            "https://{}/{}/{}",
+            repo.host, repo.owner, repo.repo
+        )),
+        config,
+        ctx.forge_transport(),
+    ) else {
+        return Err(VogtError::InvalidRequest(format!(
+            "no forge provider is registered for {}",
+            repo.host
+        )));
+    };
+    let remote = identity_provider.clone_url(repo);
+    let name = request.name.clone().unwrap_or_else(|| repo.repo.clone());
+    let slug = slug_for(&name)?;
+
+    // A read, not a gate: cloning a large repository only to fail on a name
+    // collision wastes minutes. The write path still refuses duplicates.
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
+
+    let metadata = match &provider {
+        None => serde_json::Map::new(),
+        Some(forge) => forge.describe(repo)?.ok_or_else(|| {
+            VogtError::NotFound(format!(
+                "the forge has no repository {} visible to this instance's token",
+                repo.slug()
+            ))
+        })?,
+    };
+
+    let destination = match &request.root_path {
+        Some(root) => expand_user(Path::new(root)),
+        None => config.resolved_import_root().join(&slug),
+    };
+    let outcome = (ctx.cloner)(&CloneRequest {
+        remote: remote.clone(),
+        destination: destination.clone(),
+        token: provider.as_ref().and_then(|forge| forge.clone_token()),
+        helper_dir: Some(config.resolved_data_dir().join("tmp")),
+    })?;
+
+    // A clone and consolidation of a forge repository is one of the explicit acts
+    // that make a project upstream-truth. Without a provider, or without a
+    // consolidation, the project stays unlinked and `forge.link` opts it in later.
+    let consolidating = request.consolidate && provider.is_some();
+    let project_id = next_id(&ids, "prj");
+    let now = now_of(&clock);
+    let mut writing = write_of(ctx);
+    let project = record_registration(
+        &mut writing,
+        request.reason,
+        Registration {
+            operation: request.operation,
+            event_kind: request.event_kind,
+            name,
+            root_path: outcome.destination.display().to_string(),
+            repo_url: Some(identity_provider.web_url(repo)),
+            default_branch: outcome.default_branch.clone(),
+            lifecycle_state: request.lifecycle_state,
+            exclusions: None,
+            adopts_contract: false,
+            link_state: if consolidating {
+                LinkState::Linked
+            } else {
+                LinkState::Unlinked
+            },
+            now,
+            project_id,
+        },
+    )?;
+
+    let consolidated = if consolidating {
+        Some(crate::application::services::forge_onboard::onboard(
+            ctx,
+            json!({"project": project.slug, "reason": request.reason}),
+        )?)
+    } else {
+        None
+    };
+    let consolidation_detail = (request.consolidate && provider.is_none()).then(|| {
+        "cloned and registered, but the forge adapter is not configured, so nothing upstream \
+         was read — which is 'not collected', not 'there is nothing'"
+            .to_string()
+    });
+    let default_branch = outcome.default_branch.or_else(|| {
+        metadata
+            .get("default_branch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+    });
+    let detail = consolidation_detail.or_else(|| {
+        outcome.reused.then(|| {
+            format!(
+                "{} already held a clone of this remote; it was registered as it stood",
+                destination.display()
+            )
+        })
+    });
+    Ok(json!({
+        "project": project,
+        "remote": remote,
+        "root_path": outcome.destination.display().to_string(),
+        "revision": outcome.revision,
+        "default_branch": default_branch,
+        "cloned": !outcome.reused,
+        "consolidated": consolidated,
+        "detail": detail,
+    }))
+}
+
+// --- scaffold ---------------------------------------------------------------
+
+/// Write a scaffold, never overwriting. An existing path is skipped.
+fn lay_scaffold(
+    root: &Path,
+    scaffold: &Scaffold,
+    create_root: bool,
+) -> Result<(Vec<String>, Vec<String>), VogtError> {
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    if !root.exists() {
+        if !create_root {
+            return Err(VogtError::NotFound(format!(
+                "{} does not exist, so there is nothing to scaffold into",
+                root.display()
+            )));
+        }
+        std::fs::create_dir_all(root).map_err(|err| {
+            VogtError::InvalidRequest(format!("could not create {}: {err}", root.display()))
+        })?;
+        created.push(root.display().to_string());
+    }
+    for directory in &scaffold.directories {
+        let target = root.join(directory);
+        if target.exists() {
+            skipped.push(target.display().to_string());
+        } else {
+            std::fs::create_dir_all(&target).map_err(|err| {
+                VogtError::InvalidRequest(format!("could not create {}: {err}", target.display()))
+            })?;
+            created.push(target.display().to_string());
+        }
+    }
+    for entry in &scaffold.files {
+        let target = root.join(&entry.path);
+        if target.exists() {
+            skipped.push(target.display().to_string());
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    VogtError::InvalidRequest(format!(
+                        "could not create {}: {err}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            std::fs::write(&target, entry.content.as_bytes()).map_err(|err| {
+                VogtError::InvalidRequest(format!("could not write {}: {err}", target.display()))
+            })?;
+            created.push(target.display().to_string());
+        }
+    }
+    Ok((created, skipped))
+}
+
+fn record_scaffold<C: Clock + 'static, I: IdFactory + 'static>(
+    writing: &mut WriteContext<'_, C, I, SqliteDeclaredStore<C, I>>,
+    reason: &str,
+    project_id: String,
+    project_slug: String,
+    created: Vec<String>,
+    skipped: Vec<String>,
+) -> Result<(), VogtError> {
+    let created_count = created.len();
+    let skipped_count = skipped.len();
+    audited_write(writing, PROJECT_SCAFFOLD, reason, move |_txn, _actor| {
+        Ok(WriteOutcome::new(
+            (),
+            "project",
+            &project_id,
+            json!({"created": created, "skipped": skipped}),
+            PROJECT_SCAFFOLDED_EVENT,
+            json!({"slug": project_slug, "created": created_count, "skipped": skipped_count}),
+        ))
+    })
+}
+
+fn scaffold_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<ScaffoldProjectParams>(params)?;
+    let project = resolve::project(&ctx.declared.read()?, &params.project)?;
+    let root = expand_user(Path::new(&project.root_path));
+    let scaffold = default_scaffold(
+        &project.name,
+        &ctx.principal.display_name,
+        &project.lifecycle_state.to_string(),
+    );
+    let (created, skipped) = lay_scaffold(&root, &scaffold, false)?;
+    let created_sorted = sorted(&created);
+    let skipped_sorted = sorted(&skipped);
+    let result = json!({
+        "project": project.slug,
+        "root_path": root.display().to_string(),
+        "created": created_sorted,
+        "skipped": skipped_sorted,
+        "detail": format!(
+            "{} written, {} already there and left exactly as they were",
+            created.len(),
+            skipped.len()
+        ),
+    });
+    let mut writing = crate::application::context::write_of(ctx);
+    record_scaffold(
+        &mut writing,
+        &params.reason,
+        project.id,
+        project.slug,
+        created_sorted,
+        skipped_sorted,
+    )?;
+    Ok(result)
+}
+
+fn sorted(paths: &[String]) -> Vec<String> {
+    let mut out = paths.to_vec();
+    out.sort();
+    out
+}
+
+fn create_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<CreateProjectParams>(params)?;
+    let (declared, _, principal, clock, ids, config) = context_parts(ctx);
+    guard_remote_root_path(
+        &principal.identity_ref,
+        &config.resolved_import_root(),
+        &params.root_path,
+    )?;
+    let owner = params
+        .owner
+        .clone()
+        .unwrap_or_else(|| principal.display_name.clone());
+    let root = expand_user(Path::new(&params.root_path));
+    let scaffold = default_scaffold(&params.name, &owner, &params.lifecycle_state);
+    let (created, skipped) = lay_scaffold(&root, &scaffold, true)?;
+    let now = now_of(&clock);
+    let slug = slug_for(&params.name)?;
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
+    let project_id = next_id(&ids, "prj");
+    let mut writing = crate::application::context::write_of(ctx);
+    let project = record_registration(
+        &mut writing,
+        &params.reason,
+        Registration {
+            operation: PROJECT_REGISTER,
+            event_kind: PROJECT_REGISTERED_EVENT,
+            name: params.name,
+            root_path: root.display().to_string(),
+            repo_url: params.repo_url,
+            default_branch: None,
+            lifecycle_state: params.lifecycle_state,
+            exclusions: None,
+            adopts_contract: true,
+            link_state: LinkState::Unlinked,
+            now,
+            project_id,
+        },
+    )?;
+    let mut result = json!({"project": project});
+    if let Value::Object(map) = &mut result {
+        map.insert("created_paths".to_string(), json!(sorted(&created)));
+        map.insert("skipped_paths".to_string(), json!(sorted(&skipped)));
+    }
+    Ok(result)
+}
+
+// --- reads ------------------------------------------------------------------
+
+fn get_project<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<GetProjectParams>(params)?;
+    let view = ctx.declared.read()?;
+    let project = resolve::project(&view, &params.slug)?;
+    Ok(json!({"project": project}))
+}
+
+fn list_projects<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = list_params(params)?;
+    let summary = match params.mode.as_str() {
+        "summary" => true,
+        "" | "full" => false,
+        other => {
+            return Err(VogtError::InvalidRequest(format!(
+                "mode must be 'summary' or 'full', not {}",
+                py_repr(other)
+            )))
+        }
+    };
+    let (projects, total, actor) = {
+        let view = ctx.declared.read()?;
+        (
+            view.list_projects(params.limit, params.offset)?,
+            view.counts()?.projects,
+            view.actor_by_identity(&ctx.principal.identity_ref)?,
+        )
+    };
+    if summary {
+        let rows: Vec<Value> = projects
+            .iter()
+            .map(|project| {
+                json!({
+                    "slug": project.slug,
+                    "name": project.name,
+                    "lifecycle_state": project.lifecycle_state,
+                    "link_state": project.link_state,
+                })
+            })
+            .collect();
+        return Ok(json!({"projects": rows, "total": total}));
+    }
+    // The same gates `work.create` applies, evaluated without writing.
+    let mut listings: Vec<Value> = Vec::with_capacity(projects.len());
+    for project in &projects {
+        let mut listing = serde_json::to_value(project).unwrap_or(Value::Null);
+        if let Value::Object(map) = &mut listing {
+            let (writable, reason) = crate::application::services::work::create_writability(
+                ctx,
+                project,
+                actor.as_ref(),
+            )?;
+            map.insert("writable".to_string(), Value::Bool(writable));
+            map.insert("writable_reason".to_string(), Value::String(reason));
+        }
+        listings.push(listing);
+    }
+    Ok(json!({"projects": listings, "total": total}))
+}
+
+fn brief_project<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = brief_params(params)?;
+    let view = ctx.declared.read()?;
+    let project = resolve::project(&view, &params.slug)?;
+    let items = view.list_work_items(&WorkFilter {
+        project_id: Some(project.id.clone()),
+        limit: 1000,
+        ..WorkFilter::default()
+    })?;
+    let mut by_state: Vec<(String, i64)> = Vec::new();
+    let mut by_kind: Vec<(String, i64)> = Vec::new();
+    for item in &items {
+        tally(&mut by_state, &item.state.to_string());
+        tally(&mut by_kind, &item.kind.to_string());
+    }
+    by_state.sort();
+    by_kind.sort();
+    let observed_version = observed_version(ctx, &project.id)?;
+    let digest = status_digest(ctx, &view, &project, &items)?;
+    drop(view);
+    // The same population `backlog` and `bugs` rank, so the three views agree
+    // about one project at one moment.
+    let population = crate::application::views::brief_population(
+        ctx,
+        &project.slug,
+        params.backlog_limit as usize,
+        &params.mode,
+    )?;
+    let version_matches = match (&observed_version, &project.current_version) {
+        (Some(observed), Some(declared)) => {
+            Some(observed.trim_start_matches('v') == declared.trim_start_matches('v'))
+        }
+        _ => None,
+    };
+    let adopted = project.contract_adopted_at.is_some();
+    Ok(json!({
+        "project": project,
+        "open_work": population.open_work,
+        "open_bugs": population.open_bugs,
+        "declared_work": population.declared,
+        "observed_work": population.observed,
+        "by_state": tally_object(&by_state),
+        "by_kind": tally_object(&by_kind),
+        "top_backlog": population.top,
+        "current_version": project.current_version,
+        "declared_version": project.current_version,
+        "observed_version": observed_version,
+        "version_matches": version_matches,
+        "compliance_status": if adopted {
+            project.compliance_status.to_string()
+        } else {
+            NOT_APPLICABLE.to_string()
+        },
+        "compliance_checked_at": if adopted { project.compliance_checked_at } else { None },
+        "ci_status": ci_summary(ctx, &project.id)?,
+        "dependencies": dependency_summary(ctx, &project.id)?,
+        "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
+        "digest": digest,
+    }))
+}
+
+fn tally(into: &mut Vec<(String, i64)>, key: &str) {
+    if let Some(found) = into.iter_mut().find(|(name, _)| name == key) {
+        found.1 += 1;
+    } else {
+        into.push((key.to_string(), 1));
+    }
+}
+
+fn tally_object(pairs: &[(String, i64)]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (key, count) in pairs {
+        map.insert(key.clone(), json!(count));
+    }
+    Value::Object(map)
+}
+
+fn observed_version<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project_id: &str,
+) -> Result<Option<String>, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(None);
+    }
+    let seen = ctx.observed.latest(
+        &["git.tag".to_string(), "release".to_string()],
+        Some(project_id),
+        false,
+        false,
+        100,
+    )?;
+    let mut tags: Vec<String> = seen
+        .iter()
+        .filter_map(|observation| match observation.payload.get("tag") {
+            Some(Value::String(tag)) if !tag.is_empty() => Some(tag.clone()),
+            _ => None,
+        })
+        .collect();
+    tags.sort();
+    Ok(tags.pop())
+}
+
+/// Caps on the digest (WI-2747): each list is bounded and each entry one line.
+const DIGEST_INITIATIVES: usize = 5;
+const DIGEST_IN_PROGRESS: usize = 8;
+const DIGEST_RESULTS: usize = 3;
+const DIGEST_REPORT_SCAN: i64 = 200;
+const DIGEST_LINE: usize = 160;
+
+/// `_line`: one line, at most `DIGEST_LINE` characters (code points, as Python counts).
+fn digest_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= DIGEST_LINE {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(DIGEST_LINE - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The derived status digest (WI-2747): computed on read, never stored.
+fn status_digest<C: Clock, I: IdFactory, V: ReadView>(
+    ctx: &AppContext<C, I>,
+    view: &V,
+    project: &Project,
+    items: &[WorkItem],
+) -> Result<Value, VogtError> {
+    let live: Vec<&WorkItem> = items
+        .iter()
+        .filter(|item| {
+            item.superseded_by.is_none() && !TERMINAL_STATES.contains(&item.state.as_str())
+        })
+        .collect();
+    Ok(json!({
+        "initiatives": digest_initiatives(view, &live)?,
+        "in_progress": digest_in_progress(view, project, &live)?,
+        "recent_results": digest_results(view, items)?,
+        "last_merge": digest_last_merge(ctx, project)?,
+        "last_deploy": digest_last_deploy(ctx, project)?,
+    }))
+}
+
+fn digest_initiatives<V: ReadView>(view: &V, live: &[&WorkItem]) -> Result<Vec<String>, VogtError> {
+    let mut counts: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+    for item in live {
+        if let Some(initiative_id) = &item.initiative_id {
+            *counts.entry(initiative_id.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut found = Vec::new();
+    for (initiative_id, open_here) in counts {
+        if let Some(initiative) = view.initiative_by_id(initiative_id)? {
+            if matches!(initiative.state, InitiativeState::Open) {
+                found.push((initiative, open_here));
+            }
+        }
+    }
+    // Heaviest first, then by slug.
+    found.sort_by(|a, b| {
+        b.0.weight
+            .cmp(&a.0.weight)
+            .then_with(|| a.0.slug.cmp(&b.0.slug))
+    });
+    Ok(found
+        .iter()
+        .take(DIGEST_INITIATIVES)
+        .map(|(initiative, open_here)| {
+            digest_line(&format!(
+                "{} (weight {}, {} open here): {}",
+                initiative.slug, initiative.weight, open_here, initiative.title
+            ))
+        })
+        .collect())
+}
+
+fn digest_in_progress<V: ReadView>(
+    view: &V,
+    project: &Project,
+    live: &[&WorkItem],
+) -> Result<Vec<String>, VogtError> {
+    let mut working: Vec<&WorkItem> = live
+        .iter()
+        .copied()
+        .filter(|item| item.state == IN_PROGRESS)
+        .collect();
+    if working.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sessions = view.list_sessions(Some(&project.id), None, false, 500, 0)?;
+    // The newest live session holds an item, whatever order the store
+    // returns them in (WI-2750).
+    let mut running: Vec<&CodingSession> = sessions
+        .iter()
+        .filter(|session| session.stopped_at.is_none())
+        .collect();
+    running.sort_by_key(|session| std::cmp::Reverse(session.started_at));
+    let mut held_by: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
+    for session in running {
+        if let Some(work_item_id) = &session.work_item_id {
+            held_by
+                .entry(work_item_id.as_str())
+                .or_insert_with(|| format!("session {}", session.id));
+        }
+    }
+    working.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    Ok(working
+        .iter()
+        .take(DIGEST_IN_PROGRESS)
+        .map(|item| {
+            let holder = held_by
+                .get(item.id.as_str())
+                .cloned()
+                .or_else(|| item.assignee_identity_ref.clone().filter(|r| !r.is_empty()))
+                .unwrap_or_else(|| "unheld".to_string());
+            digest_line(&format!("{} [{}]: {}", item.reference, holder, item.title))
+        })
+        .collect())
+}
+
+fn digest_results<V: ReadView>(view: &V, items: &[WorkItem]) -> Result<Vec<String>, VogtError> {
+    let refs: std::collections::BTreeMap<&str, &str> = items
+        .iter()
+        .map(|item| (item.id.as_str(), item.reference.as_str()))
+        .collect();
+    let mut lines = Vec::new();
+    let reports = view.list_session_reports(None, None, Some("result"), DIGEST_REPORT_SCAN)?;
+    for report in reports {
+        let Some(reference) = refs.get(report.work_item_id.as_deref().unwrap_or("")) else {
+            continue;
+        };
+        lines.push(digest_line(&format!(
+            "{} {}: {}",
+            minute_stamp(utc(report.created_at)),
+            reference,
+            report.summary
+        )));
+        if lines.len() == DIGEST_RESULTS {
+            break;
+        }
+    }
+    Ok(lines)
+}
+
+/// `%Y-%m-%d %H:%MZ`, the digest's one timestamp form.
+fn minute_stamp(when: chrono::DateTime<chrono::Utc>) -> String {
+    when.format("%Y-%m-%d %H:%MZ").to_string()
+}
+
+fn utc(moment: Moment) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(moment.unix_seconds(), moment.nanos())
+        .expect("a moment built here is in range")
+}
+
+/// `_parse_when`: an ISO-8601 instant, `Z` accepted; anything else is `None`.
+fn parse_when(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&value.replace('Z', "+00:00"))
+        .ok()
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+}
+
+/// Python's truthiness for the JSON values a payload carries.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// `str(value)` for the scalars a payload carries.
+fn py_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn digest_last_merge<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+) -> Result<Option<String>, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(None);
+    }
+    let seen = ctx.observed.latest(
+        &["forge.pull_request".to_string()],
+        Some(&project.id),
+        false,
+        false,
+        1000,
+    )?;
+    let mut best: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+    for observation in seen {
+        let payload = &observation.payload;
+        if payload.get("state").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        // `merged_at or closed_at`: the first truthy one decides, even when it
+        // does not parse, and an unparsed value falls back to the observation.
+        let stamp = ["merged_at", "closed_at"]
+            .iter()
+            .filter_map(|key| payload.get(*key))
+            .find(|value| truthy(value))
+            .and_then(Value::as_str)
+            .and_then(parse_when);
+        let when = stamp.unwrap_or_else(|| utc(observation.observed_at));
+        if best.as_ref().is_some_and(|(newest, _)| when <= *newest) {
+            continue;
+        }
+        let number = payload
+            .get("number")
+            .map(py_str)
+            .unwrap_or_else(|| "None".to_string());
+        let title = match payload.get("title") {
+            Some(value) if truthy(value) => py_str(value),
+            _ => String::new(),
+        };
+        best = Some((when, format!("{} #{number}: {title}", minute_stamp(when))));
+    }
+    Ok(best.map(|(_, text)| digest_line(&text)))
+}
+
+fn digest_last_deploy<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+) -> Result<Option<String>, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(None);
+    }
+    let seen = ctx.observed.latest(
+        &[KIND_DEPLOY_LANE.to_string()],
+        Some(&project.id),
+        false,
+        false,
+        50,
+    )?;
+    let mut lines: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+    for observation in seen {
+        let payload = &observation.payload;
+        // The live block's sha, else the receipt's.
+        let sha = ["live", "receipt"].iter().find_map(|source| {
+            payload
+                .get(*source)
+                .and_then(|block| block.get("source_sha"))
+                .and_then(Value::as_str)
+        });
+        let Some(sha) = sha else {
+            continue;
+        };
+        let lane = match payload.get("lane") {
+            Some(value) if truthy(value) => py_str(value),
+            _ => observation.subject_key.clone(),
+        };
+        let observed = utc(observation.observed_at);
+        let short: String = sha.chars().take(12).collect();
+        lines.push((
+            observed,
+            format!("{lane} at {short} (seen {})", minute_stamp(observed)),
+        ));
+    }
+    Ok(lines.into_iter().max().map(|(_, text)| digest_line(&text)))
+}
+
+fn ci_summary<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project_id: &str,
+) -> Result<Value, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        // `status` keeps its model default and is omitted: Python's
+        // `exclude_defaults` drops it, so emitting it here would be a key the
+        // other side never returns.
+        return Ok(json!({
+            "checks": 0,
+            "failing": [],
+            "revision": Value::Null,
+            "revisions_observed": 0,
+            "earlier_failures": 0,
+            "detail": "no sweep has run; CI status is not collected",
+        }));
+    }
+    let checks = ctx.observed.latest(
+        &["ci.check".to_string()],
+        Some(project_id),
+        false,
+        false,
+        200,
+    )?;
+    let Some(rollup) = roll_up(&checks) else {
+        return Ok(json!({
+            "status": "no_checks",
+            "checks": 0,
+            "failing": [],
+            "revision": Value::Null,
+            "revisions_observed": 0,
+            "earlier_failures": 0,
+            "detail": "swept, but no CI checks were observed — either this project has none, or the optional forge adapter is not configured",
+        }));
+    };
+    let detail = if rollup.earlier_failures == 0 {
+        Value::Null
+    } else {
+        json!(format!(
+            "{} failing check(s) on earlier revisions are not counted here; this is the state of {} alone",
+            rollup.earlier_failures,
+            &rollup.revision[..rollup.revision.len().min(12)]
+        ))
+    };
+    Ok(json!({
+        "status": rollup.status(),
+        "checks": rollup.checks.len(),
+        "failing": rollup.failing,
+        "revision": rollup.revision,
+        "revisions_observed": rollup.revisions_observed,
+        "earlier_failures": rollup.earlier_failures,
+        "detail": detail,
+    }))
+}
+
+fn dependency_summary<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project_id: &str,
+) -> Result<Value, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(json!({
+            "status": "not_collected",
+            "references_out": 0,
+            "referenced_by": 0,
+            "unresolved": 0,
+            "detail": "no sweep has run; dependency references are not collected",
+        }));
+    }
+    let walked = ctx.observed.latest(
+        &[KIND_DEP_SCAN.to_string()],
+        Some(project_id),
+        false,
+        false,
+        1,
+    )?;
+    if walked.is_empty() {
+        return Ok(json!({
+            "status": "not_collected",
+            "references_out": 0,
+            "referenced_by": 0,
+            "unresolved": 0,
+            "detail": "`dep-refs` has not walked this project; its references are not collected, which is not the same as none",
+        }));
+    }
+    let out = ctx.observed.dep_refs(Some(project_id), None)?;
+    let incoming = ctx.observed.dep_refs(None, Some(project_id))?;
+    let unresolved = out.iter().filter(|row| row.to_project_id.is_none()).count();
+    Ok(json!({
+        "status": "collected",
+        "references_out": out.len(),
+        "referenced_by": incoming.len(),
+        "unresolved": unresolved,
+    }))
+}
+
+/// The write-time checks the Python `update_project` runs on a policy: the
+/// typed read has already refused a malformed shape (`merge_mode: merge`, a
+/// bad source); what is left is that every regex compiles and stays inside
+/// the dialect the engine matches with.
+fn checked_agent_policy(
+    policy: &crate::application::models::AgentPolicy,
+) -> Result<crate::core::AgentPolicy, VogtError> {
+    use std::sync::OnceLock;
+    static UNSUPPORTED: OnceLock<regex::Regex> = OnceLock::new();
+    let unsupported = UNSUPPORTED.get_or_init(|| {
+        regex::Regex::new(r"\(\?<=|\(\?<!|\(\?=|\(\?!|\(\?P=|\(\?\(|\\[1-9]").expect("static")
+    });
+    let invalid = |message: String| Err(VogtError::InvalidRequest(message));
+    if policy.session_wall_clock_minutes.is_some_and(|m| m <= 0) {
+        return invalid("session_wall_clock_minutes must be positive".to_string());
+    }
+    for pattern in &policy.forbidden_text {
+        if let Some(found) = unsupported.find(pattern) {
+            return invalid(format!(
+                "forbidden_text pattern {} uses {}, which the engine's regex dialect does not support (no lookaround, no backreferences)",
+                py_repr(pattern),
+                py_repr(found.as_str())
+            ));
+        }
+        if let Err(error) = regex::Regex::new(pattern) {
+            return invalid(format!(
+                "forbidden_text pattern {} does not compile: {error}",
+                py_repr(pattern)
+            ));
+        }
+    }
+    if let Some(landing) = &policy.landing {
+        if let Err(error) = regex::Regex::new(&landing.branch_pattern.replace("{n}", r"\d+")) {
+            return invalid(format!(
+                "branch_pattern {} does not compile once {{n}} is replaced with a number: {error}",
+                py_repr(&landing.branch_pattern)
+            ));
+        }
+    }
+    let value =
+        serde_json::to_value(policy).map_err(|e| VogtError::InvalidRequest(e.to_string()))?;
+    serde_json::from_value(value).map_err(|e| VogtError::InvalidRequest(e.to_string()))
+}
+
+/// Bounds on a project's `mcp_extra` (WI-2750).
+const MCP_EXTRA_MAX: usize = 16;
+
+/// Checks the names an update gives for `mcp_extra`. Blank names are dropped
+/// later, as before; the rest must be keys the engine can address (1-64 ASCII
+/// letters, digits, `-` or `_`), and there are at most `MCP_EXTRA_MAX` of them.
+fn checked_mcp_extra(names: &[String]) -> Result<(), VogtError> {
+    let given: Vec<&str> = names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if given.len() > MCP_EXTRA_MAX {
+        return Err(VogtError::InvalidRequest(format!(
+            "mcp_extra holds at most {MCP_EXTRA_MAX} names"
+        )));
+    }
+    for name in given {
+        let valid = name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        if !valid {
+            return Err(VogtError::InvalidRequest(format!(
+                "mcp_extra name {} is not 1-64 characters of letters, digits, '-' or '_'",
+                py_repr(name)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Trimmed, blank-free, first occurrence kept.
+fn normalised_mcp_extra(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names.iter().map(|name| name.trim()) {
+        if !name.is_empty() && !out.iter().any(|kept| kept == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+struct ProjectChange {
+    slug: String,
+    repo_url: Option<String>,
+    exclusions: Option<Vec<String>>,
+    mcp_extra: Option<Vec<String>>,
+    agent_policy: Option<crate::core::AgentPolicy>,
+    lifecycle_state: Option<String>,
+    at: crate::core::Moment,
+    event: &'static str,
+}
+
+fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
+    writing: &mut WriteContext<'_, C, I, SqliteDeclaredStore<C, I>>,
+    operation: &str,
+    reason: &str,
+    change: ProjectChange,
+) -> Result<Project, VogtError> {
+    audited_write(writing, operation, reason, move |txn, _actor| {
+        let project = resolve::project(txn, &change.slug)?;
+        if change.event == PROJECT_UPDATED_EVENT
+            && change.repo_url.is_none()
+            && change.exclusions.is_none()
+            && change.mcp_extra.is_none()
+            && change.agent_policy.is_none()
+        {
+            return Err(VogtError::InvalidRequest(
+                "give --repo-url, --exclusions, --mcp-extra or --agent-policy; there is nothing else to update"
+                    .to_string(),
+            ));
+        }
+        if change.event == PROJECT_TRANSITIONED_EVENT {
+            crate::core::check_lifecycle_transition(
+                &project.lifecycle_state.to_string(),
+                change.lifecycle_state.as_deref().unwrap_or(""),
+            )?;
+        }
+        txn.update_project(
+            &project.id,
+            &ProjectUpdate {
+                default_branch: None,
+                repo_url: change.repo_url.clone(),
+                exclusions: change.exclusions.clone(),
+                mcp_extra: change.mcp_extra.clone(),
+                agent_policy: change.agent_policy.clone(),
+                lifecycle_state: change.lifecycle_state.clone(),
+                ..ProjectUpdate::default()
+            },
+            change.at,
+        )?;
+        let updated = txn.project_by_slug(&project.slug)?.ok_or_else(|| {
+            VogtError::NotFound(format!("no project with slug {}", py_repr(&project.slug)))
+        })?;
+        let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+        let summary = if change.event == PROJECT_TRANSITIONED_EVENT {
+            json!({"slug": project.slug, "from": project.lifecycle_state.to_string(), "to": change.lifecycle_state})
+        } else {
+            json!({
+                "slug": project.slug,
+                "exclusions": updated.exclusions,
+                "mcp_extra": updated.mcp_extra,
+                "repo_url": updated.repo_url,
+                "agent_policy": serde_json::to_value(&updated.agent_policy).unwrap_or(Value::Null),
+            })
+        };
+        let id = project.id.clone();
+        Ok(WriteOutcome::new(
+            updated,
+            "project",
+            &id,
+            payload,
+            change.event,
+            summary,
+        ))
+    })
+}
+
+// --- updates ----------------------------------------------------------------
+
+fn place_change<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    change: ProjectChange,
+    operation: &str,
+    reason: &str,
+) -> Result<Project, VogtError> {
+    let mut writing = crate::application::context::write_of(ctx);
+    apply_change(&mut writing, operation, reason, change)
+}
+
+fn update_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<UpdateProjectParams>(params)?;
+    let agent_policy = params
+        .agent_policy
+        .as_ref()
+        .map(checked_agent_policy)
+        .transpose()?;
+    let mcp_extra = params
+        .mcp_extra
+        .as_deref()
+        .map(|names| -> Result<Vec<String>, VogtError> {
+            checked_mcp_extra(names)?;
+            Ok(normalised_mcp_extra(names))
+        })
+        .transpose()?;
+    let updated = place_change(
+        ctx,
+        ProjectChange {
+            slug: params.slug,
+            repo_url: params.repo_url,
+            exclusions: params.exclusions,
+            mcp_extra,
+            agent_policy,
+            lifecycle_state: None,
+            at: now_of(&ctx.clock),
+            event: PROJECT_UPDATED_EVENT,
+        },
+        PROJECT_UPDATE,
+        &params.reason,
+    )?;
+    Ok(json!({"project": updated}))
+}
+
+fn transition_project<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError> {
+    let params = parse::<TransitionProjectParams>(params)?;
+    let updated = place_change(
+        ctx,
+        ProjectChange {
+            slug: params.slug,
+            repo_url: None,
+            exclusions: None,
+            mcp_extra: None,
+            agent_policy: None,
+            lifecycle_state: Some(params.to_state),
+            at: now_of(&ctx.clock),
+            event: PROJECT_TRANSITIONED_EVENT,
+        },
+        PROJECT_TRANSITION,
+        &params.reason,
+    )?;
+    Ok(json!({"project": updated}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::git::CloneOutcome;
+    use crate::core::{
+        ActorKind, Principal, SequentialIds, SessionReport, SessionReportFields, StepClock,
+        SweepOutcome,
+    };
+    use crate::storage::interface::{DeclaredStore, ReadView};
+    use crate::storage::observed_types::PendingObservation;
+
+    fn moment() -> crate::core::Moment {
+        crate::core::Moment::from_unix(1_700_000_000, 0)
+    }
+
+    fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A migrated, bootstrapped context on a step clock and sequential ids, so a
+    /// test draws the same id every time it runs.
+    fn context(identity: &str, import_root: Option<PathBuf>) -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-projects-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            import_root,
+            ..crate::config::VogtConfig::default()
+        };
+        let principal = Principal::new(identity, ActorKind::Human, "Test").unwrap();
+        let built = crate::application::context::build_context(
+            config,
+            Some(principal.clone()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal).unwrap();
+        built
+    }
+
+    fn registration(name: &str, root: &str) -> Value {
+        json!({
+            "name": name,
+            "root_path": root,
+            "reason": "a reason",
+        })
+    }
+
+    #[test]
+    fn summary_mode_gives_compact_rows_and_the_default_is_full() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let summary = list_op(&ctx, json!({"mode": "summary"})).unwrap();
+        let row = &summary["projects"][0];
+        assert_eq!(row["slug"], "widget");
+        assert_eq!(row["name"], "Widget");
+        assert!(row.get("lifecycle_state").is_some() && row.get("link_state").is_some());
+        assert!(row.get("agent_policy").is_none(), "{row}");
+        assert!(row.get("writable").is_none(), "{row}");
+        let full = list_op(&ctx, json!({"mode": "full"})).unwrap();
+        let row = &full["projects"][0];
+        assert!(
+            row.get("agent_policy").is_some() && row.get("writable").is_some(),
+            "{row}"
+        );
+        let default = list_op(&ctx, json!({})).unwrap();
+        assert_eq!(default["projects"][0], full["projects"][0]);
+        let bad = list_op(&ctx, json!({"mode": "wide"})).unwrap_err();
+        assert!(matches!(bad, VogtError::InvalidRequest(_)), "{bad}");
+    }
+
+    #[test]
+    fn a_policy_with_the_legacy_graft_key_is_written_without_it() {
+        // gh#1461: accepted on write, never stored.
+        let policy: crate::application::models::AgentPolicy = serde_json::from_value(json!({
+            "landing": {
+                "base_branch": "main",
+                "worker_lands_by": "push_branch",
+                "merge_by": "oversight",
+                "merge_mode": "rebase",
+                "graft": {"line": "backlog-1", "mirror": "m", "endpoint": "graft-dev:17888"},
+            }
+        }))
+        .unwrap();
+        let stored = checked_agent_policy(&policy).unwrap();
+        let landing = stored.landing.expect("landing kept");
+        assert!(landing.get("graft").is_none(), "{landing}");
+        assert_eq!(landing["base_branch"], "main");
+        let other: Result<crate::application::models::AgentPolicy, _> =
+            serde_json::from_value(json!({
+                "landing": {
+                    "base_branch": "main",
+                    "worker_lands_by": "push_branch",
+                    "merge_by": "oversight",
+                    "merge_mode": "rebase",
+                    "grafted": true,
+                }
+            }));
+        assert!(other.is_err(), "other unknown keys stay refused");
+    }
+
+    #[test]
+    fn a_duplicate_slug_is_a_conflict() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let error = register_op(&ctx, registration("Widget", "/srv/other")).unwrap_err();
+        assert!(
+            matches!(error, VogtError::Conflict(ref message) if message == "a project with slug 'widget' is already registered"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_remote_caller_may_not_name_a_path_outside_the_import_root() {
+        let import = std::env::temp_dir().join(format!("vogt-import-{}", unique()));
+        std::fs::create_dir_all(&import).unwrap();
+        let ctx = context("token:remote", Some(import.clone()));
+        let error = register_op(&ctx, registration("Widget", "/etc/passwd")).unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("root_path must be within the configured import root")),
+            "{error}"
+        );
+
+        // A local principal owns the filesystem, so the same path is allowed.
+        let local = context("local:test-user", Some(import));
+        register_op(&local, registration("Widget", "/etc/passwd")).unwrap();
+    }
+
+    #[test]
+    fn a_reference_is_owner_name_or_a_url_and_never_a_bare_name() {
+        assert_eq!(
+            normalise_reference("indexarr/vogt.git"),
+            "https://github.com/indexarr/vogt"
+        );
+        assert_eq!(
+            normalise_reference("/indexarr/vogt/"),
+            "https://github.com/indexarr/vogt"
+        );
+        assert_eq!(
+            normalise_reference("https://example.com/a/b"),
+            "https://example.com/a/b"
+        );
+        // Two parts that are not names stay as written, so the URL check, not a
+        // guessed host, decides what they are.
+        assert_eq!(
+            normalise_reference("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(normalise_reference("vogt"), "vogt");
+    }
+
+    /// A clone that only makes the destination: the import under test is the
+    /// registration and the consolidation, not git.
+    fn stub_clone(request: &CloneRequest) -> Result<CloneOutcome, VogtError> {
+        std::fs::create_dir_all(&request.destination).expect("destination");
+        Ok(CloneOutcome {
+            destination: request.destination.clone(),
+            revision: None,
+            default_branch: Some("main".to_owned()),
+            reused: false,
+        })
+    }
+
+    /// Ports the Python test of the same name: with no forge token the clone and
+    /// registration still happen, and the result says the forge was not read,
+    /// rather than pretending the repository has no issues.
+    #[test]
+    fn an_import_without_a_forge_token_clones_and_says_it_was_not_collected() {
+        let Built::StepSequential(mut ctx) = context("local:test-user", None) else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.cloner = stub_clone;
+        let built = Built::StepSequential(ctx);
+        let root = std::env::temp_dir().join(format!(
+            "vogt-import-untokened-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let result = import_op(
+            &built,
+            json!({
+                "repo": "acme/widget",
+                "root_path": root.display().to_string(),
+                "reason": "a reason",
+            }),
+        )
+        .unwrap();
+
+        assert!(root.is_dir(), "the clone ran");
+        assert!(result["consolidated"].is_null(), "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not collected")),
+            "{result}"
+        );
+    }
+
+    /// Ports the import demo: the repository is cloned, registered linked, and
+    /// its existing forge state is read, with every request a GET. The forge is
+    /// the stand-in, so nothing reaches the network.
+    #[test]
+    fn an_import_that_consolidates_reads_the_forge_and_changes_nothing_upstream() {
+        use crate::application::forge_standin::StandInForge;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-import-consolidate-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            github_token_file: Some(token),
+            ..crate::config::VogtConfig::default()
+        };
+        // Initialising the instance migrates both stores, the observed one too:
+        // consolidation writes observations.
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
+        let built = crate::application::context::build_context(
+            config,
+            Some(principal),
+            clock,
+            ids,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let standin = StandInForge::one_of_each();
+        let transport = standin.transport();
+        let Built::StepSequential(mut ctx) = built else {
+            unreachable!("the test asks for a step clock and sequential ids");
+        };
+        ctx.cloner = stub_clone;
+        let built =
+            Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+                transport(url, headers, body, method)
+            }));
+
+        let result = import_op(
+            &built,
+            json!({"repo": "acme/widget", "reason": "a reason", "consolidate": true}),
+        )
+        .unwrap();
+
+        assert_eq!(result["consolidated"]["supported"], true, "{result}");
+        assert_eq!(result["consolidated"]["issues"], 1, "{result}");
+        assert_eq!(result["consolidated"]["mutations"], 0, "{result}");
+        let requests = standin.requests();
+        assert!(!requests.is_empty(), "consolidation read nothing");
+        assert!(
+            requests.iter().all(|request| request.starts_with("GET ")),
+            "import mutated upstream: {requests:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_names_no_repository_is_refused() {
+        let ctx = context("local:test-user", None);
+        let error = import_op(
+            &ctx,
+            json!({"repo": "not a repo!", "reason": "a reason", "consolidate": false}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("does not name a GitHub repository")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn scaffolding_leaves_an_existing_file_untouched() {
+        let root = std::env::temp_dir().join(format!("vogt-scaffold-{}", unique()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "kept").unwrap();
+        let ctx = context("local:test-user", None);
+        create_op(&ctx, registration("Widget", &root.display().to_string())).unwrap();
+        let result = scaffold_op(&ctx, json!({"project": "widget", "reason": "a reason"})).unwrap();
+        assert!(result["skipped"].as_array().unwrap().iter().any(|entry| {
+            entry
+                .as_str()
+                .is_some_and(|path| path.ends_with("README.md"))
+        }));
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn create_adopts_the_contract_and_register_does_not() {
+        let ctx = context("local:test-user", None);
+        let registered = register_op(&ctx, registration("Registered", "/srv/registered")).unwrap();
+        assert!(registered["project"]["contract_adopted_at"].is_null());
+        let root = std::env::temp_dir().join(format!("vogt-created-{}", unique()));
+        let created =
+            create_op(&ctx, registration("Created", &root.display().to_string())).unwrap();
+        assert!(created["project"]["contract_adopted_at"].is_string());
+    }
+
+    #[test]
+    fn an_illegal_lifecycle_transition_is_rejected() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let error = transition_op(
+            &ctx,
+            json!({"slug": "widget", "to_state": "retired", "reason": "a reason"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::TransitionRejected { ref rule, .. } if rule == "lifecycle.not_allowed"),
+            "{error}"
+        );
+    }
+
+    fn policy_with_source() -> Value {
+        json!({
+            "forbidden_text": ["^wip$"],
+            "landing": {
+                "base_branch": "main",
+                "worker_lands_by": "push_branch",
+                "merge_by": "oversight",
+                "merge_mode": "rebase",
+                "source": {
+                    "location": {"kind": "graft", "endpoint": "http://graft:1", "repo": "vogt"},
+                    "ref": "rust-2",
+                    "landing": "line"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn update_with_an_agent_policy_persists_it_including_the_landing_source() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let updated = update_op(
+            &ctx,
+            json!({"slug": "widget", "agent_policy": policy_with_source(), "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(
+            updated["project"]["agent_policy"]["landing"]["source"]["ref"],
+            "rust-2"
+        );
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(
+            got["project"]["agent_policy"]["landing"]["source"]["location"]["repo"], "vogt",
+            "{got}"
+        );
+        assert_eq!(got["project"]["agent_policy"]["forbidden_text"][0], "^wip$");
+    }
+
+    #[test]
+    fn update_refuses_a_malformed_agent_policy_and_stores_nothing() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let mut merge = policy_with_source();
+        merge["landing"]["merge_mode"] = json!("merge");
+        let mut lookaround = policy_with_source();
+        lookaround["forbidden_text"] = json!(["(?=x)"]);
+        let mut uncompiled = policy_with_source();
+        uncompiled["forbidden_text"] = json!(["("]);
+        let mut pattern = policy_with_source();
+        pattern["landing"]["branch_pattern"] = json!("^wi-{n}-(");
+        let mut source = policy_with_source();
+        source["landing"]["source"] = json!({"ref": ""});
+        for bad in [merge, lookaround, uncompiled, pattern, source] {
+            let error = update_op(
+                &ctx,
+                json!({"slug": "widget", "agent_policy": bad.clone(), "reason": "a reason"}),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, VogtError::InvalidRequest(_)),
+                "{bad}: {error}"
+            );
+        }
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert!(got["project"]["agent_policy"]["landing"].is_null(), "{got}");
+    }
+
+    #[test]
+    fn update_stores_mcp_extra_trimmed_blank_free_and_first_occurrence_kept() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let updated = update_op(
+            &ctx,
+            json!({"slug": "widget", "mcp_extra": [" grok ", "", "crw-2", "grok"], "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(updated["project"]["mcp_extra"], json!(["grok", "crw-2"]));
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(
+            got["project"]["mcp_extra"],
+            json!(["grok", "crw-2"]),
+            "{got}"
+        );
+        let cleared = update_op(
+            &ctx,
+            json!({"slug": "widget", "mcp_extra": [], "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(cleared["project"]["mcp_extra"], json!([]));
+    }
+
+    #[test]
+    fn update_refuses_a_bad_mcp_extra_name_or_too_many_and_stores_nothing() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let too_long = "x".repeat(65);
+        let too_many: Vec<String> = (0..=MCP_EXTRA_MAX).map(|n| format!("s{n}")).collect();
+        for bad in [
+            json!(["has space"]),
+            json!(["dotted.name"]),
+            json!([too_long]),
+            json!(too_many),
+        ] {
+            let error = update_op(
+                &ctx,
+                json!({"slug": "widget", "mcp_extra": bad.clone(), "reason": "a reason"}),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, VogtError::InvalidRequest(_)),
+                "{bad}: {error}"
+            );
+        }
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(got["project"]["mcp_extra"], json!([]), "{got}");
+    }
+
+    #[test]
+    fn a_digest_line_is_one_bounded_line() {
+        let line = digest_line(&format!("first\n\n{}", "x".repeat(400)));
+        assert!(!line.contains('\n'));
+        assert_eq!(line.chars().count(), DIGEST_LINE);
+        assert!(line.ends_with('…'));
+        assert_eq!(digest_line("  a \t b\n c  "), "a b c");
+    }
+
+    #[test]
+    fn an_empty_project_has_an_empty_digest() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest,
+            json!({
+                "initiatives": [],
+                "in_progress": [],
+                "recent_results": [],
+                "last_merge": null,
+                "last_deploy": null,
+            })
+        );
+    }
+
+    #[test]
+    fn the_digest_ranks_initiatives_and_names_who_holds_each_item() {
+        use crate::application::services::initiatives::initiative_create_op;
+        use crate::application::services::work::{create_op, transition_op};
+
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        for (title, weight) in [("Light", 5), ("Heavy", 40)] {
+            initiative_create_op(
+                &ctx,
+                json!({"title": title, "weight": weight, "reason": "a reason"}),
+            )
+            .unwrap();
+        }
+        for slug in ["light", "heavy"] {
+            create_op(
+                &ctx,
+                json!({
+                    "kind": "feature",
+                    "title": format!("Under {slug}"),
+                    "project": "widget",
+                    "initiative": slug,
+                    "local_only": true,
+                    "reason": "a reason",
+                }),
+            )
+            .unwrap();
+        }
+        let first = json!({"ref": "WI-1", "to_state": "in_progress", "reason": "a reason"});
+        transition_op(&ctx, first).unwrap();
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["initiatives"],
+            json!([
+                "heavy (weight 40, 1 open here): Heavy",
+                "light (weight 5, 1 open here): Light",
+            ])
+        );
+        assert_eq!(digest["in_progress"], json!(["WI-1 [unheld]: Under light"]));
+    }
+
+    fn at(unix: i64) -> Moment {
+        Moment::from_unix(unix, 0)
+    }
+
+    fn project_id_of(built: &Built, slug: &str) -> String {
+        crate::with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.project_by_slug(slug)
+                .unwrap()
+                .expect("the project is registered")
+                .id
+        })
+    }
+
+    fn work_id_of(built: &Built, reference: &str) -> String {
+        crate::with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.work_item_by_ref(reference)
+                .unwrap()
+                .expect("the work item exists")
+                .id
+        })
+    }
+
+    /// A coding session on the project, optionally holding a work item.
+    fn seed_session(
+        built: &Built,
+        id: &str,
+        project_id: &str,
+        work_item_id: Option<&str>,
+        started: i64,
+        stopped: Option<i64>,
+    ) {
+        let id = id.to_string();
+        let project_id = project_id.to_string();
+        let work_item_id = work_item_id.map(str::to_string);
+        crate::with_ctx!(built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.start", "test", move |txn, actor| {
+                txn.insert_session(&CodingSession {
+                    id: id.clone(),
+                    engine_session_id: format!("eng_{id}"),
+                    project_id: project_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    actor_id: actor.id.clone(),
+                    cwd: "/srv/widget".to_string(),
+                    template: None,
+                    model: None,
+                    effort: None,
+                    reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
+                    started_at: at(started),
+                    stopped_at: stopped.map(at),
+                })?;
+                Ok(WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session".to_string(),
+                    entity_id: "ses".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.started".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+    }
+
+    /// A session report on a work item, as `session_report` writes it.
+    fn seed_report(
+        built: &Built,
+        id: &str,
+        work_item_id: &str,
+        kind: &str,
+        summary: &str,
+        unix: i64,
+    ) {
+        let id = id.to_string();
+        let work_item_id = work_item_id.to_string();
+        let kind = kind.to_string();
+        let summary = summary.to_string();
+        crate::with_ctx!(built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.report", "test", move |txn, actor| {
+                txn.insert_session_report(&SessionReport {
+                    id: id.clone(),
+                    actor_id: actor.id.clone(),
+                    engine_session_id: None,
+                    work_item_id: Some(work_item_id.clone()),
+                    kind: kind.clone(),
+                    summary: summary.clone(),
+                    fields: SessionReportFields::default(),
+                    created_at: at(unix),
+                })?;
+                Ok(WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session_report".to_string(),
+                    entity_id: "rpt".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.report".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+    }
+
+    /// A result report stored the way an idempotency-keyed report is: a raw row
+    /// whose `data` JSON carries `idempotency_key`.
+    fn seed_stored_report_with_idempotency_key(built: &Built, work_item_id: &str) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("context() builds a step clock");
+        };
+        let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let actor_id: String = conn
+            .query_row(
+                "SELECT id FROM actors WHERE identity_ref = 'local:test-user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at)
+             VALUES ('rpt-keyed', ?1, NULL, ?2, 'result', 'keyed result',
+                     '{\"branch\":\"backlog-1\",\"idempotency_key\":\"rpt-key-1\"}',
+                     '2023-11-14T22:13:20Z')",
+            rusqlite::params![actor_id, work_item_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_project_brief_reads_a_stored_report_with_an_idempotency_key() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        let item = work_id_of(&ctx, "WI-1");
+        seed_stored_report_with_idempotency_key(&ctx, &item);
+
+        let brief = brief_op(&ctx, json!({"slug": "widget"})).unwrap();
+
+        assert!(brief.get("migration_error").is_none(), "{brief}");
+        assert_eq!(
+            brief["digest"]["recent_results"],
+            json!(["2023-11-14 22:13Z WI-1: keyed result"]),
+        );
+    }
+
+    /// The observed store is migrated once per test, before its first sweep.
+    fn migrate_observed(built: &Built) {
+        crate::with_ctx!(built, |ctx| ctx.observed.migrate().unwrap());
+    }
+
+    /// One sweep of forge or deploy observations, as a collector appends them.
+    fn seed_observations(built: &Built, unix: i64, rows: Vec<PendingObservation>) {
+        crate::with_ctx!(built, |ctx| {
+            let moment = at(unix);
+            let sweep = ctx.observed.begin_sweep("test", &[], moment).unwrap();
+            ctx.observed.append(&sweep.id, &rows, moment).unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], moment, None)
+                .unwrap();
+            ctx.observed.rebuild_latest().unwrap();
+        });
+    }
+
+    fn observation(
+        kind: &str,
+        subject: &str,
+        project_id: &str,
+        payload: Value,
+    ) -> PendingObservation {
+        PendingObservation {
+            kind: kind.to_string(),
+            subject_key: subject.to_string(),
+            content_digest: payload.to_string(),
+            payload,
+            project_id: Some(project_id.to_string()),
+            source_url: None,
+            promoted: false,
+        }
+    }
+
+    /// Two work items on the widget project: WI-1 "Under light", WI-2 "Under heavy".
+    fn widget_with_items(ctx: &Built) {
+        use crate::application::services::work::create_op;
+        register_op(ctx, registration("Widget", "/srv/widget")).unwrap();
+        for title in ["Under light", "Under heavy"] {
+            create_op(
+                ctx,
+                json!({
+                    "kind": "feature",
+                    "title": title,
+                    "project": "widget",
+                    "local_only": true,
+                    "reason": "a reason",
+                }),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn recent_results_are_the_newest_three_result_lines_one_line_each() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        let item = work_id_of(&ctx, "WI-1");
+        // 1_700_000_000 is 2023-11-14 22:13:20 UTC; each report a minute later.
+        for n in 0..5 {
+            seed_report(
+                &ctx,
+                &format!("rpt_{n}"),
+                &item,
+                "result",
+                &format!("result {n}\nsecond line"),
+                1_700_000_000 + 60 * n,
+            );
+        }
+        seed_report(
+            &ctx,
+            "rpt_progress",
+            &item,
+            "progress",
+            "not a result",
+            1_700_001_000,
+        );
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+
+        assert_eq!(
+            digest["recent_results"],
+            json!([
+                "2023-11-14 22:17Z WI-1: result 4 second line",
+                "2023-11-14 22:16Z WI-1: result 3 second line",
+                "2023-11-14 22:15Z WI-1: result 2 second line",
+            ])
+        );
+    }
+
+    #[test]
+    fn an_item_is_held_by_its_newest_live_session() {
+        use crate::application::services::work::transition_op;
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        transition_op(
+            &ctx,
+            json!({"ref": "WI-1", "to_state": "in_progress", "reason": "a reason"}),
+        )
+        .unwrap();
+        let project = project_id_of(&ctx, "widget");
+        let item = work_id_of(&ctx, "WI-1");
+        // A stopped session is ignored even though it is the newest.
+        seed_session(&ctx, "ses_stopped", &project, Some(&item), 900, Some(1_000));
+        seed_session(&ctx, "ses_old", &project, Some(&item), 100, None);
+        seed_session(&ctx, "ses_new", &project, Some(&item), 500, None);
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+
+        assert_eq!(
+            digest["in_progress"],
+            json!(["WI-1 [session ses_new]: Under light"])
+        );
+    }
+
+    #[test]
+    fn last_merge_is_the_newest_merged_pull_request_with_its_fallbacks() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        migrate_observed(&ctx);
+        let project = project_id_of(&ctx, "widget");
+        let pr = |subject: &str, payload: Value| {
+            observation("forge.pull_request", subject, &project, payload)
+        };
+        // 2023-11-16 22:13:20 is two days after the first sweep.
+        seed_observations(
+            &ctx,
+            1_700_000_000,
+            vec![
+                pr(
+                    "pr:10",
+                    json!({"state": "merged", "number": 10, "title": "Older merge",
+                           "merged_at": "2023-11-13T10:00:00Z"}),
+                ),
+                pr(
+                    "pr:11",
+                    json!({"state": "merged", "number": 11, "title": "Newest merge",
+                           "merged_at": "2023-11-15T09:30:00Z"}),
+                ),
+                // Closed without merging: never a merge.
+                pr(
+                    "pr:12",
+                    json!({"state": "closed", "number": 12, "title": "Closed unmerged",
+                           "closed_at": "2023-11-20T00:00:00Z"}),
+                ),
+            ],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_merge"],
+            json!("2023-11-15 09:30Z #11: Newest merge")
+        );
+
+        // An empty merged_at is falsy, so the merge falls back to when it
+        // was observed, which is newer than any stamp above.
+        seed_observations(
+            &ctx,
+            1_700_172_800,
+            vec![pr(
+                "pr:14",
+                json!({"state": "merged", "number": 14, "title": "Unstamped",
+                       "merged_at": "", "closed_at": null}),
+            )],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_merge"],
+            json!("2023-11-16 22:13Z #14: Unstamped")
+        );
+    }
+
+    #[test]
+    fn last_deploy_is_the_newest_lane_sha_with_live_before_receipt() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        migrate_observed(&ctx);
+        let project = project_id_of(&ctx, "widget");
+        let lane = |subject: &str, payload: Value| {
+            observation(KIND_DEPLOY_LANE, subject, &project, payload)
+        };
+        seed_observations(
+            &ctx,
+            1_700_000_000,
+            vec![lane(
+                "lane:dev",
+                json!({
+                    "lane": "dev",
+                    "live": {"source_sha": "0123456789abcdef9999"},
+                    "receipt": {"source_sha": "ffffffffffff"},
+                }),
+            )],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_deploy"],
+            json!("dev at 0123456789ab (seen 2023-11-14 22:13Z)")
+        );
+
+        // A day later: prod has only a receipt, so its receipt sha is shown.
+        // A lane with no sha at all is skipped even though it is newest.
+        seed_observations(
+            &ctx,
+            1_700_086_400,
+            vec![
+                lane(
+                    "lane:prod",
+                    json!({"lane": "prod", "receipt": {"source_sha": "fedcba987654aaaa"}}),
+                ),
+                lane("lane:staging", json!({"lane": "staging", "live": {}})),
+            ],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_deploy"],
+            json!("prod at fedcba987654 (seen 2023-11-15 22:13Z)")
+        );
+    }
+}

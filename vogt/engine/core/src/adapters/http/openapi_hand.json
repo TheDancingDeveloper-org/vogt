@@ -1,0 +1,743 @@
+{
+  "components": {
+    "Actor": {
+      "additionalProperties": false,
+      "description": "A human or an agent. Both are first-class.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "disabled": {
+          "default": false,
+          "title": "Disabled",
+          "type": "boolean"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "identity_ref": {
+          "title": "Identity Ref",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "display_name",
+        "identity_ref",
+        "created_at"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "ConnectionInfo": {
+      "description": "What a client needs to connect, from the server itself (DEPLOY §4.3).\n\nOne generated document rather than per-client hand-copied config: the\n`:18081` incident began as a URL that lived in seven places and was\nretired in one.",
+      "properties": {
+        "api_path": {
+          "title": "Api Path",
+          "type": "string"
+        },
+        "authentication": {
+          "title": "Authentication",
+          "type": "string"
+        },
+        "health_path": {
+          "title": "Health Path",
+          "type": "string"
+        },
+        "mcp_path": {
+          "title": "Mcp Path",
+          "type": "string"
+        },
+        "name": {
+          "default": "vogt",
+          "title": "Name",
+          "type": "string"
+        },
+        "supported_mcp_protocol_versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Mcp Protocol Versions",
+          "type": "array"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Url"
+        },
+        "version": {
+          "default": "0.7.22",
+          "title": "Version",
+          "type": "string"
+        },
+        "writes_enabled": {
+          "title": "Writes Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "api_path",
+        "mcp_path",
+        "health_path",
+        "supported_mcp_protocol_versions",
+        "authentication",
+        "writes_enabled"
+      ],
+      "title": "ConnectionInfo",
+      "type": "object"
+    },
+    "HTTPValidationError": {
+      "properties": {
+        "detail": {
+          "items": {
+            "$ref": "#/components/schemas/ValidationError"
+          },
+          "title": "Detail",
+          "type": "array"
+        }
+      },
+      "title": "HTTPValidationError",
+      "type": "object"
+    },
+    "InstallBootstrapParams": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "description": "The first operator's name, e.g. 'Ada Lovelace'.",
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "identity_ref": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Stable identity for the actor. Derived as human:<slug> from the display name when omitted.",
+          "title": "Identity Ref"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The first operator's password, at least 8 characters. Omit for the headless bootstrap, which returns an admin API token instead.",
+          "title": "Password"
+        },
+        "token_name": {
+          "default": "first-run browser token",
+          "description": "What the issued token is for.",
+          "minLength": 1,
+          "title": "Token Name",
+          "type": "string"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A login name for the first operator. Given with `password`, the bootstrap creates a password login and the token it returns is a browser session rather than a long-lived API token. Derived from the display name when a password is given without one.",
+          "title": "Username"
+        }
+      },
+      "required": [
+        "display_name"
+      ],
+      "title": "InstallBootstrapParams",
+      "type": "object"
+    },
+    "InstallBootstrapResult": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "$ref": "#/components/schemas/Actor"
+        },
+        "secret": {
+          "description": "Shown once. Not stored, not recoverable — rotate if lost.",
+          "title": "Secret",
+          "type": "string"
+        },
+        "token": {
+          "$ref": "#/components/schemas/Token"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The login name created, when the bootstrap set a password.",
+          "title": "Username"
+        },
+        "warning": {
+          "title": "Warning",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "token",
+        "secret",
+        "warning"
+      ],
+      "title": "InstallBootstrapResult",
+      "type": "object"
+    },
+    "InstallStatusResult": {
+      "additionalProperties": false,
+      "description": "Whether this instance is still in first-run install mode.",
+      "properties": {
+        "install_mode": {
+          "description": "True while the token store holds no tokens at all — the state in which the unauthenticated bootstrap will answer. The first token, however issued, turns this false for good.",
+          "title": "Install Mode",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "install_mode"
+      ],
+      "title": "InstallStatusResult",
+      "type": "object"
+    },
+    "Liveness": {
+      "properties": {
+        "status": {
+          "default": "ok",
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "default": "0.7.22",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "title": "Liveness",
+      "type": "object"
+    },
+    "LoginParams": {
+      "additionalProperties": false,
+      "description": "Sign in with a username and password. Unauthenticated by construction.",
+      "properties": {
+        "password": {
+          "minLength": 1,
+          "title": "Password",
+          "type": "string"
+        },
+        "session_name": {
+          "default": "browser session",
+          "description": "What the session is for, e.g. the device it lives on.",
+          "minLength": 1,
+          "title": "Session Name",
+          "type": "string"
+        },
+        "username": {
+          "minLength": 1,
+          "title": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "password"
+      ],
+      "title": "LoginParams",
+      "type": "object"
+    },
+    "LoginResult": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "$ref": "#/components/schemas/Actor"
+        },
+        "secret": {
+          "description": "The session bearer, shown once. Expires; revoked by auth.logout.",
+          "title": "Secret",
+          "type": "string"
+        },
+        "token": {
+          "$ref": "#/components/schemas/Token"
+        }
+      },
+      "required": [
+        "actor",
+        "token",
+        "secret"
+      ],
+      "title": "LoginResult",
+      "type": "object"
+    },
+    "Readiness": {
+      "description": "Ready means the stores are migrated *to this build's schema* and\nanswering.\n\nReadiness gates traffic until migration completes (`DEPLOYMENT.md`),\nwhich is why this reports schema versions rather\nthan a bare boolean: a red probe should say what is wrong.\n\n**Both numbers are reported per store, and that is the whole of the fix\nmade at r13.** Until then this answered with the *applied* version alone\nand said `ready` whenever the stores responded — a fact about the disk\nthat answers no question a deployer has. An image whose migration had not\nrun looked exactly like one whose migration had, so a container carrying\na new migration came up green and failed afterwards on a missing table,\nas a SQL error at whatever touched it first rather than as a red probe.\nComparing the two is what turns that into an outage the orchestrator can\nsee before it routes traffic.",
+      "properties": {
+        "declared_schema_expected": {
+          "default": 0,
+          "title": "Declared Schema Expected",
+          "type": "integer"
+        },
+        "declared_schema_version": {
+          "default": 0,
+          "title": "Declared Schema Version",
+          "type": "integer"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Detail"
+        },
+        "instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Instance Id"
+        },
+        "observed_schema_expected": {
+          "default": 0,
+          "title": "Observed Schema Expected",
+          "type": "integer"
+        },
+        "observed_schema_version": {
+          "default": 0,
+          "title": "Observed Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "Readiness",
+      "type": "object"
+    },
+    "Token": {
+      "additionalProperties": false,
+      "description": "A scoped credential bound to an actor.\n\nNever carries the secret: only the hash is stored, and the secret is\nshown once at issue time. A model that could round-trip the credential\nis a model that leaks it into logs and API responses.",
+      "properties": {
+        "actor_id": {
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "actor_identity_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actor Identity Ref"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expires At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "api",
+          "enum": [
+            "api",
+            "session",
+            "agent"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "last_used_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Used At"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "revoked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Revoked At"
+        },
+        "revoked_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Revoked Reason"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "actor_id",
+        "name",
+        "scopes",
+        "created_at"
+      ],
+      "title": "Token",
+      "type": "object"
+    },
+    "ValidationError": {
+      "properties": {
+        "ctx": {
+          "title": "Context",
+          "type": "object"
+        },
+        "input": {
+          "title": "Input"
+        },
+        "loc": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Location",
+          "type": "array"
+        },
+        "msg": {
+          "title": "Message",
+          "type": "string"
+        },
+        "type": {
+          "title": "Error Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "loc",
+        "msg",
+        "type"
+      ],
+      "title": "ValidationError",
+      "type": "object"
+    },
+    "VersionInfo": {
+      "properties": {
+        "name": {
+          "default": "vogt",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "default": "0.7.22",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "title": "VersionInfo",
+      "type": "object"
+    }
+  },
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "description": "Exchange a username and password for a session token.",
+        "operationId": "sign_in_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign In",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/install/bootstrap": {
+      "post": {
+        "description": "Name the first operator and mint the first token — exactly once.",
+        "operationId": "bootstrap_api_install_bootstrap_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallBootstrapParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallBootstrapResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap",
+        "tags": [
+          "install"
+        ]
+      }
+    },
+    "/api/install/status": {
+      "get": {
+        "description": "Whether the first-run bootstrap is still open.",
+        "operationId": "status_api_install_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Status",
+        "tags": [
+          "install"
+        ]
+      }
+    },
+    "/connection-info": {
+      "get": {
+        "description": "Where a client should go — which behind a door is not here.\n\nUnauthenticated by design, and therefore the one place a\nforwarded identity could be abused if it were trusted unconditionally:\nthis answer is what a client dials. `identity_from_headers` ignores\nthe headers unless the deployment has said it is fronted.",
+        "operationId": "connection_info_connection_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Connection Info",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/health/live": {
+      "get": {
+        "description": "Liveness: the process is up. Deliberately cheap and storage-free.",
+        "operationId": "live_health_live_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Liveness"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Live",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "description": "Readiness: the stores are migrated and answering.",
+        "operationId": "ready_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/mcp": {
+      "post": {
+        "operationId": "mcp_mcp_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mcp",
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/version": {
+      "get": {
+        "operationId": "version_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Version",
+        "tags": [
+          "health"
+        ]
+      }
+    }
+  }
+}

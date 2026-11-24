@@ -1,0 +1,8 @@
+# BuildKit reads <dockerfile>.dockerignore for this image. The bundle needs
+# web/ and nothing else; a host-built dist or node_modules must not win over
+# the one this build makes.
+*
+!web/
+!web/**
+web/node_modules
+web/dist

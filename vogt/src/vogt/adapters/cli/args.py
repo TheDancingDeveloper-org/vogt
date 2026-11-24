@@ -1,0 +1,204 @@
+"""Turning a pydantic parameter model into argparse flags.
+
+The CLI has no hand-written argument list: adding a field to a parameter
+model adds the flag, its type, its choices and its help text. That is the
+mechanical half of "nothing is CLI-only, nothing is missing from the CLI"
+.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
+
+from pydantic import BaseModel
+from pydantic.fields import FieldInfo
+
+
+@dataclass(frozen=True)
+class ArgSpec:
+    """How one model field becomes one command-line flag."""
+
+    flag: str
+    dest: str
+    required: bool
+    kind: Callable[[str], Any]
+    choices: tuple[str, ...] | None
+    is_bool: bool
+    is_list: bool
+    help_text: str
+
+
+def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(args) == 1:
+            return args[0], True
+    return annotation, False
+
+
+def spec_for(name: str, field: FieldInfo) -> ArgSpec:
+    """Describe the flag for one parameter-model field."""
+    annotation, optional = _unwrap_optional(field.annotation)
+    origin = get_origin(annotation)
+    choices: tuple[str, ...] | None = None
+    is_list = False
+    kind: Callable[[str], Any] = str
+
+    if origin is Literal:
+        choices = tuple(str(arg) for arg in get_args(annotation))
+    elif origin in (list, tuple):
+        is_list = True
+        element = get_args(annotation)[0] if get_args(annotation) else str
+        # Structured batched reads remain usable from the generated CLI:
+        # repeat `--cells '{"lane_key":"","state":"open"}'`.
+        kind = (
+            json.loads
+            if isinstance(element, type) and issubclass(element, BaseModel)
+            else str
+        )
+    elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        # A structured flag (`--agent-policy`, `--handoff`) is a JSON object.
+        kind = json.loads
+    elif annotation is bool:
+        kind = bool
+    elif annotation is int:
+        kind = int
+    elif annotation is float:
+        kind = float
+    elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        # A nested model (`watch.create --trigger '{...}'`) is one JSON
+        # object, the same way a list of models is one JSON value per repeat
+        # and the Rust CLI already parses object-typed flags.
+        kind = json.loads
+
+    return ArgSpec(
+        flag=f"--{name.replace('_', '-')}",
+        dest=name,
+        required=field.is_required() and not optional,
+        kind=kind,
+        choices=choices,
+        is_bool=annotation is bool,
+        is_list=is_list,
+        help_text=field.description or "",
+    )
+
+
+#: Fields that hold a secret a person chooses. They never become a plain
+#: flag: a password or a personal access token on the command line is one in
+#: every process listing and shell history. Each gets `--<name>-file PATH`
+#: and `--<name>-stdin` instead, and a terminal falls back to a hidden prompt.
+#: `token` is `forge.account_link`'s PAT (WI-3393, WI-4132).
+SECRET_FIELDS = frozenset({"password", "token"})
+
+
+def is_secret_field(name: str) -> bool:
+    return name in SECRET_FIELDS or name.endswith("_password")
+
+
+def add_model_arguments(
+    parser: argparse.ArgumentParser, model: type[BaseModel]
+) -> None:
+    """Add one flag per field of `model` to `parser`."""
+    for name, field in model.model_fields.items():
+        if is_secret_field(name):
+            flag = name.replace("_", "-")
+            group = parser.add_mutually_exclusive_group()
+            group.add_argument(
+                f"--{flag}-file",
+                dest=f"{name}__file",
+                type=Path,
+                default=None,
+                help=f"Read the {flag} from this file (never pass it in argv).",
+            )
+            group.add_argument(
+                f"--{flag}-stdin",
+                dest=f"{name}__stdin",
+                action="store_true",
+                default=False,
+                help=f"Read the {flag} from standard input.",
+            )
+            continue
+        spec = spec_for(name, field)
+        if spec.is_bool:
+            # A field already phrased as a negative — `no_auth` — has no
+            # sensible `--no-no-auth`, and argparse says so: since 3.13,
+            # `BooleanOptionalAction` raises `ValueError` on an option name
+            # that starts with `--no-`, at parser-construction time. That is
+            # every command, not just the one flag, so on a new enough
+            # interpreter the CLI did not run at all. Such a field takes the
+            # plain switch it always meant.
+            if spec.flag.startswith("--no-"):
+                parser.add_argument(
+                    spec.flag,
+                    dest=spec.dest,
+                    action="store_true",
+                    default=None,
+                    help=spec.help_text or None,
+                )
+                continue
+            parser.add_argument(
+                spec.flag,
+                dest=spec.dest,
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help=spec.help_text or None,
+            )
+            continue
+        parser.add_argument(
+            spec.flag,
+            dest=spec.dest,
+            required=spec.required,
+            default=None,
+            action="append" if spec.is_list else "store",
+            type=spec.kind if spec.choices is None else str,
+            choices=list(spec.choices) if spec.choices else None,
+            help=spec.help_text or None,
+        )
+
+
+def collect_params(
+    namespace: argparse.Namespace, model: type[BaseModel]
+) -> dict[str, Any]:
+    """Read parsed flags back out, omitting anything the caller did not set.
+
+    Omission matters: a flag left off must fall through to the model's own
+    default rather than overwrite it with `None`.
+    """
+    values: dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        if is_secret_field(name):
+            secret = _collect_secret(namespace, name, required=field.is_required())
+            if secret is not None:
+                values[name] = secret
+            continue
+        value = getattr(namespace, name, None)
+        if value is not None:
+            values[name] = value
+    return values
+
+
+def _collect_secret(
+    namespace: argparse.Namespace, name: str, *, required: bool
+) -> str | None:
+    """A secret from its file, from stdin, or from a hidden prompt."""
+    path: Path | None = getattr(namespace, f"{name}__file", None)
+    if path is not None:
+        return path.read_text(encoding="utf-8").rstrip("\r\n")
+    if getattr(namespace, f"{name}__stdin", False):
+        return sys.stdin.readline().rstrip("\r\n")
+    if not required:
+        return None
+    flag = name.replace("_", "-")
+    if not sys.stdin.isatty():
+        msg = f"--{flag}-file or --{flag}-stdin is required when not on a terminal"
+        raise SystemExit(msg)
+    return getpass.getpass(f"{flag}: ")

@@ -1,0 +1,7156 @@
+"""Parameter and result models.
+
+These are the argument schemas the operation registry publishes: the CLI
+builds its flags from them, FastAPI builds its request and response schemas
+from them, and MCP builds its `inputSchema` from them. One definition, three
+transports — which is the mechanical half of transport parity.
+
+Two conventions worth knowing before adding one:
+
+- **Callers name things the way humans and agents do.** Parameters take
+  `WI-7`, a project slug, an actor's `identity_ref` — not ULIDs. Resolution
+  to ids happens in the services, so a mistyped reference fails with "no work
+  item WI-70" rather than a foreign-key error.
+- **Clearing is explicit.** A field left unset means "leave it alone"; a
+  `clear_*` flag means "unset it". Without that split, unassigning somebody
+  and not mentioning the assignee are the same request.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from vogt.core.dispatch import Purpose
+from vogt.core.entities import (
+    Actor,
+    AgentPolicy,
+    AuditRecord,
+    AuthDecision,
+    Comment,
+    CommentKind,
+    DepRef,
+    DriftProposal,
+    Effort,
+    Event,
+    HandoffFields,
+    Initiative,
+    InitiativeState,
+    Label,
+    LifecycleState,
+    Name,
+    Observation,
+    PasswordCredential,
+    Priority,
+    Project,
+    Reason,
+    RelationKind,
+    Suppression,
+    Token,
+    TrustState,
+    VerdictFields,
+    VerificationFields,
+    WorkItem,
+    WorkKind,
+)
+
+#: Applied to collection within a project. Recorded at registration
+#: so the value exists before any collector that honours it runs.
+DEFAULT_EXCLUSIONS: tuple[str, ...] = (
+    ".venv/",
+    "node_modules/",
+    "target/",
+    "dist/",
+    "build/",
+    ".git/",
+    # Agent scratch space. Worktrees under `.claude/` carry complete copies of
+    # a project's manifests, so without this a repository's dependency graph is
+    # inflated by however many worktrees happen to be lying around — `vogt`
+    # reported six references out, three of them duplicates from one
+    # throwaway worktree.
+    ".claude/",
+)
+
+
+class Params(BaseModel):
+    """Base for operation parameters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Result(BaseModel):
+    """Base for operation results."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+#: How much of each row a listing returns. `summary` is the compact row an
+#: agent can hold two hundred of in one tool result; `full` is every field,
+#: bodies included, which is what a GUI rendering a detail pane needs.
+ListMode = Literal["summary", "full"]
+
+#: How much of a session row the session tools return. `digest` is one line of
+#: state (design C1); `full` is the SessionSummary a GUI already renders.
+SessionViewMode = Literal["digest", "full"]
+
+#: How much a write returns over MCP (WI-1525).
+WriteResultMode = Literal["compact", "full"]
+
+WRITE_RESULT_MODE_DESCRIPTION = (
+    "`compact` (default) returns a few fields: enough to confirm the write "
+    "without re-reading the whole record. `full` returns the complete result."
+)
+
+#: Session states a digest listing keeps unless the caller names others.
+#: Hibernated, stopped and exited stay in `counts` but not in the rows.
+DIGEST_LIVE_STATES: frozenset[str] = frozenset(
+    {"running", "idle", "waiting", "blocked", "approval", "stalled", "done", "unknown"}
+)
+
+_DIGEST_ROW_BUDGET = 300
+
+
+def comma_list(value: object) -> object:
+    """Split one comma-separated string into a list.
+
+    MCP and HTTP callers often send `fields` as `"a,b"` rather than
+    `["a", "b"]`. A list is left as it is. A lone value with no comma stays
+    a one-element list.
+    """
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return value
+
+
+def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
+    """Rename a tolerated parameter alias to the field it means.
+
+    Agents reach for the common name — `work_get(id=...)`,
+    `work_list(status=...)` — and a schema error costs a round trip that
+    teaches nothing. An alias is accepted only when the canonical field is
+    absent; naming both is ambiguous and is refused rather than guessed.
+    The aliases are documented on the field they map to and pinned by tests
+    so they cannot drift silently.
+    """
+    if not isinstance(data, dict):
+        return data
+    renamed = dict(data)
+    for alias, field in aliases.items():
+        if alias not in renamed:
+            continue
+        if field in renamed:
+            msg = (
+                f"{model}: {alias!r} is an alias of {field!r}; pass one of "
+                "them, not both"
+            )
+            raise ValueError(msg)
+        renamed[field] = renamed.pop(alias)
+    return renamed
+
+
+# -- normalized attention inbox -------------------------------------------
+
+
+InboxSource = Literal["github", "drift", "ci", "agent"]
+InboxTriageState = Literal["active", "archived", "snoozed"]
+#: What a session is for (WI-957): an ordinary worker, or one nominated to
+#: supervise the others.
+SessionRole = Literal["worker", "oversight"]
+
+
+class InboxAction(Result):
+    """A typed target for the action a row can take."""
+
+    kind: Literal["drift", "observation", "session", "grant", "decision"]
+    drift_id: str | None = None
+    subject_key: str | None = None
+    session_id: str | None = None
+    #: A pending grant a person approves or denies (WI-973).
+    grant_id: str | None = None
+    #: A pending decision a person answers (WI-1321).
+    decision_id: str | None = None
+
+
+class InboxEntry(Result):
+    """One server-normalized occurrence in the attention stream."""
+
+    entry_key: str
+    source: InboxSource
+    kind: str
+    occurred_at: datetime | None = None
+    observed_at: datetime | None = None
+    title: str
+    summary: str = Field(default="", max_length=1000)
+    project_slug: str | None = None
+    work_item_ref: str | None = None
+    session_id: str | None = None
+    source_subject_key: str
+    source_url: str | None = None
+    trust_state: TrustState = "unverified"
+    freshness: Literal["current", "stale", "provisional", "live", "unknown"] = "unknown"
+    provisional: bool = False
+    triage_state: InboxTriageState = "active"
+    snooze_until: datetime | None = None
+    action: InboxAction | None = None
+    evidence_snapshot: dict[str, object] | None = None
+    proposed_change: dict[str, object] | None = None
+    actor_login: str | None = Field(
+        default=None,
+        description="Who caused this occurrence, where the forge said so.",
+    )
+    actor_kind: Literal["human", "bot"] | None = Field(
+        default=None,
+        description="human or bot; null when no author could be resolved. "
+        "Drift, CI and agent entries are the instance itself: bot.",
+    )
+    actor_relation: Literal["org_member", "external", "unknown"] = Field(
+        default="unknown",
+        description="org_member: on the repository's owning org's member list "
+        "(or reported MEMBER/OWNER). external: a person outside the org, "
+        "outside collaborators included. unknown: not resolvable.",
+    )
+
+
+class InboxCoverage(Result):
+    """Coverage and count for one normalized source."""
+
+    source: InboxSource
+    status: str
+    count: int = 0
+    observed_at: datetime | None = None
+    projects: int = 0
+    registered: int = 0
+    detail: str | None = None
+
+
+InboxActorFilter = Literal["any", "external", "org", "bot"]
+
+
+class InboxListParams(Params):
+    sources: list[InboxSource] | None = None
+    triage_states: list[InboxTriageState] = Field(default=["active"])
+    actor: InboxActorFilter = Field(
+        default="any",
+        description="Who caused the entry: any; external (people outside the "
+        "repository's org — never bots, and entries whose author is unknown "
+        "are hidden and counted in actor_unknown_hidden); org (org members); "
+        "bot (bots and the instance's own drift/CI/agent entries).",
+    )
+    project: str | None = None
+    work_item: str | None = None
+    limit: int = Field(default=50, ge=1, le=100)
+    cursor: str | None = None
+
+
+class InboxSavedFilter(BaseModel):
+    """The structured Inbox filter a person saves (`inbox.filter`).
+
+    Search text is deliberately absent: it is a temporary, client-side narrowing
+    of what is on screen, and the sidebar badge never counts by it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[InboxSource] | None = None
+    actor: InboxActorFilter = "any"
+    triage_states: list[InboxTriageState] = Field(default=["active"], min_length=1)
+
+    def is_default(self) -> bool:
+        return (
+            self.sources is None
+            and self.actor == "any"
+            and self.triage_states == ["active"]
+        )
+
+
+class InboxListResult(Result):
+    entries: list[InboxEntry]
+    next_cursor: str | None = None
+    snapshot_at: datetime
+    """Per-source high-water marks for this server-owned read window."""
+    high_water: dict[InboxSource, datetime | None]
+    coverage: dict[InboxSource, InboxCoverage]
+    counts: dict[str, int]
+    github_scope: str = "registered projects only"
+    instance_scope: str = "registered projects only"
+    engine_status: Literal["not_configured", "available", "unreachable"]
+    engine_detail: str | None = None
+    engine_available: bool = True
+    actor_unknown_hidden: int = Field(
+        default=0,
+        description="With actor=external: how many entries matching every "
+        "other filter were hidden because their author is unknown.",
+    )
+
+
+class InboxArchiveParams(Params):
+    entry_key: str
+    reason: Reason
+
+
+class InboxSnoozeParams(Params):
+    entry_key: str
+    until: datetime
+    reason: Reason
+
+
+class InboxRestoreParams(Params):
+    entry_key: str
+    reason: Reason
+
+
+class InboxTriageResult(Result):
+    entry: InboxEntry
+
+
+# -- instance --------------------------------------------------------------
+
+
+class InitParams(Params):
+    """`init` takes nothing: the data directory comes from configuration."""
+
+
+class InitResult(Result):
+    instance_id: str
+    data_dir: str
+    created: bool
+    declared_schema_version: int
+    observed_schema_version: int
+    migrations_applied: list[str]
+    #: What became of `bootstrap_core_token_file`: `not_configured`,
+    #: `already_present` or `adopted`. Reported because a silent bootstrap is
+    #: one nobody can confirm happened — and "did the token take?" is the
+    #: question a first deploy actually asks.
+    bootstrap_core_token: str = "not_configured"
+    #: The same, for `bootstrap_agent_token_file` — the brokered session token.
+    bootstrap_agent_token: str = "not_configured"
+
+
+class MigrateParams(Params):
+    """`migrate` takes nothing: the data directory comes from configuration."""
+
+
+class MigrateResult(Result):
+    """What `migrate` moved, and whether anything is still behind.
+
+    Reports the expected versions beside the applied ones for the same reason
+    `/health/ready` does: the applied number alone cannot answer
+    "is this instance current?", which is the only question the operator
+    running this has.
+    """
+
+    data_dir: str
+    declared_schema_version: int
+    observed_schema_version: int
+    declared_schema_expected: int
+    observed_schema_expected: int
+    migrations_applied: list[str]
+
+
+class McpStdioParams(Params):
+    """`mcp stdio` takes nothing: the streams are this process's own."""
+
+
+class McpStdioResult(Result):
+    protocol_version: str | None
+    messages_handled: int
+    supported_protocol_versions: list[str]
+
+
+class StatusParams(Params):
+    pass
+
+
+class StoreCounts(Result):
+    projects: int
+    actors: int
+    events: int
+    audit: int
+    work_items: int
+    initiatives: int
+
+
+class CloneInfo(Result):
+    """That this instance is a copy of another one, and of when."""
+
+    source_instance_id: str = Field(
+        description="The instance whose backup this instance was cloned from."
+    )
+    cloned_at: datetime
+    backup_taken_at: datetime = Field(
+        description="When the source's backup was taken: the copy's as-of time."
+    )
+
+
+class RegistryDumpParams(Params):
+    """`registry.dump` takes nothing: the registry is the whole answer."""
+
+
+class RegistryOperationManifest(Result):
+    """One operation as every transport sees it.
+
+    The schemas are the JSON schema of the parameter and result models, so a
+    consumer that is not this process — the parity harness, and later a Rust
+    core — can compare contracts without importing the models.
+    """
+
+    name: str
+    summary: str
+    scope: str
+    mutating: bool
+    reason_required: bool
+    #: Both `None` for an operation with no REST route (`clone`, a local-only one).
+    http_method: str | None
+    http_path: str | None
+    mcp_tool: str
+    cli_path: list[str]
+    params_schema: dict[str, object]
+    result_schema: dict[str, object]
+    #: `all`, or the one transport the operation is confined to.
+    transports: list[str]
+    exclusion: str | None = None
+    exclusion_reason: str | None = None
+
+
+class RegistryDumpResult(Result):
+    operations: list[RegistryOperationManifest]
+
+
+class StatusResult(Result):
+    vogt_version: str
+    instance_id: str
+    data_dir: str
+    principal: str
+    revision: int
+    declared_schema_version: int
+    observed_schema_version: int
+    counts: StoreCounts
+    clone: CloneInfo | None = Field(
+        default=None,
+        description=(
+            "Set when this instance's data was cloned from another instance's "
+            "backup (`vogt clone`); absent on an instance that never was."
+        ),
+    )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
+
+
+class DiagnosticsParams(Params):
+    peer: bool = Field(
+        default=False,
+        description=(
+            "Also ask the configured peer instance (`diagnostics_peer_url`) "
+            "for its diagnostics, e.g. prod from dev."
+        ),
+    )
+    log_lines: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="How many recent warning-or-worse log lines to return.",
+    )
+
+
+class DiagnosticCheck(Result):
+    """One readiness check, named, with what it found."""
+
+    name: str
+    status: Literal["ok", "degraded", "failing", "not_configured"]
+    detail: str | None = None
+
+
+class StoreMigration(Result):
+    """One store's schema: what is applied against what this build carries."""
+
+    applied: int
+    expected: int
+    pending: int = Field(
+        description="Migrations this build carries that are not applied yet."
+    )
+
+
+class RecentLog(Result):
+    """The process's recent warning-or-worse lines, redacted."""
+
+    capturing: bool = Field(
+        description=(
+            "Whether this process retains recent problems at all. False (a "
+            "one-shot CLI process) means `lines` is empty because nothing is "
+            "kept, not because nothing went wrong."
+        )
+    )
+    lines: list[str] = []
+    capacity: int
+
+
+class PeerDiagnostics(Result):
+    """What the configured peer instance said about itself."""
+
+    status: Literal[
+        "not_requested",
+        "not_configured",
+        "ok",
+        "unreachable",
+        "refused",
+        "invalid_response",
+    ]
+    url: str | None = None
+    detail: str | None = None
+    diagnostics: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "The peer's own `instance.diagnostics` answer, as it sent it. "
+            "Another instance's data: possibly another version's shape."
+        ),
+    )
+
+
+class DiagnosticsResult(Result):
+    """Is this instance what it should be, and is it well — in one read."""
+
+    status: Literal["ok", "degraded", "failing"] = Field(
+        description="The worst of `checks`; not_configured checks do not count."
+    )
+    vogt_version: str
+    image_digest: str | None = Field(
+        default=None,
+        description="As the deployment stated it (`image_digest`); null if unstated.",
+    )
+    instance_id: str | None = None
+    started_at: datetime
+    uptime_seconds: int
+    checks: list[DiagnosticCheck]
+    migrations: dict[str, StoreMigration]
+    recent_log: RecentLog
+    peer: PeerDiagnostics
+
+
+class PlaceMetricsParams(Params):
+    """The shell's bounded, aggregate navigation counts.
+
+    The Inbox count honours the caller's saved Inbox filter (the
+    `inbox.filter` preference) — the same answer `inbox.list` gives under it."""
+
+
+class PlaceMetricsResult(Result):
+    """One read for the shell's glanceable place badges.
+
+    A nullable field means that only that provider failed; it never turns an
+    unavailable answer into a misleading zero.
+    """
+
+    inbox_active: int | None = Field(
+        default=None,
+        description="The Inbox badge: entries matching the caller's saved "
+        "Inbox filter (all active entries when none is saved).",
+    )
+    inbox_active_unfiltered: int | None = Field(
+        default=None, description="Every active Inbox entry, ignoring the filter."
+    )
+    inbox_filter: InboxSavedFilter | None = Field(
+        default=None,
+        description="The saved filter the badge applied; null when the caller "
+        "has none (or only the default), so the badge is unfiltered.",
+    )
+    projects_total: int | None = None
+    work_total: int | None = None
+    backlog_total_considered: int | None = None
+    drift_present: bool | None = None
+    revision: int
+    generated_at: datetime
+
+
+# -- per-actor preferences --------------------------------------------------
+
+
+PREFERENCE_KEY_PATTERN = r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*$"
+
+
+class PreferenceView(Result):
+    """One of the caller's own settings."""
+
+    key: str
+    value: dict[str, object]
+    version: int
+    updated_at: datetime
+
+
+class PreferenceGetParams(Params):
+    key: str | None = Field(
+        default=None,
+        max_length=64,
+        description="One key, e.g. inbox.filter; omit for every key you hold.",
+    )
+
+
+class PreferenceGetResult(Result):
+    preferences: list[PreferenceView]
+
+
+class PreferenceSetParams(Params):
+    key: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=PREFERENCE_KEY_PATTERN,
+        description="Namespaced key, e.g. inbox.filter.",
+    )
+    value: dict[str, object] = Field(
+        description="A JSON object. {} clears the setting back to defaults. "
+        "From the CLI pass it as JSON text."
+    )
+    expected_version: int | None = Field(
+        default=None,
+        ge=0,
+        description="Apply only if the stored version is this one (0: only if "
+        "the key has never been written). Omit to write unconditionally.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _parse_json_text(cls, value: object) -> object:
+        # The generated CLI hands every non-list flag over as text; a JSON
+        # object arrives here as its source.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as error:
+                msg = f"value is not valid JSON: {error.msg}"
+                raise ValueError(msg) from None
+        return value
+
+
+class PreferenceSetResult(Result):
+    preference: PreferenceView
+
+
+# -- charters (WI-2038) ----------------------------------------------------
+
+CharterScopeKind = Literal["workspace", "project", "initiative"]
+#: A charter is a few standing rules, not a document.
+CHARTER_MAX_CHARS = 8000
+
+
+class CharterView(Result):
+    """One version of a scope's charter."""
+
+    scope: CharterScopeKind
+    ref: str | None = Field(
+        default=None, description="Project or initiative slug; none for workspace."
+    )
+    version: int
+    body: str
+    author: str = Field(description="identity_ref of whoever set this version.")
+    created_at: datetime
+    reason: str
+
+
+class CharterGetParams(Params):
+    scope: CharterScopeKind = Field(description="workspace, project or initiative.")
+    ref: str | None = Field(
+        default=None,
+        description="Project or initiative slug; omitted for workspace.",
+    )
+    history: bool = Field(
+        default=False, description="Also return earlier versions, newest first."
+    )
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+class CharterGetResult(Result):
+    current: CharterView | None = Field(
+        default=None,
+        description="The newest version, or none when never set. An empty "
+        "body is a cleared charter.",
+    )
+    history: list[CharterView] = []
+
+
+class CharterSetParams(Params):
+    scope: CharterScopeKind = Field(description="workspace, project or initiative.")
+    ref: str | None = Field(
+        default=None,
+        description="Project or initiative slug; omitted for workspace.",
+    )
+    body: str = Field(
+        max_length=CHARTER_MAX_CHARS,
+        description="The standing instructions, in Markdown. Empty clears it.",
+    )
+    expected_version: int | None = Field(
+        default=None,
+        ge=0,
+        description="Write only if the current version is this (0: never set).",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CharterSetResult(Result):
+    charter: CharterView
+
+
+# -- projects --------------------------------------------------------------
+
+
+class RegisterProjectParams(Params):
+    name: Name = Field(description="Display name; the slug is derived from it.")
+    root_path: str = Field(description="Folder or git repository this project is.")
+    repo_url: str | None = Field(
+        default=None, description="Optional remote the project is published at."
+    )
+    lifecycle_state: LifecycleState = Field(
+        default="active", description="incubating / active / maintenance / archived."
+    )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Paths collection skips, replacing the defaults entirely rather "
+            "than adding to them. Omit for the defaults. A repository that "
+            "vendors a corpus or carries agent worktrees needs this at "
+            "registration, because the first sweep is the baseline every "
+            "later answer is compared against."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class UpdateProjectParams(Params):
+    """Correct a project's declaration after registration.
+
+    Deliberately narrow. `lifecycle_state` is absent because it has its own
+    operation with a validated edge (`project transition`), and the observed
+    fields are absent because nothing declares them. What is left is what a
+    registration can get wrong and nothing else could fix — where the project
+    is published, what collection should skip — and the agent policy, which is
+    data the project states rather than something derived.
+    """
+
+    slug: str = Field(description="Project to update.")
+    repo_url: str | None = Field(
+        default=None, description="Leave unset to keep the current value."
+    )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replaces the current list entirely. Leave unset to keep it; pass "
+            "an empty list to collect everything."
+        ),
+    )
+    agent_policy: AgentPolicy | None = Field(
+        default=None,
+        description=(
+            "Replaces the project's agent policy entirely. Leave unset to keep "
+            "it. `forbidden_text` entries are regexes and must compile, and so "
+            "must `landing.branch_pattern` once `{n}` stands for a number; "
+            "`landing.merge_mode` is `fast_forward` or `rebase` — `merge` is "
+            "refused. A pattern that does not compile is refused rather than "
+            "stored."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CreateProjectParams(Params):
+    name: Name = Field(description="Display name; the slug is derived from it.")
+    root_path: str = Field(
+        description="Directory to scaffold into. Created if absent; "
+        "existing files are never overwritten."
+    )
+    owner: str | None = Field(
+        default=None,
+        description="Recorded in the scaffold. Defaults to the acting principal.",
+    )
+    repo_url: str | None = None
+    lifecycle_state: LifecycleState = "incubating"
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ProjectResult(Result):
+    project: Project
+
+
+class CreateProjectResult(Result):
+    project: Project
+    created_paths: list[str] = Field(
+        description="Files and directories written. Existing ones are left alone."
+    )
+    skipped_paths: list[str] = Field(
+        description="Contract paths that already existed and were not touched."
+    )
+
+
+class GetProjectParams(Params):
+    slug: str = Field(description="Project slug.")
+
+
+class ListProjectsParams(Params):
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class ProjectListing(Project):
+    """A project, plus whether an explicit upstream create would land now."""
+
+    writable: bool = Field(
+        description=(
+            "Whether an explicit `work.create` with `upstream=true` would land "
+            "on the forge now: it is forge-linked, its write-back policy "
+            "permits `create`, a forge credential resolves and its repo_url "
+            "parses. False means the create refuses with "
+            "`project_not_linked` or `upstream_write_refused`; "
+            "`writable_reason` says which and how to fix it."
+        )
+    )
+    writable_reason: str = Field(
+        description="Why `writable` is what it is, naming the way forward."
+    )
+
+
+class ProjectListResult(Result):
+    projects: list[ProjectListing]
+    total: int
+
+
+class TransitionProjectParams(Params):
+    slug: str
+    to_state: LifecycleState = Field(description="Target lifecycle state.")
+    reason: Reason
+
+
+class Freshness(Result):
+    """How old the evidence behind an answer is.
+
+    Every aggregating answer carries one. `oldest_relevant_sweep` is the
+    honest number: an answer is exactly as fresh as the least fresh thing it
+    depends on.
+    """
+
+    status: Literal["fresh", "never_swept", "partial"] = "never_swept"
+    oldest_relevant_sweep: datetime | None = None
+    age_seconds: int | None = None
+    collectors: dict[str, str] = Field(
+        default={}, description="Per collector: how long ago it last completed."
+    )
+    detail: str | None = None
+
+
+class NotCollected(Result):
+    """A value no collector has produced yet.
+
+    Present so that the shape of an answer does not change when a collector
+    starts filling it in, and so "we have not looked" is visibly different
+    from "there is nothing" (ARCHITECTURE.md).
+    """
+
+    status: str = "not_collected"
+    detail: str
+
+
+class RankedItem(Result):
+    """One entry of a ranked view — declared or observed.
+
+    Observed-first means both halves appear in the same list, ordered by the
+    same weights. The common fields are what ranking needs and what a
+    reader wants; `item` carries the whole work item when there is one, and
+    `subject_key` points at the evidence when there is not.
+    """
+
+    origin: Literal["declared", "observed"]
+    classified: bool = Field(
+        default=True,
+        description=(
+            "Whether anything actually said what kind of work this is. False "
+            "means `kind` is this product's guess from an absence of signal — "
+            "an unlabelled forge issue — and that the subject may be missing "
+            "from the view a reader expected to find it in. Declared work is "
+            "always classified: somebody typed the kind in."
+        ),
+    )
+    ref: str = Field(
+        description="`WI-7` for declared work, or the observed subject key."
+    )
+    title: str
+    kind: WorkKind
+    state: str
+    priority: Priority
+    project_slug: str | None = None
+    trust_state: TrustState = "unverified"
+    labels: list[str] = []
+    score: float
+    updated_at: datetime
+    #: Present only for declared work.
+    item: WorkItem | None = None
+    #: Present only for observed subjects.
+    observation_kind: str | None = None
+    source_url: str | None = None
+    observed_at: datetime | None = None
+    adopted_as: str | None = Field(
+        default=None,
+        description="Work item reference, when this subject has been adopted.",
+    )
+
+
+class ProjectBriefParams(Params):
+    slug: str = Field(description="Project slug. Aliases: `project`, `id`.")
+    backlog_limit: int = Field(default=10, ge=1, le=100)
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) ranks `top_backlog` without each row's full "
+            "work item (`item` is null); `full` includes it, bodies and all."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(
+            data, {"project": "slug", "id": "slug"}, model="project.brief"
+        )
+
+
+class CiSummary(Result):
+    """The CI story for a project, or the absence of one.
+
+    Every field below describes **one revision** — the newest any retained
+    check names. That scope is the point: the same shape without it reported
+    a project as `failing` on the strength of a build that broke days before
+    the current head and had since been fixed. The rule that partial
+    coverage is disclosed, never silently returned as complete, is the same
+    rule one layer up from the observations it was written about.
+    """
+
+    status: Literal["not_collected", "no_checks", "passing", "failing"] = (
+        "not_collected"
+    )
+    checks: int = Field(
+        default=0, description="Checks observed on `revision`, not in total."
+    )
+    failing: list[str] = []
+    revision: str | None = None
+    revisions_observed: int = Field(
+        default=0,
+        description=(
+            "How many distinct revisions the retained window covers. The "
+            "denominator `checks` is a numerator of, so a reader can tell a "
+            "quiet project from a busy one."
+        ),
+    )
+    earlier_failures: int = Field(
+        default=0,
+        description=(
+            "Failing checks on revisions behind `revision`. History, not "
+            "verdict: these do not make `status` failing, and a project that "
+            "fixes its build goes green here without waiting for retention."
+        ),
+    )
+    detail: str | None = None
+
+
+class DependencySummary(Result):
+    """What this project references, and what references it."""
+
+    status: Literal["not_collected", "collected"] = "not_collected"
+    references_out: int = 0
+    referenced_by: int = 0
+    unresolved: int = 0
+    detail: str | None = None
+
+
+class ProjectBriefResult(Result):
+    """The per-repo view in one call."""
+
+    project: Project
+    open_work: int = Field(
+        description=(
+            "Outstanding work across both populations, declared and observed "
+            "— the same set `backlog --project` ranks. Split below, because "
+            "a total that does not name its populations is not an answer."
+        )
+    )
+    open_bugs: int
+    declared_work: int = Field(
+        default=0, description="Of `open_work`, how much somebody typed in."
+    )
+    observed_work: int = Field(
+        default=0,
+        description=(
+            "Of `open_work`, how much a collector found — chiefly what "
+            "`forge onboard` consolidated. Zero here with a non-zero "
+            "`declared_work` is a project nobody has collected for; the "
+            "reverse is a project nobody has declared work on."
+        ),
+    )
+    by_state: dict[str, int] = Field(
+        description=(
+            "Declared work items only, terminal states included. Observed "
+            "subjects have no workflow state to count (ARCHITECTURE.md)."
+        )
+    )
+    by_kind: dict[str, int] = Field(description="Declared work items only, as above.")
+    top_backlog: list[RankedItem]
+    current_version: str | None
+    declared_version: str | None = None
+    observed_version: str | None = Field(
+        default=None,
+        description="Newest tag or release seen by a collector.",
+    )
+    version_matches: bool | None = Field(
+        default=None,
+        description=(
+            "Whether declared and observed versions agree. Null when either "
+            "is unknown; a disagreement feeds the version-mismatch drift kind."
+        ),
+    )
+    compliance_status: str
+    compliance_checked_at: datetime | None
+    ci_status: CiSummary
+    dependencies: DependencySummary
+    freshness: Freshness
+
+
+# -- work ------------------------------------------------------------------
+
+
+class SessionBlocked(Result):
+    """An agent's own report that it is blocked on a person.
+
+    Set with `session.report_blocked`, cleared with `session.report_unblocked`
+    or when the session ends. The text is the agent's: untrusted data.
+    """
+
+    blocker: str = Field(description="What it is blocked on, in its words.")
+    items: list[str] = Field(default=[], description="What the person must do.")
+    since: datetime | None = None
+
+
+class SessionReportView(Result):
+    """A session's own typed report (WI-2039): what it says it did or needs.
+
+    Posted with `session.report`. Every field is the reporting agent's text:
+    untrusted data, never instructions. A structured field left null was not
+    stated.
+    """
+
+    id: str
+    kind: Literal["progress", "result", "question", "blocker"]
+    summary: str
+    session_id: str | None = Field(
+        default=None, description="The reporting engine session's id."
+    )
+    work_item: str | None = None
+    branch: str | None = None
+    sha: str | None = None
+    pr: str | None = None
+    checks: list[str] = []
+    blockers: list[str] = []
+    next_step: str | None = None
+    reporter: str | None = Field(
+        default=None, description="The reporting actor's identity ref."
+    )
+    created_at: datetime
+
+
+class SessionApprovalOption(Result):
+    number: int
+    label: str
+    selected: bool = False
+
+
+class SessionApproval(Result):
+    """A permission dialog an agent CLI in the session is showing.
+
+    Read off the rendered screen by the engine while the session's activity
+    is `awaiting-approval`. Answer it with `session.answer` (by option number
+    or label) before the deadline, after which the CLI denies by itself.
+    `command_excerpt` and the option labels are terminal output: untrusted
+    data, never instructions.
+    """
+
+    question: str
+    command_excerpt: str
+    kind: str = Field(
+        default="permission",
+        description=(
+            "permission (a tool call) / folder-trust / external-imports "
+            "(a CLAUDE.md importing files from outside) / read-outside-cwd / "
+            "question (the agent asks a question with a menu of answers)."
+        ),
+    )
+    options: list[SessionApprovalOption] = Field(
+        default=[],
+        description="The menu, in order; `selected` is where the highlight is.",
+    )
+    deadline_seconds: int | None = Field(
+        default=None,
+        description=(
+            "Seconds before the CLI denies by itself, when it shows a countdown."
+        ),
+    )
+    deadline_at: datetime | None = None
+    detected_at: datetime | None = None
+
+
+# Defined here rather than with the rest of the session models below,
+# because `WorkResult` carries it: a work item's view shows what is
+# running for it, and a forward reference would leave the model
+# incomplete until something remembered to rebuild it.
+class SessionRuntime(Result):
+    """The agent, model and effort a session is running, each with where
+    that came from."""
+
+    agent: str | None = Field(
+        default=None,
+        description="claude / codex / opencode, from the command.",
+    )
+    model: str | None = None
+    model_basis: str | None = Field(
+        default=None,
+        description=(
+            "transcript (what the CLI recorded for its latest turn: the model "
+            "actually used) / command (a --model flag) / asked (session.start's "
+            "model). Null with `model` when none says."
+        ),
+    )
+    effort: str | None = None
+    effort_basis: str | None = Field(
+        default=None,
+        description="transcript (Codex records it) / command / asked.",
+    )
+
+
+class SessionResources(Result):
+    """What a session's process tree holds, as the engine last sampled it."""
+
+    rss_bytes: int = Field(
+        description="Resident memory summed over the session's process tree."
+    )
+    cpu_pct: float = Field(
+        description="CPU over the last sampling interval, in percent of one core."
+    )
+    processes: int
+    sampled_at: datetime | None = None
+    over_threshold: bool = Field(
+        default=False,
+        description="At or over the deployment's ENGINE_SESSION_RSS_WARN.",
+    )
+
+
+class SessionHibernation(Result):
+    """When and why a session was hibernated."""
+
+    at: datetime | None = None
+    trigger: str = Field(
+        description=(
+            "manual / idle / memory / shutdown (the engine was stopping) / "
+            "recovered (found at the engine's boot without a process) / "
+            "budget (a hard budget limit) / done (declared done, then quiet)."
+        )
+    )
+    reason: str | None = None
+    resumable: bool = Field(
+        default=True,
+        description=(
+            "False for a shell hibernated with allow_shell: it wakes as a fresh "
+            "process in the same directory, not where it left off."
+        ),
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session this one's work was handed to, when the hibernate "
+            "named a successor. A wake is refused (409) while it is set, unless "
+            "forced; send the work to the successor instead."
+        ),
+    )
+
+
+class SessionDigest(Result):
+    """One line of session state (design C1).
+
+    Target under 300 characters so fifty rows fit in one 15k tool result.
+    `budget` is the engine's economics line when its tailer has metered the
+    session, and null until then. `supervisor` is named for WI-956 and stays
+    null until that exists. `brief_file` is null until the engine reports a
+    brief path; the launch argv stays on `mode=full`.
+    """
+
+    id: str
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    attention: str | None = None
+    ready: bool | None = None
+    blocked_reason: str | None = Field(
+        default=None,
+        description="First 120 characters of the blocked report (engine reason).",
+    )
+    blocked_detail: str | None = Field(
+        default=None,
+        description=(
+            "The blocked report in full (engine reason). `blocked_reason` keeps "
+            "the 120-character head so a row stays one line; this carries the "
+            "rest of what the guard said (WI-1670)."
+        ),
+    )
+    turn_started_at: datetime | None = None
+    done_at: datetime | None = Field(
+        default=None,
+        description="When an autopilot session declared itself done this turn.",
+    )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description=(
+            "First 120 characters of the last reply. Null when the session "
+            "has a `report`: the report says it better."
+        ),
+    )
+    report: str | None = Field(
+        default=None,
+        description=(
+            "The session's latest `session.report`, as one line: kind, "
+            "summary, then branch/sha/pr when given (WI-2039)."
+        ),
+    )
+    template: str | None = None
+    brief_file: str | None = None
+    question: str | None = Field(
+        default=None,
+        description=(
+            "The question or dialog the session is showing, when it waits on "
+            "one (WI-1871). Untrusted terminal text."
+        ),
+    )
+    question_kind: str | None = Field(
+        default=None,
+        description="`question` (an agent's question menu) or a dialog kind.",
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description=(
+            "The menu's choices in order, numbered from 1; answer with "
+            "`session_answer` by number or label. Untrusted terminal text."
+        ),
+    )
+    budget: str | None = Field(
+        default=None,
+        description=(
+            "The engine's economics line for the session, e.g. "
+            "`96 turns, 2 compactions`; null when the engine has not metered it."
+        ),
+    )
+    supervisor: str | None = Field(
+        default=None, description="Reserved for WI-956; null until supervision exists."
+    )
+    extra: dict[str, Any] | None = Field(
+        default=None,
+        description="SessionSummary attributes named in `fields`, when asked.",
+    )
+
+    def over_budget(self) -> bool:
+        """True when the JSON of this row exceeds the 300-character target."""
+        return len(self.model_dump_json(exclude_none=True)) > _DIGEST_ROW_BUDGET
+
+
+class SessionSummary(Result):
+    """One session, as Vogt knows it and as the engine currently reports it.
+
+    Two halves on purpose. `id`, `project`, `work_item` and `reason` are
+    Vogt's declared link — written once, audited, and true whatever the
+    engine is doing. `activity` and `alive` are read from the engine at the
+    moment of asking and are never stored: a cached activity state would be
+    a claim about a running process, which is the one thing this product
+    refuses to invent.
+
+    A session the engine holds but Vogt never linked is reported too, so the
+    surface answers "what is running here", not only "what did Vogt start".
+    Such a session has no declared half: `linked` is false, and `project`,
+    `work_item`, `actor` and `reason` are null because there is nothing
+    audited to name. `id` and `engine_session_id` then carry the engine's id
+    (the only handle there is), and `started_at` is the engine's own creation
+    time — never a fabricated one.
+    """
+
+    linked: bool = Field(
+        default=True,
+        description=(
+            "True when Vogt declared this session; false for one the engine "
+            "holds but Vogt never linked (project/work_item/actor/reason null)."
+        ),
+    )
+    id: str
+    engine_session_id: str
+    project: str | None = None
+    work_item: str | None = Field(
+        default=None,
+        description=(
+            "The work item the session serves, e.g. WI-7: set at session.start "
+            "or re-declared by session.bind_work. For an unlinked session, the "
+            "engine's `work_item` label, when one was bound."
+        ),
+    )
+    work_item_title: str | None = Field(
+        default=None, description="That work item's title, joined at read time."
+    )
+    work_item_state: str | None = Field(
+        default=None,
+        description=(
+            "That work item's workflow state, joined at read time — a bound "
+            "session on a `done` item is still allowed, and shown muted."
+        ),
+    )
+    actor: str | None = Field(
+        default=None,
+        description=(
+            "Actor the session's writes are attributed to. Null for an "
+            "unlinked engine session, which declares no actor."
+        ),
+    )
+    cwd: str
+    template: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "The model this session was started with. What was asked "
+            "for, not what the agent is using now."
+        ),
+    )
+    effort: str | None = Field(
+        default=None, description="The reasoning effort it was started with."
+    )
+    reason: str | None = Field(
+        default=None,
+        description=(
+            "Why Vogt started the session. Null for an unlinked engine "
+            "session, which declares no reason."
+        ),
+    )
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "The dispatch purpose the start named (WI-1323): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "Null when it named none, and for an unlinked engine session."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Engine id of the session that started this one (WI-1323), read "
+            "from the starter's verified identity. Null for a person's start."
+        ),
+    )
+    started_by_kind: Literal["person", "oversight", "worker"] | None = Field(
+        default=None,
+        description=(
+            "Who started it (WI-1323): `person`, or the starting session's "
+            "engine role at that moment. Null when the engine could not be "
+            "asked, and for a session started before this was recorded."
+        ),
+    )
+    started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the session started: Vogt's record for a linked session, "
+            "the engine's creation time for an unlinked one, null only when "
+            "neither is known."
+        ),
+    )
+    stopped_at: datetime | None = None
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the session's display name, as the GUI "
+            "shows it (session.rename changes it). None when the engine "
+            "could not be asked."
+        ),
+    )
+    command: str | None = Field(
+        default=None,
+        description="Live from the engine: the command the session runs.",
+    )
+    exit_code: int | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the process's exit code once it has "
+            "ended; null while it runs."
+        ),
+    )
+    activity_changed_at: datetime | None = Field(
+        default=None,
+        description="Live from the engine: when `activity` last changed.",
+    )
+    conversation_agent: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the agent CLI whose conversation the "
+            "session runs (with `conversation_id`), when known."
+        ),
+    )
+    activity: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: idle / running / waiting-for-input / "
+            "awaiting-approval (an agent CLI's permission dialog; see "
+            "`approval`) while the process runs; exited (exit code 0) / "
+            "errored (any other code) once it has ended. None when the "
+            "engine could not be asked."
+        ),
+    )
+    alive: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the session's process is still running on the engine: "
+            "false once it has exited or the engine no longer has it. None "
+            "if the engine could not be asked."
+        ),
+    )
+    turn_started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: when the current (or last) turn began — "
+            "the last time the session went running from idle or waiting. "
+            "With `last_output_at` it tells a long turn from a hung one."
+        ),
+    )
+    last_output_at: datetime | None = Field(
+        default=None,
+        description="Live from the engine: when the terminal last printed anything.",
+    )
+    done_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: when an autopilot session declared itself "
+            "done (`AUTOPILOT: DONE`) this turn. Cleared when the next turn "
+            "starts; null otherwise."
+        ),
+    )
+    approval: SessionApproval | None = Field(
+        default=None,
+        description=(
+            "The permission dialog on screen while activity is "
+            "awaiting-approval; null otherwise."
+        ),
+    )
+    blocked: SessionBlocked | None = Field(
+        default=None,
+        description=(
+            "The agent's own report that it is blocked on a person "
+            "(session.report_blocked); null when it is not. Do not re-prompt "
+            "a blocked session: do what it asks, or answer it."
+        ),
+    )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description=(
+            "The first ~300 characters of the session's agent's latest reply, "
+            "redacted, from its own transcript (session.list only, live "
+            "agent sessions whose conversation id is known). Null for a "
+            "shell, or when no transcript is found. session.last_reply has "
+            "the whole message."
+        ),
+    )
+    latest_report: SessionReportView | None = Field(
+        default=None,
+        description=(
+            "The session's newest `session.report` (WI-2039): its own typed "
+            "account of progress, result, question or blocker. Prefer it over "
+            "`last_reply_excerpt`; null when it never reported."
+        ),
+    )
+    hibernation: SessionHibernation | None = Field(
+        default=None,
+        description=(
+            "Set while the session is hibernated (activity `hibernated`): its "
+            "processes were stopped to free memory and it is kept to be woken "
+            "by resuming its conversation (session.wake, or session.input, "
+            "which wakes it). Null otherwise."
+        ),
+    )
+    keep_awake: bool | None = Field(
+        default=None,
+        description=(
+            "Pinned awake (session.keep_awake): never hibernated by policy. "
+            "None when the engine could not be asked."
+        ),
+    )
+    autopilot: bool | None = Field(
+        default=None,
+        description=(
+            "On autopilot (WI-949): the engine re-prompts it when it stops "
+            "with work left and its idle policy leaves it awake. Turns false "
+            "once the agent prints `AUTOPILOT: DONE` or the engine's nudge "
+            "cap is reached. None when the engine could not be asked."
+        ),
+    )
+    autopilot_nudges: int | None = Field(
+        default=None,
+        description="How many times the engine has told it to carry on.",
+    )
+    role: SessionRole | None = Field(
+        default=None,
+        description=(
+            "What the session is for (session.set_role): `oversight` for one "
+            "nominated to supervise other sessions, `worker` otherwise. None "
+            "when the engine could not be asked."
+        ),
+    )
+    stopped_by: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: who asked the session to stop, when it was "
+            "stopped on request (activity `stopped`)."
+        ),
+    )
+    stop_reason: str | None = Field(
+        default=None, description="Live from the engine: why it was stopped."
+    )
+    permission_mode: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the permission posture when it is not the "
+            "default — `accept-edits`, or `bypass` (no permission checks). "
+            "Null is the default posture."
+        ),
+    )
+    posture_lost_on_resume: bool = Field(
+        default=False,
+        description=(
+            "Live from the engine: the session showed bypass before it was "
+            "hibernated and was woken without it (WI-2252). A wake replays "
+            "only the posture a person gave at the start, so a bypass granted "
+            "later (Shift+Tab, a hand-typed flag) is lost; a person re-grants "
+            "it in the session's terminal."
+        ),
+    )
+    account: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the named Claude Code account the session "
+            "runs under. Null is the engine's default account."
+        ),
+    )
+    running: SessionRuntime | None = Field(
+        default=None,
+        description=(
+            "The agent, model and reasoning effort the session is actually "
+            "running, resolved from its transcript, its command line, or what "
+            "it was started with — `model`/`effort` above are only what was "
+            "asked. Live and hibernated sessions."
+        ),
+    )
+    resources: SessionResources | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: RSS, CPU and process count of the "
+            "session's process tree, sampled every few seconds. Null before "
+            "the first sample, for a hibernated or exited session, or when "
+            "the engine cannot sample."
+        ),
+    )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the limits this session was started with "
+            "(C7). Null when it has none, or when the engine could not be asked."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description=(
+            "The agent CLI's own id for the conversation this session runs, "
+            "when the engine knows it — what a wake resumes, and what "
+            "session.start's `resume` takes."
+        ),
+    )
+
+
+class CreateWorkParams(Params):
+    kind: WorkKind = Field(description="feature / bug / chore / question.")
+    title: Name
+    body: str = ""
+    priority: Priority = "p2"
+    effort: Effort | None = None
+    project: str | None = Field(default=None, description="Project slug.")
+    initiative: str | None = Field(default=None, description="Initiative slug.")
+    assignee: str | None = Field(
+        default=None, description="Actor identity_ref, e.g. local:sprooty."
+    )
+    labels: list[str] | None = Field(
+        default=None, description="Existing label names to attach."
+    )
+    upstream: bool = Field(
+        default=False,
+        description=(
+            "Create the item on the forge as well: on a forge-linked project, "
+            "open the upstream issue (a GitHub issue for a GitHub-linked "
+            "project), key the local overlay by its subject, and record the "
+            "write-back. It requires the project to be forge-linked and its "
+            "write-back policy to permit 'create'. Default off: a create is a "
+            "native item (WI-n) and nothing is sent to the forge; a later "
+            "`forge link` or `forge writeback` migrates it upstream."
+        ),
+    )
+    local_only: bool = Field(
+        default=False,
+        description=(
+            "Create the item locally without writing it upstream. This is the "
+            "default for every project, and the flag is kept so a caller can "
+            "state it explicitly; it conflicts with upstream=true. The item "
+            "carries no upstream subject yet and is exactly what a later "
+            "`forge link` or `forge writeback` migrates upstream."
+        ),
+    )
+    reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+
+class WorkItemBranchView(Result):
+    """One branch bound to a work item, declared or observed or both.
+
+     `source` is the whole point: `declared` is a branch a Vogt-started session
+     said it would use, `observed` is one a sweep actually found in the
+     checkout, and `both` is the two agreeing. A branch that is one but not the
+     other is drift — declared and observed are kept separate and never merged
+    , so the surface can show the disagreement rather than paper over
+     it. `last_commit_age_seconds` is derived from `last_commit_at` at read time
+     so it is always current without the observation churning every sweep.
+    """
+
+    name: str
+    source: Literal["declared", "observed", "both"]
+    drift: bool = Field(
+        default=False,
+        description="True when declared and observed disagree about this branch.",
+    )
+    tip: str | None = None
+    ahead: int | None = None
+    behind: int | None = None
+    default_branch: str | None = None
+    last_commit_at: datetime | None = None
+    last_commit_age_seconds: int | None = None
+    observed_at: datetime | None = Field(
+        default=None, description="When a sweep last saw this branch, if it has."
+    )
+
+
+class WorkItemPullRequestView(Result):
+    """The pull request observed to implement a work item.
+
+    Read from the `forge.pull_request` observation the `implemented_by` edge
+    points at — never declared. `state` is the *derived* PR state, richer than
+    the observation's raw open/closed/merged: `draft` and `in-review` are read
+    off the PR's own draft flag and review decision so the git phase can tell
+    "opened" from "being reviewed". Every field carries where it came from and
+    how old it is, so the surface can say "observed 4 min ago from GitHub"
+    rather than presenting a stale rollup as current.
+    """
+
+    number: int
+    #: Derived state: `draft` / `open` / `in-review` / `merged` / `closed`.
+    state: Literal["draft", "open", "in-review", "merged", "closed"]
+    title: str | None = None
+    url: str | None = None
+    draft: bool = False
+    review_decision: str | None = Field(
+        default=None, description="The forge's review decision, None if it gave none."
+    )
+    checks: str | None = Field(
+        default=None, description="The PR's combined check rollup, None if unknown."
+    )
+    mergeable: str | None = None
+    head_ref: str | None = None
+    base: str | None = None
+    #: Which subject the `implemented_by` edge matched, and from where — the
+    #: PR body, its title, or its branch name.
+    provenance: str | None = None
+    updated_at: datetime | None = None
+    updated_age_seconds: int | None = Field(
+        default=None, description="Age of the PR's last upstream update, at read time."
+    )
+    observed_at: datetime | None = Field(
+        default=None, description="When a sweep last saw this PR, if it has."
+    )
+    observed_age_seconds: int | None = Field(
+        default=None, description="How long ago Vogt last observed this PR."
+    )
+
+
+class GitStoryDriftView(Result):
+    """One contradiction between a work item and its git evidence.
+
+    Derived and read-only: Vogt *reports* the disagreement — a closed
+    item with an open PR, a merged PR under an open item, an active branch on a
+    done item — it does not reconcile it. `provenance` says which observation
+    the contradiction was read from, so a reader can check it.
+    """
+
+    code: str
+    message: str
+    provenance: str | None = None
+
+
+class WorkItemGitStory(Result):
+    """Where a work item is in git, derived from branches + the PR edge.
+
+     A single read-only answer to "where is this in git?", assembled from the
+     already-observed branch bindings and the `implemented_by` PR edge
+    . `phase` is a derived opinion shown *beside* the workflow state, not
+     written onto it: a `merged` phase on an item still `in_progress` is exactly
+     the disagreement this is meant to make visible. `drift` carries the obvious
+     contradictions. `task_conclusion_available` records that the task-run
+     conclusion is an engine-side seam not yet folded in, so the phase is honest
+     about what it is *not* considering.
+    """
+
+    phase: Literal["no_branch", "branch_active", "pr_open", "in_review", "merged"]
+    #: The workflow state the phase sits beside, for the surface to show the
+    #: two together without re-reading the item.
+    workflow_state: str
+    branches: list[WorkItemBranchView] = []
+    pull_request: WorkItemPullRequestView | None = None
+    drift: list[GitStoryDriftView] = []
+    task_conclusion_available: bool = Field(
+        default=False,
+        description=(
+            "Whether the task-run conclusion fed the phase. False today: "
+            "it is an engine-side record not surfaced through the work item, so "
+            "the phase is derived from branches and the PR edge alone."
+        ),
+    )
+
+
+class ClaimPull(Result):
+    """A pull request a completion claim was checked against (WI-1835)."""
+
+    number: int
+    state: str
+    merged_at: datetime | None = None
+    merged_by: str | None = Field(
+        default=None, description="Who merged it, when the forge observation says."
+    )
+    checks: str | None = None
+    head_ref: str | None = None
+
+
+class ClaimCheck(Result):
+    """A session's completion claim checked against git and the forge (WI-1835).
+
+    Recorded when a session says `AUTOPILOT: DONE` or moves its item to
+    review or done. `mismatches` lists, in words, where the claim and the
+    facts disagree; `unchecked` lists the facts that could not be read, so
+    an empty `mismatches` is never mistaken for verified.
+    """
+
+    claim: Literal["autopilot-done", "review", "done"]
+    session: str | None = Field(default=None, description="The session's Vogt id.")
+    work_item: str | None = None
+    session_started_at: datetime | None = None
+    branch: str | None = None
+    head: str | None = Field(default=None, description="The worktree's HEAD commit.")
+    pushed: bool | None = Field(
+        default=None, description="Whether HEAD is on the branch's upstream."
+    )
+    new_commits: int | None = Field(
+        default=None,
+        description="Commits on HEAD committed since the session started.",
+    )
+    pulls: list[ClaimPull] = []
+    mismatches: list[str] = []
+    unchecked: list[str] = []
+
+
+class WorkResult(Result):
+    item: WorkItem
+    comments: list[Comment] = []
+    #: Sessions opened for this item, live activity included.
+    #: Populated by `work.get`; empty on the write operations, which answer
+    #: about the change they made rather than about what is running.
+    sessions: list[SessionSummary] = []
+    #: Branches this item is worked on: declared on the overlay,
+    #: observed by the `git-local` sweep, kept separate so a disagreement
+    #: reads as drift. Populated by `work.get`; empty on the write operations.
+    branches: list[WorkItemBranchView] = []
+    #: The derived git story: branch/PR summary, a phase shown beside
+    #: the workflow state, and the contradictions between them as drift.
+    #: Populated by `work.get`; None on the write operations and when there is
+    #: no git evidence at all.
+    git: WorkItemGitStory | None = None
+    #: The states a `work.transition` with `walk` passed through, starting
+    #: state first and target last — one audited transition per edge. Empty
+    #: for a single-edge transition and on every other operation.
+    walked: list[str] = []
+    #: On a `work.transition` into a finished state: the sessions still
+    #: bound to the item and running or hibernated (WI-998). A warning, never
+    #: a refusal — a session may still be finishing (a PR, a comment) — and
+    #: nothing is unbound. Empty everywhere else.
+    live_sessions: list[SessionSummary] = []
+    #: On a `work.transition` to review or done made by a session: the
+    #: session's claim checked against git and the forge (WI-1835). A
+    #: mismatch is also recorded as a comment on the item; nothing is refused.
+    claim_check: ClaimCheck | None = None
+
+
+class GetWorkParams(Params):
+    ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
+    comment_limit: int = Field(default=50, ge=0, le=500)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits the item body and comments; `full` (default) keeps them."
+        ),
+    )
+    comment_order: Literal["newest", "oldest"] = Field(
+        default="newest",
+        description=(
+            "Which end of the comment thread `comment_limit` keeps. `newest` "
+            "(default) returns the newest comments, newest first; `oldest` "
+            "returns the oldest, oldest first."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(data, {"id": "ref"}, model="work.get")
+
+
+class WorkItemRow(Result):
+    """One work item in `summary` mode: what a reader scans, nothing more.
+
+    Bodies, relations and audit-shaped fields are left out; `work.get` with
+    the ref returns the rest.
+    """
+
+    ref: str
+    title: str
+    kind: WorkKind
+    state: str
+    priority: Priority
+    project_slug: str | None = None
+
+    @classmethod
+    def of(cls, item: WorkItem) -> WorkItemRow:
+        return cls(
+            ref=item.ref,
+            title=item.title,
+            kind=item.kind,
+            state=item.state,
+            priority=item.priority,
+            project_slug=item.project_slug,
+        )
+
+
+#: How many refs one `work.get_many` may name: enough for every session a
+#: rail shows at once, few enough that the read stays a handful of indexed
+#: lookups and the query string a sane length.
+WORK_GET_MANY_LIMIT = 200
+
+
+class GetManyWorkParams(Params):
+    refs: list[str] = Field(
+        min_length=1,
+        max_length=WORK_GET_MANY_LIMIT,
+        description=(
+            "Work item references to read, e.g. [WI-7, WI-9]; a subject key "
+            "resolves as it does for `work.get`. A repeated ref is read once."
+        ),
+    )
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_are_refs(cls, refs: list[str]) -> list[str]:
+        for ref in refs:
+            if not ref or len(ref) > 200:
+                msg = "each ref is 1-200 characters"
+                raise ValueError(msg)
+        return refs
+
+
+class WorkManyResult(Result):
+    items: list[WorkItemRow] = Field(
+        description=(
+            "One compact row per ref that names a work item, in the order asked; "
+            "`work.get` with a ref returns the rest of it."
+        )
+    )
+    missing: list[str] = Field(
+        default_factory=list,
+        description="Refs that name no work item, in the order asked.",
+    )
+
+
+class ListWorkParams(Params):
+    project: str | None = Field(default=None, description="Project slug.")
+    kinds: list[WorkKind] | None = None
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Workflow states to include, e.g. [open, in_progress]. Aliases: "
+            "`status`, `state` (a single state or a comma-separated string "
+            "is accepted). Naming a terminal state (done, wont_do) includes "
+            "finished items without needing `include_finished`."
+        ),
+    )
+    query: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Case-insensitive text matched against the title, body and ref. "
+            "Aliases: `text`, `search`, `q`."
+        ),
+    )
+    priorities: list[Priority] | None = None
+    assignee: str | None = Field(default=None, description="Actor identity_ref.")
+    initiative: str | None = Field(default=None, description="Initiative slug.")
+    label: str | None = None
+    include_finished: bool = Field(
+        default=False, description="Include done and wont_do items."
+    )
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) returns compact rows — ref, title, kind, "
+            "state, priority, project — so a long page fits one tool result; "
+            "`full` returns every field, bodies included."
+        ),
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        data = apply_aliases(
+            data,
+            {
+                "status": "states",
+                "state": "states",
+                "text": "query",
+                "search": "query",
+                "q": "query",
+            },
+            model="work.list",
+        )
+        if isinstance(data, dict) and isinstance(data.get("states"), str):
+            data["states"] = [
+                part.strip() for part in data["states"].split(",") if part.strip()
+            ]
+        return data
+
+
+class WorkListResult(Result):
+    items: list[WorkItem] | list[WorkItemRow] = Field(
+        description=(
+            "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode."
+        )
+    )
+    total: int
+    mode: ListMode = "full"
+    next_offset: int | None = Field(
+        default=None,
+        description="The `offset` of the next page; null on the last page.",
+    )
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set when the list is scoped to one project: `unlinked` "
+            "is the machine-readable marker that this project has no work "
+            "surface yet — the items are empty because linking or publishing "
+            "is the way forward, not because there is nothing to do. Global "
+            "lists carry null."
+        ),
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "On an `unlinked` project with open native items: how many there "
+            "are, a few refs, and that they still take comments and "
+            "transitions by ref. Null otherwise."
+        ),
+    )
+
+
+BoardLaneMode = Literal["none", "project", "initiative"]
+
+
+class BoardCellParams(Params):
+    """One cell requested in a batched Board read."""
+
+    lane_key: str = Field(
+        default="",
+        description=(
+            "Project slug or initiative id for the selected lane mode; blank is "
+            "the sole lane in `none` mode and the unassigned lane otherwise."
+        ),
+    )
+    state: str
+    cursor: str | None = Field(
+        default=None,
+        description="Opaque continuation returned for this exact cell.",
+    )
+
+
+class BoardListParams(Params):
+    """One bounded, server-owned batch of independently pageable cells."""
+
+    project: str | None = Field(default=None, description="Project slug.")
+    kinds: list[WorkKind] | None = None
+    states: list[str] | None = None
+    priorities: list[Priority] | None = None
+    assignee: str | None = Field(default=None, description="Actor identity_ref.")
+    initiative: str | None = Field(default=None, description="Initiative slug.")
+    label: str | None = None
+    lane_mode: BoardLaneMode = "none"
+    cells: list[BoardCellParams] = Field(min_length=1, max_length=40)
+    page_size: int = Field(default=30, ge=1, le=100)
+    snapshot: str | None = Field(
+        default=None,
+        description=(
+            "Opaque snapshot returned by the first batch. Required when adding "
+            "another cell or continuing one against that same Board view."
+        ),
+    )
+
+
+class BoardCellResult(Result):
+    lane_key: str
+    state: str
+    items: list[WorkItem]
+    total: int
+    next_cursor: str | None = None
+
+
+class BoardListResult(Result):
+    cells: list[BoardCellResult]
+    column_totals: dict[str, int]
+    lane_totals: dict[str, int]
+    #: The declared Board population: how many declared work items match this
+    #: filter across every column, terminal ones included. Unchanged in
+    #: meaning — the number the Board draws — so existing callers do not shift.
+    total: int
+    backlog_candidates: int = Field(
+        default=0,
+        description=(
+            "How many things the Backlog would consider for this same scope "
+            ": declared work plus open forge subjects that are not yet "
+            "tracked as work items. The Board draws only the declared cards, so "
+            "this is almost always larger, and a surface that shows `total` "
+            "without it silently reads a small Board as the size of the estate. "
+            "Computed the observed-inclusive way the Backlog computes it, over "
+            "the same project/kind/priority/assignee/initiative/label filters."
+        ),
+    )
+    declared_total: int = Field(
+        default=0,
+        description=(
+            "The declared-only slice of `backlog_candidates` — non-terminal "
+            "declared work in this scope, the same population the rail counts. "
+            "`backlog_candidates - declared_total` is the observed subjects the "
+            "Board is currently silent about."
+        ),
+    )
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set for a project scope: `unlinked` marks a project with "
+            "no Board — the cells are empty because linking or publishing is "
+            "the way forward. The global Board carries null."
+        ),
+    )
+    excluded_unlinked: int = Field(
+        default=0,
+        description=(
+            "Declared rows this filter would have drawn whose project is "
+            "unlinked, excluded by the forge-less withdrawal and reported so the "
+            "Board's totals stay honest about what they leave out; on an "
+            "unlinked project scope it is the count of open native items a "
+            "link or publish would migrate."
+        ),
+    )
+    snapshot: str
+    snapshot_at: datetime
+    revision: int
+
+
+class UpdateWorkParams(Params):
+    ref: str
+    title: Name | None = None
+    body: str | None = None
+    priority: Priority | None = None
+    effort: Effort | None = None
+    project: str | None = Field(default=None, description="Project slug.")
+    initiative: str | None = Field(default=None, description="Initiative slug.")
+    assignee: str | None = Field(default=None, description="Actor identity_ref.")
+    clear_effort: bool = False
+    clear_assignee: bool = False
+    clear_initiative: bool = False
+    add_labels: list[str] | None = None
+    remove_labels: list[str] | None = None
+    reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+
+class TransitionWorkParams(Params):
+    ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
+    to_state: str = Field(
+        description="Target state, e.g. in_progress. Aliases: `to`, `state`."
+    )
+    reason: Reason = Field(
+        description=(
+            "Why the item is moving (audited, required on every write). With "
+            "`walk`, each hop records this reason annotated with the hop."
+        )
+    )
+    walk: bool = Field(
+        default=False,
+        description=(
+            "Walk the shortest path of valid edges to `to_state`, one audited "
+            "transition per hop (e.g. open -> in_progress -> review -> done). "
+            "Only the workflow's own edges are taken and finished states are "
+            "never passed through, so no review step is skipped."
+        ),
+    )
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(
+            data,
+            {"id": "ref", "to": "to_state", "state": "to_state"},
+            model="work.transition",
+        )
+
+
+class RelateWorkParams(Params):
+    ref: str
+    kind: RelationKind = Field(
+        description=(
+            "depends_on / relates_to / duplicate_of / parent_of. "
+            "(implemented_by is observed from pull requests, not declarable.)"
+        )
+    )
+    target: str = Field(description="The other work item's reference.")
+    reason: Reason
+
+
+class UnrelateWorkParams(Params):
+    ref: str
+    kind: RelationKind
+    target: str
+    reason: Reason
+
+
+class BindBranchParams(Params):
+    """Declare the git branch a work item is worked on (the declared path)."""
+
+    ref: str = Field(description="Work item reference, e.g. WI-7.")
+    branch: str | None = Field(
+        default=None,
+        description=(
+            "The branch name to declare. Defaults from `branch_binding_template` "
+            "when omitted (`WI-7` becomes `wi-7`, an upstream item its `gh-<n>` "
+            "form). Declaring a branch already on the item is a no-op, not an "
+            "error. Additive and forward-only: this records a name, it never "
+            "creates, renames or deletes a branch in git."
+        ),
+    )
+    reason: Reason
+
+
+class LandWorkParams(Params):
+    """Land a work item's reviewed branch onto its base (WI-1328)."""
+
+    ref: str = Field(description="Work item reference, e.g. WI-7.")
+    head_sha: str = Field(
+        min_length=7,
+        description=(
+            "The branch tip the review saw. The latest verdict must name this "
+            "SHA, and the engine refuses when the branch has moved past it."
+        ),
+    )
+    reason: Reason
+
+
+class LandWorkResult(Result):
+    onto_before: str = Field(description="The base branch's SHA before the land.")
+    onto_after: str = Field(description="The base branch's SHA after the land.")
+    commits: list[str] = Field(
+        default_factory=list,
+        description="The commits now on the base that were not before, oldest first.",
+    )
+    rebased: bool = Field(
+        description="Whether the branch was rebased onto the base before landing."
+    )
+
+
+class CommentParams(Params):
+    ref: str
+    body: Name = Field(description="The comment text.")
+    kind: CommentKind = Field(
+        default="note",
+        description=(
+            "`note` (default) is an ordinary remark. `handoff` is the structured "
+            "hand-off a fresh session starts from, and requires `handoff`. "
+            "`verdict` is a review verdict, requires `verdict`, and is posted "
+            "by a person or by a review session started by a person or "
+            "oversight on the item it reviews. `verification` records a check, "
+            "requires `verification`, and is posted by someone other than the "
+            "worker."
+        ),
+    )
+    handoff: HandoffFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a hand-off: branch, head_sha, base, "
+            "done, remaining, touch_points, gates_run, blockers, session. "
+            "Required when kind is `handoff`, refused on any other kind."
+        ),
+    )
+    verdict: VerdictFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a review verdict: head_sha, base, "
+            "verdict (no_blockers | blockers), blockers (non-empty for "
+            "`blockers`), deployment_paths_covered. reviewer_session and "
+            "reviewer_started_by are filled by Vogt; supplied values are "
+            "ignored. Required when kind is `verdict`, refused otherwise."
+        ),
+    )
+    verification: VerificationFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a verification: head_sha, lane, what, "
+            "evidence. `by` is filled by Vogt. Required when kind is "
+            "`verification`, refused otherwise."
+        ),
+    )
+    reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+    @model_validator(mode="after")
+    def _fields_match_kind(self) -> CommentParams:
+        sets = {
+            "handoff": self.handoff,
+            "verdict": self.verdict,
+            "verification": self.verification,
+        }
+        named = {
+            "handoff": "hand-off",
+            "verdict": "verdict",
+            "verification": "verification",
+        }
+        for kind, fields in sets.items():
+            if self.kind == kind and fields is None:
+                msg = f"a {named[kind]} comment requires {kind} fields"
+                raise ValueError(msg)
+            if self.kind != kind and fields is not None:
+                msg = f"{kind} fields belong on a comment of kind {kind}"
+                raise ValueError(msg)
+        return self
+
+
+class CommentResult(Result):
+    comment: Comment
+    write_back: str = Field(
+        default="skipped",
+        description=(
+            "What happened upstream: skipped (the usual case), succeeded, "
+            "or failed. A failure never fails the local write."
+        ),
+    )
+
+
+# -- taxonomy --------------------------------------------------------------
+
+
+class CreateLabelParams(Params):
+    name: Name
+    color: str | None = Field(default=None, description="Hex colour, e.g. #d73a4a.")
+    reason: Reason
+
+
+class LabelResult(Result):
+    label: Label
+
+
+class ListLabelsParams(Params):
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class LabelListResult(Result):
+    labels: list[Label]
+
+
+class CreateInitiativeParams(Params):
+    title: Name
+    body: str = ""
+    weight: int = Field(
+        default=0, ge=0, le=100, description="Feeds ranking; 0 means no lift."
+    )
+    state: InitiativeState = "open"
+    reason: Reason
+
+
+class UpdateInitiativeParams(Params):
+    """Correct an initiative after creation, or close and reopen it.
+
+    The slug is its identity — forge tracking issues carry the
+    ``initiative:<slug>`` label — so a new title leaves the slug as it was.
+    Every field left unset keeps its current value.
+    """
+
+    slug: str = Field(description="Initiative to update.")
+    title: Name | None = None
+    body: str | None = None
+    weight: int | None = Field(
+        default=None, ge=0, le=100, description="Feeds ranking; 0 means no lift."
+    )
+    state: InitiativeState | None = Field(
+        default=None,
+        description="`closed` ends it; `initiative publish` then proposes "
+        "closing its tracking issues.",
+    )
+    reason: Reason
+
+
+class InitiativeResult(Result):
+    initiative: Initiative
+
+
+class ListInitiativesParams(Params):
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits each initiative's body; `full` (default) keeps it."
+        ),
+    )
+
+
+class InitiativeListResult(Result):
+    initiatives: list[Initiative]
+
+
+class PublishInitiativeParams(Params):
+    """Project an initiative onto a forge tracking issue per linked repo.
+
+    Additive and forward-only: for each forge-linked project the initiative
+    spans, Vogt creates or adopts one tracking issue labelled
+    ``initiative:<slug>`` and re-renders its managed task list. Nothing is ever
+    closed or deleted — a closed initiative *proposes* its tracking issues be
+    closed (drift), it never writes the close.
+    """
+
+    slug: str = Field(description="Initiative slug to publish.")
+    reason: Reason
+
+
+class InitiativeTrackingIssue(Result):
+    """One repo's tracking issue, after a publish."""
+
+    project_slug: str
+    repo_url: str | None = None
+    number: int | None = Field(
+        default=None, description="The tracking issue number upstream."
+    )
+    source_url: str | None = None
+    action: Literal["created", "adopted", "skipped"] = "skipped"
+    members: int = Field(default=0, description="Member work items listed.")
+    detail: str | None = None
+    close_proposed: bool = Field(
+        default=False,
+        description="Whether closing the initiative proposed closing this "
+        "tracking issue (never an automatic upstream close).",
+    )
+
+
+class PublishInitiativeResult(Result):
+    """What `initiative.publish` did, one row per repo the initiative spans."""
+
+    slug: str
+    state: InitiativeState
+    tracking_issues: list[InitiativeTrackingIssue] = []
+
+
+class CreateActorParams(Params):
+    identity_ref: Name = Field(
+        description="Stable identity, e.g. agent:claude-code or local:sprooty."
+    )
+    kind: str = Field(default="agent", description="human or agent.")
+    display_name: Name
+    reason: Reason
+
+
+class ActorResult(Result):
+    actor: Actor
+
+
+class ListActorsParams(Params):
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class ActorListResult(Result):
+    actors: list[Actor]
+
+
+# -- views -----------------------------------------------------------------
+
+
+class BacklogParams(Params):
+    project: str | None = Field(
+        default=None, description="Project slug; omit for the global backlog."
+    )
+    kinds: list[WorkKind] | None = None
+    priorities: list[Priority] | None = None
+    assignee: str | None = None
+    initiative: str | None = None
+    label: str | None = None
+    trust_states: list[TrustState] | None = None
+    include_prs: bool = Field(
+        default=True,
+        description=(
+            "Whether open pull requests rank in the backlog. On by "
+            "default: a synced PR is worklike, and now that closure is "
+            "observed a merged one self-heals out rather than "
+            "lingering. Set false to see issues and markers only — a view "
+            "choice, not a data one; the PRs stay queryable through "
+            "`observations list`."
+        ),
+    )
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) returns each ranked row without its full "
+            "work item (`item` is null; ref, title, kind, state, priority and "
+            "score remain); `full` includes it, bodies and all."
+        ),
+    )
+    limit: int = Field(default=20, ge=1, le=200)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Ranked rows to skip. `total_considered` is the full "
+        "count, so a caller knows whether another page exists. Ranking is "
+        "recomputed per request and staleness grows with the clock, so two "
+        "pages fetched far enough apart can repeat or skip an item near a "
+        "score boundary — the same caveat `audit.list` carries, for the same "
+        "reason.",
+    )
+
+
+class BacklogResult(Result):
+    items: list[RankedItem]
+    total_considered: int
+    next_offset: int | None = Field(
+        default=None,
+        description="The `offset` of the next page; null on the last page.",
+    )
+    declared: int = 0
+    observed: int = 0
+    suppressed: int = 0
+    closed_upstream: int = Field(
+        default=0,
+        description=(
+            "Observed subjects left out because their source says they are "
+            "closed. Reported rather than silently dropped, so a short list is "
+            "distinguishable from a filtered one — they remain queryable "
+            "through `observations list`."
+        ),
+    )
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set for a project scope: `unlinked` marks a project with "
+            "no work surface — link or publish it to track work upstream. "
+            "The global view carries null."
+        ),
+    )
+    excluded_unlinked: int = Field(
+        default=0,
+        description=(
+            "Native declared items left out because their project is "
+            "unlinked (the withdrawal of the forge-less work layer). "
+            "Reported rather than silently dropped, so the arithmetic over "
+            "`declared` stays honest; on an unlinked project scope it is the "
+            "count of open native items a link or publish would migrate."
+        ),
+    )
+    scope: str
+    freshness: Freshness
+
+
+class BugsParams(Params):
+    project: str | None = None
+    priorities: list[Priority] | None = None
+    assignee: str | None = None
+    label: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Ranked rows to skip. `total_considered` is the full "
+        "count, so a caller knows whether another page exists. Ranking is "
+        "recomputed per request and staleness grows with the clock, so two "
+        "pages fetched far enough apart can repeat or skip an item near a "
+        "score boundary — the same caveat `audit.list` carries, for the same "
+        "reason.",
+    )
+
+
+class WhyParams(Params):
+    ref: str
+
+
+class ContributionView(Result):
+    input: str
+    detail: str
+    value: float
+    weight: float
+    contribution: float
+
+
+class WhyResult(Result):
+    ref: str
+    title: str
+    total: float
+    contributions: list[ContributionView]
+    inputs_not_yet_available: dict[str, str] = Field(
+        description="Documented ranking inputs that cannot fire in this build."
+    )
+
+
+class WorkflowListParams(Params):
+    pass
+
+
+class WorkflowView(Result):
+    kind: str
+    initial_state: str
+    states: list[str]
+    transitions: dict[str, list[str]]
+
+
+class WorkflowListResult(Result):
+    workflows: list[WorkflowView]
+
+
+# -- history ---------------------------------------------------------------
+
+
+class ListEventsParams(Params):
+    after: int = Field(
+        default=0, ge=0, description="Cursor: return events with seq greater than this."
+    )
+    limit: int = Field(default=100, ge=1, le=1000)
+    entity_id: str | None = Field(
+        default=None,
+        description=(
+            "Only events about this entity. The id, not the ref — the same "
+            "shape audit.list takes, so the two feeds narrow alike."
+        ),
+    )
+
+
+class EventListResult(Result):
+    events: list[Event]
+    next_cursor: int
+
+
+class ListAuditParams(Params):
+    """How the audit log is narrowed.
+
+    `limit`/`offset`/`total` rather than a cursor, which is the idiom every
+    other filtered list here uses (`work.list`, `observations.list`). The
+    events feed's `after` cursor is the exception and earns it: that feed is
+    read forwards by a poller, while the audit log is read newest-first by a
+    person, and a cursor cannot answer "how many records match at all" —
+    which is what tells a reader whether they are looking at the whole story.
+    """
+
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Records to skip. Paging a log that is being written to "
+        "can repeat a record, because new rows arrive at the front.",
+    )
+    actor_id: str | None = None
+    operation: str | None = None
+    entity_id: str | None = Field(
+        default=None,
+        description="An entity's id. A work item's trail also carries the "
+        "writes audited against that item's comments.",
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug. Keeps the writes this instance can "
+        "attribute to that project; see the operation's docstring for the "
+        "kinds that carry one.",
+    )
+    since: datetime | None = Field(
+        default=None, description="Inclusive lower bound on the write's time."
+    )
+    until: datetime | None = Field(
+        default=None, description="Exclusive upper bound on the write's time."
+    )
+
+
+class AuditListResult(Result):
+    records: list[AuditRecord]
+    total: int = Field(
+        description="Records matching the filters, ignoring limit and offset."
+    )
+
+
+# -- collection ------------------------------------------------------------
+
+
+class SweepParams(Params):
+    project: str | None = Field(
+        default=None,
+        description="Narrow the sweep to one project. Scope is never widened.",
+    )
+    collectors: list[str] | None = Field(
+        default=None, description="Collector names; omit to run all of them."
+    )
+    offline_only: bool = Field(
+        default=False,
+        description="Skip every collector that needs the network (NFR-PO2).",
+    )
+    reason: Reason
+
+
+class SweepReportView(Result):
+    collector: str
+    sweep_id: str
+    outcome: str
+    projects: int
+    new: int
+    unchanged: int
+    failures: dict[str, str] = {}
+
+
+class WorkspaceCleanCandidate(BaseModel):
+    """A merged, stopped workspace a sweep suggests removing (WI-1325)."""
+
+    path: str
+    branch: str
+    size_bytes: int | None = None
+    session: str
+    call: str = Field(description="The `workspace_clean` call that would remove it.")
+
+
+class SweepResult(Result):
+    scope: str
+    projects: int
+    subjects: int
+    dep_refs: int
+    reports: list[SweepReportView]
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
+
+    disk_candidates: list[WorkspaceCleanCandidate] = Field(
+        default_factory=list,
+        description=(
+            "Only while disk.needs_attention: the largest stopped workspaces "
+            "whose branch is merged, each with the workspace_clean call that "
+            "removes it. A suggestion; nothing is removed by the sweep."
+        ),
+    )
+
+
+class CoverageParams(Params):
+    pass
+
+
+class CoverageEntry(Result):
+    collector: str
+    status: str
+    last_swept_at: datetime | None = None
+    age_seconds: int | None = None
+    projects: int = Field(
+        default=0,
+        description=(
+            "How many projects this collector has ever swept. Cumulative, "
+            "which is what the operation's name promises; it used to be the "
+            "scope of the most recent sweep, so a `--project`-scoped run made "
+            "every collector look as though it had only ever seen one."
+        ),
+    )
+    registered: int = Field(
+        default=0,
+        description="The denominator: projects registered on this instance.",
+    )
+    last_sweep_scope: int = Field(
+        default=0,
+        description=(
+            "How many projects the most recent sweep was asked about. Reported "
+            "separately so a scoped sweep and a collector that failed on seven "
+            "of eight projects stop looking alike."
+        ),
+    )
+    never_swept: int = Field(
+        default=0,
+        description=(
+            "Registered projects this collector has never looked at. The "
+            "number a reader is usually after, and the one that used to have "
+            "to be inferred from a count that could not support it."
+        ),
+    )
+    detail: str | None = None
+
+
+class CoverageResult(Result):
+    collectors: list[CoverageEntry]
+    swept_project_ids: list[str]
+    unswept_project_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Registered projects no collector has ever swept. A registered "
+            "project nothing has looked at has no evidence behind anything it "
+            "claims, and is the case the not-collected rule exists to keep "
+            "visible."
+        ),
+    )
+
+
+class ObservationsParams(Params):
+    project: str | None = None
+    kind: str | None = Field(
+        default=None, description="Observation kind, e.g. marker or forge.issue."
+    )
+    subject_key: str | None = None
+    promoted_only: bool = False
+    latest_only: bool = Field(
+        default=True,
+        description="Newest per subject. Set false for the full history.",
+    )
+    limit: int = Field(default=100, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+
+
+class ObservationsResult(Result):
+    observations: list[Observation]
+    total: int = Field(
+        description=(
+            "How many rows this page holds — not how many exist. The store "
+            "is queried a page at a time and no count is taken behind it, so "
+            "`total == limit` means 'there may be more', never 'that is all'."
+        )
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why an empty answer is empty, where that is not 'there are "
+            "none'. An unswept instance has no evidence tables at all, and "
+            "returning `[]` for that reads as a collector that found nothing "
+            "."
+        ),
+    )
+
+
+class DepsParams(Params):
+    project: str = Field(description="Project slug.")
+
+
+class MirroredSource(Result):
+    """The same source in two places, reported and never judged.
+
+    A path member of one project that declares the package a separately
+    registered project publishes — `rustnzb`'s `crates/nzb-core` and the
+    standalone `nzb-core`. Contents are not compared and no divergence is
+    asserted; the two declared versions are recorded as the facts they are.
+    """
+
+    package: str
+    project: str = Field(description="The project that carries the copy.")
+    mirrors: str = Field(description="The registered project that publishes it.")
+    local_path: str = Field(description="Where the copy sits, inside `project`.")
+    manifest: str | None = None
+    local_version: str | None = None
+    published_version: str | None = None
+    observed_at: datetime
+
+
+class DepsResult(Result):
+    """The dependency graph around one project.
+
+    Carries `freshness` because a graph is an aggregate over sweeps, and an
+    empty graph with no sweep behind it means "not collected", not "this
+    project depends on nothing". `status` narrows the same
+    point to this project: estate-wide freshness cannot say whether the
+    dependency collector has ever walked *this* tree.
+    """
+
+    project: str
+    references_out: list[DepRef]
+    referenced_by: list[DepRef]
+    unresolved: int = 0
+    mirrors: list[MirroredSource] = Field(
+        default=[],
+        description="Copies this project carries of other projects' source.",
+    )
+    mirrored_by: list[MirroredSource] = Field(
+        default=[],
+        description="Projects carrying a copy of this project's source.",
+    )
+    status: Literal["not_collected", "collected"] = Field(
+        default="not_collected",
+        description=(
+            "Whether the dependency collector has walked this project. "
+            "`not_collected` makes the counts above meaningless rather than "
+            "informative: nothing was read, so nothing was found."
+        ),
+    )
+    manifests_read: int = Field(
+        default=0,
+        description="How many manifests the last walk actually parsed.",
+    )
+    unsupported_manifests: list[str] = Field(
+        default=[],
+        description=(
+            "Manifests present in a format the collector does not read "
+            "(`go.mod`, `pom.xml`, …). A project whose graph lives entirely "
+            "in one of these reports no references and has plenty."
+        ),
+    )
+    unreadable_manifests: list[str] = Field(
+        default=[],
+        description="Manifests in a supported format that would not parse.",
+    )
+    detail: str | None = None
+    freshness: Freshness = Freshness()
+
+
+class PruneParams(Params):
+    reason: Reason
+
+
+class PruneResult(Result):
+    removed: int
+    kept_latest: int
+    kept_referenced: int
+    horizon_days: int
+
+
+# -- suppression and adoption ---------------------------------------------
+
+
+class SuppressParams(Params):
+    subject: str = Field(
+        description="An exact subject key, or a glob pattern when --pattern is set."
+    )
+    pattern: bool = Field(
+        default=False, description="Treat `subject` as a glob pattern."
+    )
+    project: str | None = Field(
+        default=None, description="Limit the suppression to one project."
+    )
+    reason: Reason
+
+
+class SuppressionResult(Result):
+    suppression: Suppression
+
+
+class ListSuppressionsParams(Params):
+    include_revoked: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class SuppressionListResult(Result):
+    suppressions: list[Suppression]
+
+
+class RevokeSuppressionParams(Params):
+    id: str
+    reason: Reason
+
+
+class AdoptParams(Params):
+    subject: str = Field(description="The observed subject key to adopt.")
+    kind: WorkKind | None = Field(
+        default=None, description="Override the inferred work kind."
+    )
+    priority: Priority | None = Field(
+        default=None, description="Override the inferred priority."
+    )
+    project: str | None = Field(
+        default=None, description="Override the project the subject belongs to."
+    )
+    assignee: str | None = None
+    reason: Reason
+
+
+class AdoptResult(Result):
+    item: WorkItem
+    subject_key: str
+    inferred_kind: WorkKind
+    inferred_priority: Priority
+
+
+# -- contract and compliance ----------------------------------------------
+
+
+class CriterionView(Result):
+    rule: str
+    target: str
+    satisfied: bool
+    detail: str
+    applicable: bool = Field(
+        default=True,
+        description=(
+            "Whether this criterion can apply to this project at all "
+            ". False is a declaration somebody made and gave a reason "
+            "for — a Cargo workspace has no root `src/` — and an inapplicable "
+            "criterion is reported but never counted as failing."
+        ),
+    )
+    tracked: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the repository carries this. Null where it could not be "
+            "asked — an unregistered path, or a directory that is not a "
+            "checkout. False alongside a file that exists on disk is the "
+            "present-but-untracked case: no clone would have it."
+        ),
+    )
+
+
+class RecommendationView(Result):
+    """What would close one failing criterion, and who has to decide it.
+
+    Advisory output. A `scaffold` remedy is one `project scaffold`
+    performs; a `judgement` remedy is an instruction addressed to an actor —
+    readable by a person, executable by an agent, applied implicitly by
+    neither. Nothing may treat any of it as authority.
+    """
+
+    rule: str
+    target: str
+    remedy: Literal["scaffold", "judgement"]
+    instruction: str
+
+
+class ContractEvaluateParams(Params):
+    """A dry run against any path. Reads, stores nothing, needs no reason.
+
+    Split from `ContractCheckParams` because the two are different
+    operations wearing one name. This one changes nothing, so the audit has
+    nothing to record — and demanding a reason for it meant the CLI collected a
+    justification for a write that never happened, then discarded it. It also
+    forced `project.write` scope on a read, so a read-only token could not
+    evaluate a contract against a folder at all.
+    """
+
+    path: str = Field(
+        description="Any folder or repository, registered or not. Stores nothing."
+    )
+
+
+class ContractCheckParams(Params):
+    """Evaluate a registered project and record the result."""
+
+    project: str = Field(
+        description="A registered project slug. Records the result with its age."
+    )
+    reason: Reason
+
+
+class ContractCheckResult(Result):
+    path: str
+    project: str | None
+    contract_version: str
+    status: str
+    criteria: list[CriterionView] = Field(
+        description="Every rule evaluated — not only the failures."
+    )
+    failing: list[CriterionView]
+    inapplicable: list[CriterionView] = Field(
+        default=[],
+        description="Criteria declared unmeetable here, with their reasons.",
+    )
+    recommendations: list[RecommendationView] = Field(
+        default=[],
+        description="What would close each failing criterion.",
+    )
+    recorded: bool
+    checked_at: datetime | None
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why this answer is the answer, where the status alone would not "
+            "say: a project that has not adopted the contract, or a root path "
+            "that could not be read."
+        ),
+    )
+
+
+class ComplianceParams(Params):
+    project: str
+
+
+class ComplianceResult(Result):
+    project: str
+    status: str
+    contract_version: str
+    checked_at: datetime | None
+    age_seconds: int | None = Field(
+        description="How old this answer is. Never refreshed implicitly."
+    )
+    failing: list[CriterionView] = []
+    adopted: bool = Field(
+        default=False,
+        description=(
+            "Whether this project opted into the contract. A project "
+            "that has not is `not_applicable`, which is not a fault."
+        ),
+    )
+    adopted_at: datetime | None = None
+    inapplicable: list[CriterionView] = []
+    detail: str | None = None
+
+
+class ContractAdoptParams(Params):
+    """Opt a registered project into the contract."""
+
+    project: str = Field(description="A registered project slug.")
+    reason: Reason
+
+
+class ContractAdoptResult(Result):
+    project: str
+    adopted: bool
+    adopted_at: datetime | None
+    status: str = Field(
+        description="What compliance reports for this project after the change."
+    )
+    detail: str
+
+
+class ContractInapplicableParams(Params):
+    """Declare that a criterion cannot apply to a project."""
+
+    project: str = Field(description="A registered project slug.")
+    rule: str = Field(
+        description="The criterion's rule, as an evaluation reports it: "
+        "`required_file` or `required_dir`."
+    )
+    target: str = Field(
+        description="The criterion's target, as an evaluation reports it: "
+        "`LICENSE`, `src`, `design`."
+    )
+    reason: Reason
+
+
+class ContractApplicableParams(Params):
+    """Withdraw an inapplicability declaration."""
+
+    project: str
+    rule: str
+    target: str
+    reason: Reason
+
+
+class ContractExemptionView(Result):
+    rule: str
+    target: str
+    reason: str
+    declared_by: str
+    declared_at: datetime
+
+
+class ContractExemptionResult(Result):
+    project: str
+    declared: bool = Field(
+        description="True when the criterion is now inapplicable here."
+    )
+    exemptions: list[ContractExemptionView]
+    detail: str
+
+
+class ScaffoldProjectParams(Params):
+    """Lay the contract's skeleton into an already-registered project."""
+
+    project: str = Field(description="A registered project slug.")
+    reason: Reason
+
+
+class ScaffoldProjectResult(Result):
+    project: str
+    root_path: str
+    created: list[str] = Field(
+        description="Paths written, relative to the project's root."
+    )
+    skipped: list[str] = Field(
+        description="Paths already present and therefore left exactly as they were."
+    )
+    detail: str
+
+
+# -- drift -----------------------------------------------------------------
+
+
+class DriftDetectParams(Params):
+    auto_accept: bool = Field(
+        default=True,
+        description=(
+            "Apply the shipped low-risk policy: state-sync kinds are accepted "
+            "automatically, destructive or structural ones never are."
+        ),
+    )
+    reason: Reason
+
+
+class DriftDetectResult(Result):
+    raised: list[DriftProposal]
+    auto_accepted: list[str]
+    already_open: int = Field(
+        description="Findings that already had an open proposal, so were not re-raised."
+    )
+    superseded: list[str] = Field(
+        default=[],
+        description=(
+            "Open proposals this run marked as raised under evidence a later "
+            "sweep no longer reproduces. They are still open and "
+            "still need a person; the flag only tells the inbox which ones "
+            "are worth reading first."
+        ),
+    )
+    not_collected: list[str] = Field(
+        default=[],
+        description=(
+            "Registered projects no collector has ever swept. Nothing could "
+            "be raised for them, which is a different answer from finding no "
+            "drift there."
+        ),
+    )
+    auto_acceptable_kinds: list[str]
+
+
+class DriftListParams(Params):
+    status: str | None = Field(
+        default="open", description="open / accepted / rejected / contested."
+    )
+    kind: str | None = None
+    project: str | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class DriftListResult(Result):
+    """The drift inbox.
+
+    `freshness` is load-bearing here rather than decorative: an empty inbox
+    is reassuring only if something has looked recently. Without it, a
+    collector that stopped running reads as "no drift".
+    """
+
+    proposals: list[DriftProposal]
+    human_gated: dict[str, str] = Field(
+        default={},
+        description="Kinds the default policy never auto-accepts, and why.",
+    )
+    freshness: Freshness = Freshness()
+
+
+class DriftResolveParams(Params):
+    id: str
+    resolution: Literal["accepted", "rejected", "contested"]
+    reason: Reason
+
+
+class DriftResult(Result):
+    proposal: DriftProposal
+    change_applied: bool
+
+
+# -- auth ------------------------------------------------------------------
+
+
+class IssueTokenParams(Params):
+    actor: Name = Field(description="Actor identity_ref the token is bound to.")
+    name: Name = Field(description="What this token is for, e.g. 'claude-code'.")
+    scopes: Name = Field(
+        default="read",
+        description=(
+            "Comma-separated: read, work.write, project.write, admin, writeback."
+        ),
+    )
+    expires_in_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="Omit for a token that does not expire.",
+    )
+    reason: Reason
+
+
+class IssueTokenResult(Result):
+    token: Token
+    secret: str = Field(
+        description="Shown once. Not stored, not recoverable — rotate if lost."
+    )
+    warning: str
+
+
+class TokenResult(Result):
+    token: Token
+
+
+class ListTokensParams(Params):
+    include_revoked: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class TokenListResult(Result):
+    tokens: list[Token]
+
+
+class RevokeTokenParams(Params):
+    id: str
+    reason: Reason
+
+
+class InstallStatusResult(Result):
+    """Whether this instance is still in first-run install mode."""
+
+    install_mode: bool = Field(
+        description=(
+            "True while the token store holds no tokens at all — the state "
+            "in which the unauthenticated bootstrap will answer. The first "
+            "token, however issued, turns this false for good."
+        )
+    )
+
+
+class InstallBootstrapParams(Params):
+    display_name: Name = Field(
+        description="The first operator's name, e.g. 'Ada Lovelace'."
+    )
+    identity_ref: Name | None = Field(
+        default=None,
+        description=(
+            "Stable identity for the actor. Derived as human:<slug> from "
+            "the display name when omitted."
+        ),
+    )
+    token_name: Name = Field(
+        default="first-run browser token",
+        description="What the issued token is for.",
+    )
+    username: Name | None = Field(
+        default=None,
+        description=(
+            "A login name for the first operator. Given with `password`, the "
+            "bootstrap creates a password login and the token it returns is a "
+            "browser session rather than a long-lived API token. Derived from "
+            "the display name when a password is given without one."
+        ),
+    )
+    password: str | None = Field(
+        default=None,
+        description=(
+            "The first operator's password, at least 8 characters. Omit for "
+            "the headless bootstrap, which returns an admin API token instead."
+        ),
+    )
+
+
+class InstallBootstrapResult(Result):
+    actor: Actor
+    token: Token
+    secret: str = Field(
+        description="Shown once. Not stored, not recoverable — rotate if lost."
+    )
+    warning: str
+    username: str | None = Field(
+        default=None,
+        description="The login name created, when the bootstrap set a password.",
+    )
+
+
+class LoginParams(Params):
+    """Sign in with a username and password. Unauthenticated by construction."""
+
+    username: Name
+    password: str = Field(min_length=1)
+    session_name: Name = Field(
+        default="browser session",
+        description="What the session is for, e.g. the device it lives on.",
+    )
+
+
+class LoginResult(Result):
+    actor: Actor
+    token: Token
+    secret: str = Field(
+        description=("The session bearer, shown once. Expires; revoked by auth.logout.")
+    )
+
+
+class LogoutParams(Params):
+    reason: Reason
+
+
+class LogoutResult(Result):
+    revoked: bool = Field(
+        description=(
+            "Whether a session token was revoked. False on a surface with no "
+            "token behind it (the local CLI, a loopback listener)."
+        )
+    )
+    token: Token | None = None
+
+
+class WhoamiParams(Params):
+    pass
+
+
+class WhoamiResult(Result):
+    """Who the caller is, as authentication decided it."""
+
+    identity_ref: str
+    kind: Literal["human", "agent"]
+    display_name: str
+    scopes: list[str] = Field(
+        description="The effective scope set, implications applied."
+    )
+    token: Token | None = Field(
+        default=None,
+        description=(
+            "The token that authenticated the call; absent on the local surface."
+        ),
+    )
+
+
+class CreateUserParams(Params):
+    username: Name = Field(
+        description="Login name: lower-case letters, digits, '.', '-', '_'."
+    )
+    password: str = Field(min_length=1, description="At least 8 characters.")
+    display_name: Name | None = Field(
+        default=None, description="Defaults to the username."
+    )
+    actor: Name | None = Field(
+        default=None,
+        description=(
+            "An existing human actor's identity_ref to attach the login to. "
+            "Omitted, a new actor human:<username> is created."
+        ),
+    )
+    scopes: Name = Field(
+        default="read,work.write,project.write",
+        description=(
+            "Comma-separated scopes every session this user logs in to holds."
+        ),
+    )
+    reason: Reason
+
+
+class UserResult(Result):
+    user: PasswordCredential
+
+
+class UserListParams(Params):
+    pass
+
+
+class UserListResult(Result):
+    users: list[PasswordCredential]
+
+
+class SetPasswordParams(Params):
+    username: Name
+    password: str = Field(min_length=1, description="At least 8 characters.")
+    scopes: Name | None = Field(
+        default=None, description="Replace the login's scopes as well."
+    )
+    revoke_sessions: bool = Field(
+        default=True,
+        description="Also revoke every live session this user holds.",
+    )
+    reason: Reason
+
+
+class RemoveUserParams(Params):
+    username: Name
+    reason: Reason
+
+
+class RemoveUserResult(Result):
+    username: str
+    sessions_revoked: int
+
+
+class AuthDecisionListParams(Params):
+    decision: Literal["allow", "deny"] | None = Field(
+        default=None, description="Filter to allows or denials."
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class AuthDecisionListResult(Result):
+    decisions: list[AuthDecision]
+
+
+# -- lifecycle -------------------------------------------------------------
+
+
+class ServeParams(Params):
+    host: str = Field(
+        description=(
+            "Listen address. No default anywhere — it encodes exposure "
+            ". The compose file supplies it."
+        )
+    )
+    port: int = Field(
+        ge=1,
+        le=65535,
+        description="Listen port. No default, for the same reason as host.",
+    )
+    tls_cert: str | None = Field(
+        default=None, description="Operator-owned certificate, mounted read-only."
+    )
+    tls_key: str | None = None
+    no_auth: bool = Field(
+        default=False,
+        description="Serve without authentication. Only sane on loopback.",
+    )
+    read_only: bool = Field(
+        default=False,
+        description="Refuse every write, whatever scope a token holds.",
+    )
+    no_schedule: bool = Field(
+        default=False,
+        description=(
+            "Do not collect in the background. The schedule is on by "
+            "default because an instance that never looks cannot tell stale "
+            "evidence from none; this is the switch for a diagnostic run."
+        ),
+    )
+
+
+class ServeResult(Result):
+    url: str
+    api_path: str
+    mcp_path: str
+    auth_required: bool
+    #: Whether background collection is running. Reported rather than
+    #: assumed: "the server is up" and "the server is looking" are different
+    #: facts, and only one of them keeps freshness small.
+    collecting: bool = True
+    writes_enabled: bool
+
+
+class BackupParams(Params):
+    destination: str | None = Field(
+        default=None, description="Defaults to <data-dir>/backups/<timestamp>."
+    )
+    label: str | None = None
+    reason: Reason
+
+
+class BackupResult(Result):
+    """What a backup covered, including the parts it could not."""
+
+    path: str
+    instance_id: str
+    declared_schema_version: int
+    observed_schema_version: int
+    taken_at: datetime
+    engine_state: str = Field(
+        default="not configured",
+        description=(
+            "What happened to the session engine's state directory: copied, "
+            "not configured, or a failure. Stated rather than implied — a "
+            "backup that quietly covered two thirds of the product would be "
+            "indistinguishable from one that covered all of it until "
+            "somebody restored it."
+        ),
+    )
+    import_root: str | None = Field(
+        default=None,
+        description=(
+            "Where imported projects lived when this was taken. A restore "
+            "elsewhere leaves every project pointing at a path that is not "
+            "there."
+        ),
+    )
+
+
+class RestoreParams(Params):
+    source: str = Field(description="A backup directory containing manifest.json.")
+    confirm: bool = Field(
+        default=False, description="Required: this replaces the live stores."
+    )
+    reason: Reason
+
+
+class RestoreResult(Result):
+    """What came back, and whether the estate is still where it was."""
+
+    source: str
+    instance_id: str
+    restored_from: datetime
+    migrations_applied: list[str]
+    declared_schema_version: int
+    engine_state: str = Field(
+        default="not in this backup",
+        description="What happened to the session engine's state directory.",
+    )
+    import_root_then: str | None = Field(
+        default=None,
+        description="Where imported projects lived when the backup was taken.",
+    )
+    import_root_now: str | None = Field(
+        default=None,
+        description=(
+            "Where they will be looked for now. A difference is not an error "
+            "and is not corrected — the paths are in the store — but it is "
+            "the reason a restored session will not open, so it is reported "
+            "here rather than discovered there."
+        ),
+    )
+
+
+class CloneParams(Params):
+    """Restore another instance's backup here, as a copy rather than a move."""
+
+    source: str = Field(description="A backup directory containing manifest.json.")
+    confirm: bool = Field(
+        default=False, description="Required: this replaces the live stores."
+    )
+    include_engine_state: bool = Field(
+        default=False,
+        description=(
+            "Also copy the source engine's session history (history.db, "
+            "session-logs/, assistant-log.db) into this engine's state "
+            "directory. Push subscriptions and agent tasks are never copied."
+        ),
+    )
+    reason: Reason
+
+
+class CloneResult(Result):
+    """What came across, and what was deliberately left behind."""
+
+    source: str
+    instance_id: str = Field(description="This instance's id, which it keeps.")
+    source_instance_id: str
+    restored_from: datetime = Field(description="When the source's backup was taken.")
+    cloned_at: datetime
+    migrations_applied: list[str]
+    declared_schema_version: int
+    tokens_kept: int = Field(description="This instance's own tokens, carried over.")
+    source_tokens_revoked: int = Field(
+        description="Live tokens from the source, revoked in the copy."
+    )
+    password_logins_kept: int
+    source_password_logins_dropped: int
+    forge_accounts_kept: int
+    source_forge_accounts_dropped: int
+    write_back_reset: list[str] = Field(
+        description="Projects whose write-back was armed in the source, now `none`."
+    )
+    sessions_closed: int = Field(
+        description="Source sessions recorded as running, now recorded as stopped."
+    )
+    engine_state: str = Field(
+        description="What happened to the session engine's state directory."
+    )
+    import_root_then: str | None = None
+    import_root_now: str | None = None
+
+
+class ExportParams(Params):
+    destination: str
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Export one project (by slug): its work items with their comments "
+            "and relations, and only the initiatives, labels and actors they "
+            "reference. Omitted, the whole instance is exported."
+        ),
+    )
+    reason: Reason
+
+
+class ExportResult(Result):
+    path: str
+    export_format_version: int = Field(
+        description="The file's format. 2 carries what an applying import needs."
+    )
+    project: str | None = Field(default=None, description="The scope, if one.")
+    projects: int
+    work_items: int
+    comments: int = 0
+
+
+ImportAction = Literal["created", "updated", "conflict", "skipped"]
+ImportEntityKind = Literal[
+    "actor", "label", "project", "initiative", "work_item", "relation", "comment"
+]
+
+
+class ImportChange(Result):
+    """One entity the import created, updated, held in conflict, or skipped.
+
+    Entities identical on both sides are counted (`unchanged`), not listed.
+    """
+
+    entity: ImportEntityKind
+    key: str = Field(
+        description=(
+            "The matching identity: slug, label name, identity_ref, work item "
+            "id, comment id, or `from -kind-> to` for a relation."
+        )
+    )
+    action: ImportAction
+    ref: str | None = Field(
+        default=None,
+        description=(
+            "For a work item, its ref here. A created item gets a fresh ref "
+            "from this instance's counter when the import is applied (null in "
+            "a dry run)."
+        ),
+    )
+    incoming_ref: str | None = Field(
+        default=None, description="For a work item, its ref in the export."
+    )
+    fields: list[str] = Field(
+        default_factory=list, description="The fields that differ, if any."
+    )
+    detail: str = ""
+
+
+class ImportTally(Result):
+    created: int = 0
+    updated: int = 0
+    conflict: int = 0
+    skipped: int = 0
+    unchanged: int = 0
+
+
+class ImportParams(Params):
+    """Merge an export into this instance — a dry run unless `apply`."""
+
+    source: str = Field(description="An export file written by `vogt export`.")
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Merge only this project (by slug): its work items, comments and "
+            "relations, and the initiatives, labels and actors they reference."
+        ),
+    )
+    apply: bool = Field(
+        default=False,
+        description=(
+            "Write the merge. Without it the import is a dry run: the same "
+            "report, nothing written."
+        ),
+    )
+    confirm: bool = Field(
+        default=False,
+        description="Required with apply: this writes into the live store.",
+    )
+    strict: bool = Field(
+        default=False,
+        description=(
+            "Fail, writing nothing, if any entity changed on both sides, "
+            "instead of keeping this instance's version and recording the "
+            "incoming one as a conflict comment."
+        ),
+    )
+    reason: Reason
+
+
+class ImportResult(Result):
+    source: str
+    instance_id: str = Field(description="The instance the export was taken from.")
+    export_format_version: int = Field(
+        description="1 for an export written before applying import existed."
+    )
+    projects: int
+    work_items: int
+    applied: bool
+    detail: str
+    project: str | None = Field(default=None, description="The scope, if one.")
+    base: datetime | None = Field(
+        default=None,
+        description=(
+            "The baseline change is measured against: an entity whose "
+            "updated_at is later changed since the two instances last agreed."
+        ),
+    )
+    base_source: str = Field(
+        default="", description="Where the baseline came from, or why there is none."
+    )
+    created: int = 0
+    updated: int = 0
+    conflicted: int = 0
+    skipped: int = 0
+    unchanged: int = 0
+    by_entity: dict[str, ImportTally] = Field(default_factory=dict)
+    changes: list[ImportChange] = Field(default_factory=list)
+
+
+# -- forge module -----------------------------------------------------
+
+
+class ForgeLinkParams(Params):
+    """Make a registered project upstream-truth.
+
+    Validated, not assumed: the project must carry a `repo_url` a registered
+    provider matches and a usable credential (the acting actor's linked PAT,
+    or the instance file token). A missing precondition is a typed
+    refusal that names it.
+    """
+
+    project: str = Field(description="Project slug.")
+    reason: Reason
+
+
+class MigratedItem(Result):
+    """One native work item re-keyed upstream on link/publish."""
+
+    ref: str = Field(description="The retired native ref, e.g. WI-7.")
+    subject_key: str = Field(description="The upstream subject it became.")
+    title: str
+    source_url: str | None = None
+
+
+class ForgeLinkResult(ProjectResult):
+    """`forge.link`'s receipt: the linked project, and what migrated.
+
+    `migrated` lists every open native item published upstream and re-keyed
+    during this link, oldest first. A mid-migration provider failure raises
+    instead — naming which items migrated and which are still native — so a
+    result in hand means every listed item, and only those, moved.
+    """
+
+    migrated: list[MigratedItem] = []
+
+
+class ForgePublishParams(Params):
+    """Create the remote and make the project upstream-truth.
+
+    The first verb that creates upstream state and pushes commits, which is
+    why every precondition is typed and checked up front: not already
+    linked, no `repo_url` to clobber, a clean checkout on a named branch,
+    and a usable credential. The push is plain — never forced.
+    """
+
+    project: str = Field(description="Project slug.")
+    name: str | None = Field(
+        default=None,
+        description="Repository name to create; defaults to the project slug.",
+    )
+    private: bool = Field(
+        default=True,
+        description=(
+            "Whether the new repository is private. Private by default: "
+            "publishing makes a repository, not an announcement."
+        ),
+    )
+    description: str | None = Field(
+        default=None, description="Repository description, if any."
+    )
+    reason: Reason
+
+
+class ForgePublishResult(Result):
+    """What `forge.publish` did, in the order it did it."""
+
+    project: Project
+    repo: str = Field(description="The created repository's web URL.")
+    branch: str = Field(description="The local branch pushed as the default.")
+    revision: str | None = Field(
+        default=None, description="The commit the push left as the remote head."
+    )
+    migrated: list[MigratedItem] = []
+
+
+class SetWriteBackParams(Params):
+    project: str
+    policy: Literal["none", "comment_only", "full"] = Field(
+        description=(
+            "none: observe and never speak. comment_only: post comments "
+            "authored here. full: also create, label, and close/reopen. "
+            "Never deletion, history rewriting or force."
+        )
+    )
+    reason: Reason
+
+
+class WriteBackActionView(Result):
+    id: str
+    at: datetime
+    action: str
+    subject_key: str | None
+    policy: str
+    outcome: str
+    reason: str
+    detail: str | None = None
+    source_url: str | None = None
+
+
+class WriteBackListParams(Params):
+    outcome: Literal["attempted", "succeeded", "failed", "skipped"] | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class WriteBackListResult(Result):
+    actions: list[WriteBackActionView]
+
+
+class ForgeAccountLinkParams(Params):
+    """Link the acting actor's own forge account by pasting a PAT.
+
+    The token is validated against the forge, then stored encrypted at rest
+    and never echoed. Linking arms upstream writes attributed to *you*: the
+    scope of what those writes can do is the scope of the token you paste.
+    """
+
+    host: str = Field(
+        default="github.com",
+        description=(
+            "The configured forge host to link, for example github.com or a "
+            "Forgejo host named under forge_token_files."
+        ),
+    )
+    token: str = Field(
+        min_length=1,
+        description=(
+            "The Personal Access Token. Validated, then stored encrypted at "
+            "rest under `forge_account_key_file` and never returned by any "
+            "surface. To revoke it, unlink here and revoke it upstream too."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ForgeAccountUnlinkParams(Params):
+    host: str = Field(
+        default="github.com",
+        description="The forge host to unlink. Deletes the stored token.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ForgeAccountStatusParams(Params):
+    host: str | None = Field(
+        default=None,
+        description="Restrict to one host; unset lists every host you linked.",
+    )
+
+
+class ForgeAccountView(Result):
+    """One linked account, never carrying the token."""
+
+    host: str
+    login: str
+    scopes: str = Field(
+        description=(
+            "The token's granted scopes as the forge reports them "
+            "(`X-OAuth-Scopes`), or empty when the forge did not say."
+        )
+    )
+    linked: bool = True
+
+
+class ForgeAccountResult(Result):
+    """The outcome of a link or unlink — status only, never the token."""
+
+    host: str
+    login: str | None = Field(
+        default=None,
+        description="The linked login; null once unlinked.",
+    )
+    scopes: str = ""
+    linked: bool
+
+
+class ForgeAccountStatusResult(Result):
+    accounts: list[ForgeAccountView]
+
+
+class ForgeReposParams(Params):
+    """Enumerate the repositories a credential can see, to pick one to import.
+
+    The credential is the acting actor's linked PAT when they have one,
+    and the instance file token otherwise — so a person sees *their*
+    repositories, including private ones their PAT reaches. This lists; it never
+    crawls, and picking one is the only way an import ever begins.
+    """
+
+    host: str = Field(
+        default="github.com",
+        description=(
+            "The configured forge host to enumerate, for example github.com "
+            "or a Forgejo host named under forge_token_files."
+        ),
+    )
+
+
+class ForgeRepoView(Result):
+    """One repository the credential can see, as the picker shows it."""
+
+    owner: str
+    name: str
+    default_branch: str | None = None
+    visibility: str = Field(
+        description="'public' or 'private', as the forge reports it."
+    )
+    url: str = Field(
+        description="The repository's web URL; what an import is driven with."
+    )
+    already_registered: bool = Field(
+        description=(
+            "Whether this instance already has a project whose repository URL "
+            "is this repo — computed against the declared project list, so a "
+            "select-all can skip what is already imported."
+        )
+    )
+
+
+class ForgeReposResult(Result):
+    repos: list[ForgeRepoView]
+    login: str | None = Field(
+        default=None,
+        description="Whose credential enumerated these — the linked actor login, "
+        "or null when the instance file token was used.",
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why the list is empty when it is — no forge configured for the "
+            "host, for instance — so an empty picker reads as 'not collected' "
+            "rather than 'you have no repositories'."
+        ),
+    )
+
+
+class ForgeImportParams(Params):
+    """Import a repository the picker listed, as a project.
+
+    Named exactly as `forge.repos` shows it — `owner` and `name` — because
+    this is the verb that turns one of those listed rows into a project:
+    clone under the acting credential, register, and consolidate. The
+    credential that reaches the repository to list it is the credential the
+    clone runs under, so a private repository a personal PAT can see imports
+    without the instance file token ever needing access to it.
+    """
+
+    owner: str = Field(
+        description="Repository owner, as `forge repos` lists it.", min_length=1
+    )
+    name: str = Field(
+        description="Repository name, as `forge repos` lists it.", min_length=1
+    )
+    host: str = Field(
+        default="github.com",
+        description=(
+            "The configured forge host, for example github.com or a Forgejo "
+            "host named under forge_token_files."
+        ),
+    )
+    display_name: str | None = Field(
+        default=None,
+        description="Project display name. Defaults to the repository name.",
+    )
+    root_path: str | None = Field(
+        default=None,
+        description=(
+            "Where to clone to. Defaults to `<import_root>/<slug>`; supply "
+            "this only when the repository must live somewhere specific."
+        ),
+    )
+    lifecycle_state: LifecycleState = "active"
+    consolidate: bool = Field(
+        default=True,
+        description=(
+            "Read existing issues, PRs, labels and releases after registering "
+            ". Read-only, and on by default so the imported project "
+            "arrives as upstream-truth rather than looking empty."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class OnboardParams(Params):
+    project: str = Field(description="Project slug to consolidate.")
+    max_pages: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "How far back to walk. Bounded so a busy repository cannot turn "
+            "onboarding into an unbounded run; coverage reports what was "
+            "actually swept."
+        ),
+    )
+    reason: Reason
+
+
+class OnboardResult(Result):
+    project: str
+    repo: str | None
+    issues: int
+    pull_requests: int
+    labels: int
+    releases: int
+    new: int
+    unchanged: int
+    mutations: int = Field(
+        default=0,
+        description=(
+            "Always zero. Onboarding is read-only; the field exists "
+            "so the claim is asserted rather than assumed."
+        ),
+    )
+    supported: bool = Field(
+        default=True,
+        description=(
+            "Whether an adapter could read this repository's host at all. "
+            "False makes the zeros below meaningless rather than informative: "
+            "nothing was read, so nothing was found, and `detail` says why. "
+            "The import playbook treats an empty consolidation as a signal, "
+            "and this is what makes that signal readable."
+        ),
+    )
+    detail: str | None = None
+
+
+class ImportProjectParams(Params):
+    """Bring a repository that lives on a configured forge into Vogt.
+
+    `repo` is named by the caller and is never chosen from a list: there is
+    no listing operation, and adding one would be the registration-candidate
+    listing that was deliberately removed.
+    """
+
+    repo: str = Field(
+        description=(
+            "Repository to import: `owner/name`, `host/owner/name`, or an "
+            "HTTPS/SSH repository URL for GitHub or a configured Forgejo host."
+        ),
+        min_length=1,
+    )
+    name: str | None = Field(
+        default=None,
+        description="Display name. Defaults to the repository's own name.",
+    )
+    root_path: str | None = Field(
+        default=None,
+        description=(
+            "Where to clone to. Defaults to `<import_root>/<slug>`; supply "
+            "this only when one repository must live somewhere specific."
+        ),
+    )
+    lifecycle_state: LifecycleState = "active"
+    consolidate: bool = Field(
+        default=True,
+        description=(
+            "Read existing issues, PRs, labels and releases after "
+            "registering. Read-only, and on by default because a "
+            "project that arrives empty looks like a project with no work."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ImportProjectResult(Result):
+    project: Project
+    remote: str = Field(description="The remote that was cloned, without credentials.")
+    root_path: str
+    revision: str | None = Field(
+        default=None, description="HEAD at the moment of import."
+    )
+    default_branch: str | None = None
+    cloned: bool = Field(
+        default=True,
+        description=(
+            "False when the destination already held a clone of the same "
+            "remote and was registered as it stood."
+        ),
+    )
+    consolidated: OnboardResult | None = Field(
+        default=None,
+        description="What the read-only consolidation found, if it ran.",
+    )
+    detail: str | None = None
+
+
+# -- notifications -------------------------------------------------
+
+
+class NotificationsParams(Params):
+    """Filters over the collected forge inbox."""
+
+    project: str | None = Field(
+        default=None, description="Project slug. Omit for every registered project."
+    )
+    reason: str | None = Field(
+        default=None,
+        description="GitHub's reason, e.g. mention, review_requested, ci_activity.",
+    )
+    unread_only: bool = Field(
+        default=False,
+        description="Only threads GitHub still considers unread for this token.",
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class NotificationView(Result):
+    """One collected notification, flattened for reading."""
+
+    thread: str
+    project_slug: str | None = None
+    repo: str | None = None
+    title: str
+    reason: str | None = None
+    subject_type: str | None = None
+    unread: bool = False
+    url: str | None = None
+    updated_at: datetime | None = None
+    observed_at: datetime
+
+
+class NotificationsResult(Result):
+    """The inbox, and what it is honestly able to be.
+
+     `freshness` is here for the same reason every other aggregate carries one
+    : an empty inbox with no sweep behind it means nobody has looked.
+     `scope` states out loud that these belong to the configured token's
+     account rather than to the reading actor — a limit of the design, not of
+     this response.
+    """
+
+    notifications: list[NotificationView]
+    total: int
+    by_reason: dict[str, int] = {}
+    unread: int = 0
+    scope: str = Field(
+        default=(
+            "the GitHub account whose token this instance is configured with; "
+            "notifications are instance-scoped, not per-actor"
+        ),
+        description="Whose inbox this is.",
+    )
+    freshness: Freshness = Freshness()
+    detail: str | None = None
+
+
+# -- deployed versions ---------------------------------------------
+
+
+class DeployedVersionsParams(Params):
+    """Which configured deployment lanes to report (`deploy_lanes`)."""
+
+    project: str | None = Field(
+        default=None, description="Project slug. Omit for every configured lane."
+    )
+    lane: str | None = Field(
+        default=None, description="One lane by name, e.g. `dev`. Omit for all."
+    )
+
+
+class DeployedCommit(Result):
+    """A commit on the lane's branch that the lane is not running yet."""
+
+    sha: str
+    subject: str
+    work_items: list[str] = Field(
+        default=[], description="Work item refs the commit subject names."
+    )
+
+
+class UnpromotedWorkItem(Result):
+    """A work item named by a commit the lane has not deployed."""
+
+    ref: str
+    title: str | None = None
+    state: str | None = None
+
+
+class DeployedLaneView(Result):
+    """One lane: what it runs, and how far that is behind its branch."""
+
+    name: str = Field(
+        description="The lane's configured name (`deploy_lanes[].name`), e.g. `dev`."
+    )
+    lane: str = Field(description="The same name; kept for existing readers.")
+    project_slug: str
+    branch: str
+    status: Literal["at_head", "behind", "diverged", "unknown", "not_collected"] = (
+        Field(
+            description="at_head: deployed revision is the branch head; behind: "
+            "commits on the branch are not deployed; diverged: the deployed "
+            "revision is not on the branch; unknown: the evidence could not "
+            "say (see detail); not_collected: no sweep has read this lane."
+        )
+    )
+    deployed_sha: str | None = None
+    deployed_from: Literal["live", "receipt"] | None = Field(
+        default=None,
+        description="Where deployed_sha came from: the running instance's "
+        "version endpoint (live) or the deploy pipeline's receipt.",
+    )
+    version: str | None = Field(
+        default=None, description="The running instance's reported version."
+    )
+    source_tag: str | None = Field(
+        default=None, description="The tag the receipt says was deployed."
+    )
+    receipt_status: str | None = None
+    receipt_at: str | None = None
+    live_sha: str | None = None
+    head_sha: str | None = None
+    commits_behind: int | None = None
+    unpromoted_commits: list[DeployedCommit] = []
+    unpromoted_work_items: list[UnpromotedWorkItem] = []
+    truncated: bool = Field(
+        default=False,
+        description="More commits are behind than are listed (commits_behind "
+        "is still exact).",
+    )
+    observed_at: datetime | None = None
+    detail: str | None = None
+
+
+class DeployedVersionsResult(Result):
+    """Every configured lane, honest about lanes nobody has read yet."""
+
+    lanes: list[DeployedLaneView]
+    configured: int = Field(
+        description="How many lanes `deploy_lanes` configures in total."
+    )
+    detail: str | None = None
+    freshness: Freshness = Freshness()
+
+
+# -- usage board (WI-2040) -------------------------------------------
+
+
+class UsageBoardParams(Params):
+    """The usage board takes no filter: it is one view of every account."""
+
+
+class UsageWindowView(Result):
+    """One rate-limit window a provider reported for an account."""
+
+    name: str = Field(
+        description="`primary` / `secondary` (Codex), or `limit` for a "
+        "Claude limit-hit message."
+    )
+    used_percent: float | None = None
+    window_minutes: int | None = None
+    resets_at: datetime | None = None
+    resets_text: str | None = Field(
+        default=None, description="The provider's own words for the reset."
+    )
+
+
+class UsageAccountView(Result):
+    """One provider account: its reported windows, and whether it is limited."""
+
+    name: str
+    agent: str
+    limited: bool = Field(description="A window at 100% or a hit not yet reset.")
+    windows: list[UsageWindowView] = []
+    limited_at: datetime | None = None
+    limit_reached: str | None = None
+    plan: str | None = None
+    tokens_5h: int = Field(
+        default=0,
+        description="Tokens the transcripts record in the last 5h, each "
+        "message once, cache reads excluded (Claude only).",
+    )
+    observed_at: datetime | None = Field(
+        default=None, description="The newest transcript entry read."
+    )
+    detail: str | None = None
+
+
+class UsageKeyView(Result):
+    """One LiteLLM key's spend, never the key itself."""
+
+    name: str
+    alias: str | None = None
+    spend_usd: float | None = None
+    daily: bool = Field(
+        default=False,
+        description="True when `spend_usd` is today's (a one-day budget window).",
+    )
+    max_budget_usd: float | None = None
+    budget_duration: str | None = None
+    budget_reset_at: datetime | None = None
+    alert_usd: float | None = None
+    alert: bool = False
+    detail: str | None = None
+
+
+class UsageAlert(Result):
+    """A spend alert: a key at or over its day threshold."""
+
+    key: str
+    spend_usd: float
+    threshold_usd: float
+    message: str
+
+
+class UsageBoardResult(Result):
+    """Every configured account and key, read now from what each reported."""
+
+    accounts: list[UsageAccountView]
+    keys: list[UsageKeyView]
+    alerts: list[UsageAlert]
+    generated_at: datetime
+    detail: str | None = None
+
+
+# -- connecting a client -------------------------------------------
+
+
+ClientKind = Literal["http", "bridge"]
+
+
+class ConnectParams(Params):
+    """What a client needs in order to reach this instance."""
+
+    client: ClientKind = Field(
+        default="http",
+        description=(
+            "`http` for a client that speaks streamable HTTP MCP — the "
+            "ordinary case, and the one that needs nothing installed. "
+            "`bridge` for a client that can only spawn a local process."
+        ),
+    )
+    format: Literal["json", "markdown"] = Field(
+        default="json",
+        description=(
+            "`markdown` renders the connection document `DEPLOYMENT.md` "
+            "describes; redirect it to CONNECTING.md if you want it on disk."
+        ),
+    )
+
+
+class ConnectResult(Result):
+    """The connection facts, and the client configuration built from them.
+
+    `url` is `None` when nobody has configured one. That is deliberately not
+    a guess: a URL the server invented would be wrong in exactly the
+    deployment this field exists for, and a client cannot tell a wrong URL
+    from an unreachable one.
+    """
+
+    url: str | None = None
+    api_path: str
+    mcp_path: str
+    mcp_url: str | None = None
+    supported_mcp_protocol_versions: list[str]
+    client: ClientKind
+    requires_install: bool = Field(
+        description=(
+            "Whether the client needs Vogt's own code present. False for "
+            "streamable HTTP, which is why it is the recommended path."
+        )
+    )
+    configuration: str = Field(
+        description="Ready to use: JSON for a client config, or the document."
+    )
+    detail: str | None = None
+
+
+# -- coding sessions -------------------------------------------------------
+
+
+class SessionBudgetParams(Params):
+    """Limits the engine enforces on one session (C7).
+
+    Each field is one limit; a field left out is a limit not set. Zero is not
+    a limit, so every field is positive when present. On `session.start` the
+    object itself is tri-state: omitted means apply the default, and a present
+    object — even an empty one — means use exactly the limits it names.
+    """
+
+    turns: int | None = Field(default=None, gt=0, description="Turn limit.")
+    context_tokens: int | None = Field(
+        default=None, gt=0, description="Context-window limit, in tokens."
+    )
+    wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Wall-clock limit in minutes, counted only while a turn runs.",
+    )
+    session_wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Whole-session wall-clock limit in minutes: running time summed "
+            "across every turn, kept across hibernation. Unset by default."
+        ),
+    )
+
+
+class StartSessionParams(Params):
+    """Open a terminal for a work item, or for a project.
+
+    At most one of `work_item` and `project`. A session always belongs to a
+    project — the work item's own, when one is given — because the working
+    directory comes from the project registry and nowhere else.
+
+    ** Giving **neither** is allowed only when the deployment has
+    configured a scratch project, and resolves to it. It exists for the spoken
+    request with no subject — "research the best risotto in Wollongong" — which
+    has no work item and no repository but still needs a registered tree to
+    open in. The scratch project is a project like any other: registered, with
+    a root path somebody chose. What is *not* allowed is inventing a directory,
+    which is the failure the registry-owned `cwd` rule exists against.
+    """
+
+    work_item: str | None = Field(default=None, description="Work item ref, e.g. WI-7.")
+    project: str | None = Field(default=None, description="Project slug.")
+    template: str | None = Field(
+        default=None,
+        description=(
+            "Session template to run, by name or by tag — the engine expands "
+            "it against the deployment's templates. Use this to run an agent "
+            "rather than a plain shell: `claude` (or `codex`, `opencode`) "
+            "starts that agent under the deployment's protected wrapper, so "
+            "a request to *do* something in a session names one here. "
+            "Omitted means a plain shell, which does nothing until typed into."
+        ),
+    )
+    placement: Literal["host", "pod", "auto"] | None = Field(
+        default=None,
+        description=(
+            "Where to run the session: `host` uses the engine host, `pod` "
+            "uses its configured pod backend, and `auto` uses the "
+            "deployment's template/default placement. Omitted is `auto`; an "
+            "explicit `host` or `pod` must be available for the template."
+        ),
+    )
+    task: str | None = Field(
+        default=None,
+        description=(
+            "What the session's agent should do, in the user's words. Folded "
+            "into the brief as its Task section; an agent template (Claude "
+            "Code, Codex, OpenCode) is started with a first prompt telling it "
+            "to read the brief and carry that task out, so 'start a session "
+            "on X and check its containers' opens an agent already checking "
+            "them. A plain shell only gets the brief's path in "
+            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
+            "`template` when it is something to carry out. Omitted on an "
+            "agent start, the task is taken from `reason` (a leading "
+            "`Task:` dropped); a `review` purpose gets a default review task."
+        ),
+    )
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files the task touches, each `path` or `path:start-end`. Rendered "
+            "under Touch points; a line range is a hint, not a slice of the file."
+        ),
+    )
+    symbols: list[str] = Field(
+        default_factory=list,
+        description="Symbols the task touches. Rendered under Touch points.",
+    )
+    done: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What finished looks like, one line each. Rendered under Touch points."
+        ),
+    )
+    gates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Checks that must pass before the task is done. "
+            "Rendered under Touch points."
+        ),
+    )
+    repo_map: bool | None = Field(
+        default=None,
+        description=(
+            "Include a two-level outline of the touch-point directories in the "
+            "brief. Omitted means include one when touch points name files, and "
+            "not otherwise. The outline is capped; it is a map, not a listing."
+        ),
+    )
+    permission_mode: Literal["default", "accept_edits", "bypass"] = Field(
+        default="default",
+        description=(
+            "The agent's permission posture. `default`: Claude Code's own "
+            "mode (auto) with the deployment's driven-session policy — "
+            "routine safe work proceeds, prod-mutating, destructive, "
+            "shared-resource and secret-exposing actions are denied. "
+            "`accept_edits`: file edits auto-accepted, everything else asks. "
+            "`bypass`: no permission checks at all, for one trusted task — "
+            "only a person may grant it (an agent is refused), and it is "
+            "audited. Claude Code, Codex and opencode templates. "
+            "Codex maps the same three postures: `default` is "
+            "`-a on-request -s danger-full-access`; `accept_edits` adds "
+            '`approvals_reviewer="auto_review"`; `bypass` is '
+            "`--dangerously-bypass-approvals-and-sandbox` and stays "
+            "people-only. A named Codex requirements file that is missing, "
+            "empty or unreadable refuses the Codex launch (400) and does not "
+            "fall through to bypass."
+        ),
+    )
+    account: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$",
+        description=(
+            "Run the session under a named Claude Code subscription account "
+            "(a name from the engine's ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted "
+            "uses the engine's default account. Claude Code templates only; "
+            "an unknown name is refused, never started on the default login."
+        ),
+    )
+    resume: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$",
+        description=(
+            "Continue a previous conversation of the template's agent CLI "
+            "instead of starting a new one: its own conversation id, mapped "
+            "to `claude --resume <id>`, `codex resume <id>`, `opencode "
+            "--session <id>`. A Claude Code session Vogt started fresh has "
+            "the engine session id "
+            "(`engine_session_id`) as its conversation "
+            "id, so a session lost to a restart can be resumed by that. "
+            "The engine starts a resumed conversation in the directory its "
+            "transcript records (when inside the workspace), so one begun "
+            "under a worktree or a parent folder resumes from any project. "
+            "Requires `template`; letters, digits and . _ - only, never a "
+            "leading dash."
+        ),
+    )
+    name: str | None = Field(
+        default=None, description="Session name. Derived from the subject if omitted."
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Model id for the agent CLI this template runs, e.g. "
+            "'gpt-5.6' or 'claude-sonnet-4-5'. Omitted means the CLI's own "
+            "default. Requires `template`: a plain shell has no model. A "
+            "template that cannot be told which model to use refuses rather "
+            "than ignoring this."
+        ),
+    )
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort for the agent CLI, e.g. 'low' / 'medium' / "
+            "'high'. Omitted means the CLI's own default. Requires "
+            "`template`: a plain shell has no effort to set, so do not "
+            "volunteer one for a terminal that runs no agent."
+        ),
+    )
+    autopilot: bool | None = Field(
+        default=None,
+        description=(
+            "Keep the agent working unattended: its brief tells it to carry "
+            "on when its next step needs no person, stopping only when it is "
+            "blocked on a person (reported with session_report_blocked) or "
+            "no unblocked work is left (then it prints `AUTOPILOT: DONE`). "
+            "The engine also re-prompts it whenever it stops at its prompt "
+            "with work left, and its idle policy leaves it awake. Omitted "
+            "means on for an agent template started with a `task`, off "
+            "otherwise; `false` turns it off."
+        ),
+    )
+    role: SessionRole = Field(
+        default="worker",
+        description=(
+            "`oversight` nominates the session to supervise others (drive "
+            "rollouts, check on and revive worker sessions): it is pinned "
+            "awake, so it comes back by itself after a redeploy, and the GUI "
+            "lists it first. `worker` (default) is every other session. "
+            "Only a person starts an oversight session; an agent caller is "
+            "refused. Change it later with session.set_role."
+        ),
+    )
+    from_handoff: str | None = Field(
+        default=None,
+        description=(
+            "Start a fresh session from a work item's hand-off comment: the "
+            "work item ref (e.g. WI-7). Refused when that item has no hand-off "
+            "comment, and refused when `work_item` is also given and names a "
+            "different item. The brief carries the latest hand-off."
+        ),
+    )
+    review_of: str | None = Field(
+        default=None,
+        description=(
+            "Start a reviewer on this work item (e.g. WI-7) instead of a "
+            "worker. The brief checks the diff named by the item's latest "
+            "hand-off against the item's own acceptance criteria, and it "
+            "does not carry the work on. Refused without a work item — a "
+            "review is of an item — and when `work_item` or `from_handoff` "
+            "names a different one."
+        ),
+    )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Limits the engine enforces on this session (C7): a soft warning "
+            "as one is approached, then hibernation (trigger `budget`) when "
+            "one is reached. Omitted means the default for an agent template "
+            "started with a `task` as a worker — 120 turns and 90 minutes of "
+            "wall clock, no context limit — and no budget otherwise. An empty "
+            "object sets no limits, which is how a start declines the default."
+        ),
+    )
+    worktree: bool | None = Field(
+        default=None,
+        description=(
+            "Start the session in a git worktree of its own rather than in the "
+            "project's shared checkout (WI-1298). The engine cuts the worktree "
+            "from the project's integration branch — `agent_policy.base_branch` "
+            "when the project states one, otherwise `main` — onto a new branch "
+            "`<work item>-<session>` (or `<project>-<session>` when no work "
+            "item is given), and the session's working directory is that "
+            "worktree. The shared checkout is never written to, so a dirty "
+            "tree there cannot leak into the session and the session cannot "
+            "disturb it. Requires a project, or a work item that belongs to "
+            "one. Unset, the purpose's dispatch profile decides (WI-1323), and "
+            "with no purpose the session opens in the project's checkout, as "
+            "`false` does. Cannot be combined with `cwd` (WI-1671). Recorded "
+            "on the audit row."
+        ),
+    )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Open the session in this existing directory instead of the "
+            "project's registered checkout (WI-1671). Use it when a worktree "
+            "already exists and `worktree=true` cannot cut a new one — a "
+            "private origin the engine cannot fetch, for example. The path "
+            "must exist, must sit under the workspace's `Active/` directory "
+            "(the parent of the project's checkout), must not be inside "
+            "that checkout (a subdirectory shares its git toplevel; a "
+            "linked worktree nested under it does not), and must be a "
+            "git worktree of the same "
+            "repository (the same `commondir`). Anything else is refused, "
+            "and so is combining it with an explicit `worktree=true`. A "
+            "purpose profile that would have set `worktree` does not, when "
+            "`cwd` is given. Recorded as the session's cwd."
+        ),
+    )
+    cold_wake_opt_out: bool = Field(
+        default=False,
+        description=(
+            "Never compact this session on a cold wake (WI-2037): every wake "
+            "resumes its full transcript, whatever the deployment's "
+            "cold_wake_compaction says. Changeable later at session_hibernate."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+    purpose: Purpose | None = Field(
+        default=None,
+        description=(
+            "What the session is for (WI-1323, design §2.4): implement, "
+            "implement-careful, review, mechanical, investigate or design. "
+            "The deployment's dispatch profile for it fills template, model, "
+            "effort, budget, worktree, repo_map and autopilot wherever this "
+            "start leaves them unset; a value given here wins and is audited "
+            "as an override. Recorded on the session."
+        ),
+    )
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+
+#: The two id forms every session operation accepts. A session Vogt started
+#: has both; one started from the GUI (unlinked) has only the engine's UUID.
+SESSION_ID_DESCRIPTION = (
+    "Session id, in either form: Vogt's `ses_…` id or the engine's session "
+    "UUID (`engine_session_id` in session.list; the only id an unlinked "
+    "session has)."
+)
+
+
+class StopSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class EngineSessionTokenParams(Params):
+    engine_session_id: str = Field(
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        description="The engine's id (UUID) for the session the token is for.",
+    )
+    revoke: bool = Field(
+        default=False,
+        description="Revoke the session's tokens instead of minting one.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class EngineSessionTokenResult(BaseModel):
+    """A session's own agent credential (WI-926)."""
+
+    engine_session_id: str
+    #: The agent actor the token is bound to (`agent:engine:<uuid>`).
+    actor: str
+    #: The secret, shown once; `None` when revoking.
+    token: str | None = None
+    #: How many earlier tokens of the actor were revoked.
+    revoked: int = 0
+
+
+class SweepSessionsParams(Params):
+    project: str | None = Field(
+        default=None,
+        description="Only sessions Vogt linked to this project (slug).",
+    )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description=(
+            "`digest` (default) is one line per session; `full` is the "
+            "SessionSummary a GUI renders, including command."
+        ),
+    )
+    fields: list[str] = Field(
+        default=[],
+        description=(
+            "Extra SessionSummary attribute names copied onto each digest row."
+        ),
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities (or attention classes). Default excludes "
+            "hibernated, stopped and exited; pass an empty list for every state."
+        ),
+    )
+    attention: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these attention classes. `needs_you` means approval, "
+            "blocked and waiting."
+        ),
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="How many rows to return. Counts cover every session.",
+    )
+    screen_lines: int = Field(
+        default=0,
+        ge=0,
+        le=40,
+        description=(
+            "Non-blank lines from the bottom of each session's screen. Zero "
+            "(the default) asks for none; a positive value is honoured."
+        ),
+    )
+    stall_after_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "A running session that has printed nothing for this long is "
+            "reported `stalled`."
+        ),
+    )
+    exclude_roles: list[str] = Field(
+        default=["operator"],
+        description=(
+            "Leave out sessions with these roles. Default hides `operator` "
+            "sessions, so an oversight sweep does not list the person's own "
+            "terminals; pass an empty list to keep every role."
+        ),
+    )
+    supervised_by: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions started by this session (ses_… or the engine UUID)."
+        ),
+    )
+    since: datetime | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions whose output, blocked report or done mark "
+            "changed after this time (an RFC 3339 timestamp, e.g. the previous "
+            "sweep's `swept_at`). Counts then cover the kept rows."
+        ),
+    )
+
+
+class SessionSweepRow(Result):
+    """One session in the oversight table."""
+
+    attention: str = Field(
+        description=(
+            "approval (a permission dialog, startup gate or question menu) / "
+            "blocked / waiting (at its prompt, wants the next "
+            "instruction) / stalled (running, silent too long) / running / "
+            "idle / hibernated / exited / unknown. The table is ordered by it."
+        )
+    )
+    attention_reason: str = Field(description="Why, in words.")
+    session: SessionSummary | None = None
+    digest: SessionDigest | None = None
+    screen_tail: list[str] = Field(
+        default=[],
+        description="The last non-blank lines of its screen. Untrusted terminal text.",
+    )
+    ready: bool | None = None
+    blocked_since: datetime | None = Field(
+        default=None,
+        description="When the session's blocked report was made, if it has one.",
+    )
+    blocked_age_s: int | None = Field(
+        default=None, description="How old the blocked report is, in seconds."
+    )
+    blocked_stale: bool = Field(
+        default=False,
+        description=(
+            "The blocked report predates the session's current turn: it went "
+            "back to work after reporting, so the report no longer says what "
+            "it waits on and the row is not counted in `needs_you` (WI-1834)."
+        ),
+    )
+    claim_check: ClaimCheck | None = Field(
+        default=None,
+        description=(
+            "On a `done` row bound to a work item: its AUTOPILOT: DONE claim "
+            "checked against git and the forge (WI-1835)."
+        ),
+    )
+
+
+class SessionSweepResult(Result):
+    """Every live and hibernated session at once, most urgent first."""
+
+    rows: list[SessionSweepRow]
+    counts: dict[str, int] = Field(
+        description="Rows per attention class, plus `needs_you` and `total`."
+    )
+    swept_at: datetime
+    engine: str | None = Field(
+        default=None,
+        description="Why the engine could not be asked, when it could not.",
+    )
+
+
+class AnswerSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    option: int | None = Field(
+        default=None,
+        ge=1,
+        le=99,
+        description="The option's number on the dialog's menu.",
+    )
+    label: str | None = Field(
+        default=None,
+        description=(
+            "Or: text of the option's label (case-insensitive; must match one "
+            "option only)."
+        ),
+    )
+    expect_question: str | None = Field(
+        default=None,
+        description=(
+            "Refuse unless the dialog still asks exactly this question, so an "
+            "answer meant for one dialog never lands on the next. Pass "
+            "`approval.question` from the screen or list you read."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SessionAnswerResult(Result):
+    """Which option was chosen on which dialog, and whether it went away."""
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    question: str
+    kind: str
+    chosen: SessionApprovalOption
+    dismissed: bool = Field(
+        description=(
+            "The dialog was gone from the screen afterwards. False: it still "
+            "showed when the engine stopped looking — read the screen."
+        )
+    )
+
+
+WatchKind = Literal["pr", "ci", "work_item", "session"]
+WatchStateView = Literal["active", "fired", "failed", "cancelled", "expired"]
+
+
+PrWatchEvent = Literal["merged", "closed"]
+
+
+def _both_pr_events() -> list[PrWatchEvent]:
+    return ["merged", "closed"]
+
+
+class WatchTriggerModel(Params):
+    """What a watch waits for (WI-2036). `kind` picks the fields that apply:
+
+    - `pr`: `project` + `number`; fires when the PR reads one of `on`
+      (default merged or closed).
+    - `ci`: `project` + `sha` or `pr`; fires when every run on that revision
+      (a PR's head) — each named required check in `checks` (at least
+      one) — has been observed and concluded.
+    - `work_item`: `work_item`; fires when it is in one of `states` (default
+      a terminal state).
+    - `session`: `session`; fires when it ends (`until=ended`: exited,
+      hibernated or stopped) or also when it declares itself done
+      (`until=done`).
+
+    Forge triggers read what the collectors observed, so they fire within a
+    sweep interval of the event; Vogt triggers within the watch interval.
+    """
+
+    kind: WatchKind
+    project: str | None = Field(default=None, description="Project slug (pr, ci).")
+    number: int | None = Field(default=None, ge=1, description="PR number (pr).")
+    on: list[PrWatchEvent] = Field(
+        default_factory=_both_pr_events,
+        description="PR states that fire the watch (pr).",
+    )
+    sha: str | None = Field(
+        default=None, min_length=7, max_length=64, description="Revision (ci)."
+    )
+    pr: int | None = Field(
+        default=None, ge=1, description="PR whose head revision to watch (ci)."
+    )
+    checks: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description=(
+            "Required check names (ci), at least one. Vogt does not read "
+            "branch protection, so name the checks that gate the merge: the "
+            "watch fires only when each has been observed and concluded, and "
+            "ignores every other run."
+        ),
+    )
+    work_item: str | None = Field(default=None, description="WI ref (work_item).")
+    states: list[str] = Field(
+        default_factory=list,
+        description="States that fire the watch (work_item); default terminal.",
+    )
+    session: str | None = Field(
+        default=None, description="Session to watch, ses_… or engine UUID (session)."
+    )
+    until: Literal["ended", "done"] = Field(
+        default="ended", description="What counts as finished (session)."
+    )
+
+    @model_validator(mode="after")
+    def _fields_for_kind(self) -> WatchTriggerModel:
+        missing: str | None = None
+        if self.kind == "pr" and (self.project is None or self.number is None):
+            missing = "a pr watch needs project and number"
+        elif self.kind == "ci" and (
+            self.project is None or (self.sha is None) == (self.pr is None)
+        ):
+            missing = "a ci watch needs project and exactly one of sha or pr"
+        elif self.kind == "ci" and not any(c.strip() for c in self.checks):
+            missing = (
+                "a ci watch needs checks: the required check names (Vogt does "
+                "not read branch protection, and waiting on whatever runs were "
+                "observed can fire before a slower required check starts)"
+            )
+        elif self.kind == "work_item" and not self.work_item:
+            missing = "a work_item watch needs work_item"
+        elif self.kind == "session" and not self.session:
+            missing = "a session watch needs session"
+        if missing is not None:
+            raise ValueError(missing)
+        return self
+
+
+WATCH_TTL_DESCRIPTION = (
+    "How long the watch stays armed: default 24 h, at most 14 d. Past it the "
+    "watch reads `expired` and wakes nobody."
+)
+
+
+def _watch_trigger_text(value: object) -> object:
+    """The generated CLI hands a nested object over as JSON text."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+COLD_WAKE_OPT_OUT_DESCRIPTION = (
+    "Never compact this session on a cold wake (WI-2037): a wake always "
+    "resumes its full transcript, even when the deployment's "
+    "cold_wake_compaction is on and the prompt cache has expired. Unset "
+    "keeps the session's current choice (a new session follows the "
+    "deployment)."
+)
+
+
+class HibernateSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    allow_shell: bool = Field(
+        default=False,
+        description=(
+            "Hibernate a session that has no agent conversation to resume (a "
+            "shell). It wakes as a fresh process in the same directory."
+        ),
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session taking over this one's work (ses_… or the engine "
+            "UUID). Recorded on the hibernation, and a later wake is refused "
+            "unless forced — so the work stays with one session."
+        ),
+    )
+    wake_on: WatchTriggerModel | None = Field(
+        default=None,
+        description=(
+            "Arm a watch before hibernating: the session is woken, and told "
+            "the outcome, when this trigger fires (see watch_create)."
+        ),
+    )
+    wake_on_ttl_seconds: int = Field(
+        default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
+    )
+    cold_wake_opt_out: bool | None = Field(
+        default=None, description=COLD_WAKE_OPT_OUT_DESCRIPTION
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+    _wake_on_text = field_validator("wake_on", mode="before")(_watch_trigger_text)
+
+
+class WakeSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    force: bool = Field(
+        default=False,
+        description=(
+            "Wake even though the session was superseded, or another live "
+            "session holds the same work item in the same directory. Off by "
+            "default, and session.input never sets it."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+
+class KeepSessionAwakeParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    keep_awake: bool = Field(
+        description="True pins the session awake; false lets policy hibernate it."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CommitForSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    message: str = Field(
+        min_length=1,
+        description="The commit message. The repo's own git identity authors it.",
+    )
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths to stage before committing, relative to the repo. Empty "
+            "commits whatever the worker already staged."
+        ),
+    )
+    full_diff: bool = Field(
+        default=False,
+        description=(
+            "Return the full staged diff. Off by default, so the diff never "
+            "enters a caller's context unasked; the digest and stat always do."
+        ),
+    )
+    worktree: str | None = Field(
+        default=None,
+        description=(
+            "Commit in this linked worktree instead of the session's own "
+            "directory. It must be a worktree of the repo that directory "
+            "belongs to; a stranger repo is refused. A worker's commit never "
+            "lands in the repo's main checkout, where pool workers are "
+            "launched: name the worker's own worktree (absolute or "
+            "workspace-relative)."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CommitForSessionResult(Result):
+    commit: str = Field(description="The new commit's full SHA.")
+    digest: str = Field(
+        description="One line naming what was committed, e.g. the diff stat summary."
+    )
+    diff_stat: str = Field(description="`git diff --stat` of what was committed.")
+    diff: str | None = Field(
+        default=None, description="The full staged diff, only when full_diff was set."
+    )
+    review: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hunks to read before trusting the commit: counts of dependency "
+            "pins, `unsafe`, and foreign-function bindings."
+        ),
+    )
+
+
+class RenameSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    name: str = Field(
+        min_length=1,
+        description=(
+            "The new display name. Trimmed by the engine, which refuses an "
+            "empty one or one over its byte limit."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class RemoveSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SetSessionRoleParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    role: SessionRole = Field(
+        description=(
+            "`oversight` nominates the session to supervise others (and pins "
+            "it awake); `worker` makes it an ordinary session again and, for a "
+            "session that was oversight, lifts that pin so the idle policy "
+            "applies again."
+        )
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class BindSessionWorkParams(Params):
+    id: str | None = Field(
+        default=None,
+        description=(
+            SESSION_ID_DESCRIPTION + " Omit it from inside a session Vogt "
+            "started to bind that session itself."
+        ),
+    )
+    work_item: str | None = Field(
+        description=(
+            "The work item the session now serves, e.g. WI-7 (a native ref "
+            "or an upstream subject key); null unbinds it. Rebinding from one "
+            "item to another is one call."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
+
+
+class BindSessionWorkResult(Result):
+    session: SessionSummary
+    previous_work_item: str | None = Field(
+        default=None, description="The item the session was bound to before."
+    )
+    project_mismatch: bool = Field(
+        default=False,
+        description=(
+            "The item belongs to a different project from the session's. The "
+            "bind still happened; binding never moves the terminal."
+        ),
+    )
+    engine_label: Literal["written", "not_found", "unavailable"] = Field(
+        description=(
+            "Whether the engine's `work_item` label was written. For a linked "
+            "session the core row is the truth and a label that could not be "
+            "written is reported, not fatal; an unlinked session has only the "
+            "label."
+        ),
+    )
+    engine: str | None = Field(
+        default=None,
+        description="What the engine said, when the label could not be written.",
+    )
+
+
+# -- approved grants to a session (WI-973) --------------------------------
+#
+# A session asks — usually an overseer, for a worker it drives — for one scoped
+# item for one target session; a person approves it in the Inbox; the engine
+# applies it to the live session. `docs/design/oversight-grants.md`.
+
+GrantDecision = Literal["approve", "deny"]
+GrantStateView = Literal["pending", "approved", "denied", "revoked", "expired"]
+
+
+class SessionGrantView(Result):
+    """A grant as callers read it: names only, never a value."""
+
+    id: str
+    target: str = Field(description="The target session's engine id.")
+    kind: Literal["credential", "capability"]
+    var: str | None = None
+    project_id: str | None = None
+    secret_name: str | None = None
+    capability: str | None = None
+    uses: Literal["once", "ttl"]
+    ttl_seconds: int
+    reason: str
+    requested_by: str = Field(description="identity_ref of who asked.")
+    requested_at: datetime
+    state: GrantStateView = Field(
+        description="`expired` is an approved grant past `expires_at`."
+    )
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_reason: str | None = None
+    expires_at: datetime | None = None
+    revoked_by: str | None = None
+    revoked_at: datetime | None = None
+
+
+class SessionGrantResult(Result):
+    grant: SessionGrantView
+
+
+class RequestGrantParams(Params):
+    """Ask a person to approve one scoped item for one session."""
+
+    target: str = Field(
+        description="The session the grant is for: ses_… or the engine's UUID. "
+        "Asking for a session other than your own needs you to be an "
+        "oversight session."
+    )
+    kind: Literal["credential", "capability"] = Field(
+        default="credential",
+        description="`credential` (one named secret). `capability` is not "
+        "available yet (milestone 2).",
+    )
+    secret_name: str | None = Field(
+        default=None,
+        description="The secret's name in the secrets manager, e.g. "
+        "100.109.218.11_SSH. Cadastre `lookup` says where a credential lives.",
+    )
+    project_id: str | None = Field(
+        default=None,
+        description="The secrets-manager project that holds it. The engine "
+        "accepts only projects open to grants.",
+    )
+    var: str | None = Field(
+        default=None,
+        description="The name the session fetches it under "
+        "(`vogt-agent-auth fetch VAR`). Defaults to GRANT_<secret name>.",
+    )
+    capability: str | None = None
+    uses: Literal["once", "ttl"] = Field(
+        default="once",
+        description="`once`: the first fetch consumes it. `ttl`: any number "
+        "of fetches until it expires.",
+    )
+    ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86_400,
+        description="Lifetime once approved, 60 s to 24 h.",
+    )
+    reason: Reason = Field(
+        description="Why the target needs it. The approver reads this."
+    )
+
+
+class DecideGrantParams(Params):
+    id: str = Field(description="The grant id (grt_…).")
+    decision: GrantDecision
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class RevokeGrantParams(Params):
+    id: str = Field(description="The grant id (grt_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListGrantsParams(Params):
+    state: GrantStateView | None = None
+    target: str | None = Field(
+        default=None, description="Only grants for this session (either id)."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListGrantsResult(Result):
+    grants: list[SessionGrantView] = []
+
+
+# -- decisions a person makes (WI-1321) ------------------------------------
+#
+# An agent asks a person a question with 2-4 options, one recommended; the
+# person answers from the Inbox. Nothing is applied when it is answered.
+# `docs/design/agent-harness-services.md` §2.3.
+
+DecisionStateView = Literal["pending", "answered", "withdrawn", "expired"]
+
+
+class DecisionOptionModel(Params):
+    label: str = Field(min_length=1, max_length=60)
+    description: str = Field(default="", max_length=400)
+    recommended: bool = False
+
+
+class DecisionAnswerView(Result):
+    label: str
+    note: str = ""
+
+
+class DecisionView(Result):
+    """A decision as callers read it."""
+
+    id: str
+    asker: str = Field(description="identity_ref of who asked.")
+    asker_session: str | None = Field(
+        default=None, description="The asker's engine session id, if a session."
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    question: str
+    options: list[DecisionOptionModel]
+    context: str = ""
+    state: DecisionStateView = Field(
+        description="`expired` is a pending decision past `expires_at`; "
+        "it implies no answer."
+    )
+    answer: DecisionAnswerView | None = None
+    answered_by: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+    expires_at: datetime
+    reason: str
+
+
+class DecisionResult(Result):
+    decision: DecisionView
+
+
+class AskDecisionParams(Params):
+    """Ask a person to decide between 2-4 options, one recommended."""
+
+    question: str = Field(min_length=1, max_length=2000)
+    options: list[DecisionOptionModel] = Field(
+        min_length=2,
+        max_length=4,
+        description="2-4 options; exactly one has recommended=true.",
+    )
+    context: str = Field(
+        default="",
+        max_length=4000,
+        description="The facts the person needs, in your words.",
+    )
+    work_item: str | None = Field(default=None, description="WI ref, if any.")
+    ttl_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        le=604_800,
+        description="How long it stays answerable: default 24 h, at most 7 d. "
+        "Past it the decision reads `expired`, with no implied answer.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class AnswerDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    label: str = Field(description="The label of the option chosen.")
+    note: str = Field(default="", max_length=2000)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class WithdrawDecisionParams(Params):
+    id: str = Field(description="The decision id (dec_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListDecisionsParams(Params):
+    state: DecisionStateView | None = None
+    work_item: str | None = Field(default=None, description="WI ref.")
+    asker: str | None = Field(
+        default=None, description="identity_ref of the asker, e.g. agent:session:…"
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListDecisionsResult(Result):
+    decisions: list[DecisionView] = []
+
+
+class CreateWatchParams(Params):
+    """Arm a watch: wake a session with the outcome when the trigger fires."""
+
+    trigger: WatchTriggerModel
+    session: str | None = Field(
+        default=None,
+        description=(
+            "The session to wake (ses_… or engine UUID). Default: your own "
+            "session, from your token."
+        ),
+    )
+    note: str = Field(
+        default="",
+        max_length=400,
+        description="Appended to the wake message, e.g. what to do next.",
+    )
+    ttl_seconds: int = Field(
+        default=86_400, ge=60, le=1_209_600, description=WATCH_TTL_DESCRIPTION
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+    _trigger_text = field_validator("trigger", mode="before")(_watch_trigger_text)
+
+
+class CancelWatchParams(Params):
+    id: str = Field(description="The watch id (wat_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListWatchesParams(Params):
+    state: WatchStateView | None = None
+    session: str | None = Field(
+        default=None, description="Only watches that wake this session."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class WatchView(Result):
+    """A watch as callers read it."""
+
+    id: str
+    owner: str = Field(description="identity_ref of who armed it.")
+    session: str = Field(description="Engine id of the session it wakes.")
+    kind: WatchKind
+    trigger: dict[str, Any]
+    waits_for: str = Field(description="The trigger in a few words.")
+    note: str = ""
+    state: WatchStateView
+    created_at: datetime
+    expires_at: datetime
+    fired_at: datetime | None = None
+    outcome: dict[str, Any] | None = None
+    delivered: bool | None = Field(
+        default=None, description="Whether the wake message reached the session."
+    )
+    attempts: int = 0
+    last_error: str | None = None
+    reason: str
+
+
+class WatchResult(Result):
+    watch: WatchView
+
+
+class ListWatchesResult(Result):
+    watches: list[WatchView] = []
+
+
+class ListSessionsParams(Params):
+    project: str | None = Field(default=None, description="Project slug.")
+    order: Literal["started", "rss"] = Field(
+        default="started",
+        description=(
+            "`started` (default): newest Vogt links first, then unlinked "
+            "sessions. `rss`: heaviest process tree first, to find the "
+            "session holding the memory. Either order is applied to the "
+            "joined set before the page is cut."
+        ),
+    )
+    work_item: str | None = Field(default=None, description="Work item ref.")
+    include_stopped: bool = Field(
+        default=False, description="Include sessions Vogt has already stopped."
+    )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description="`digest` (default) or `full` (every SessionSummary field).",
+    )
+    fields: list[str] = Field(
+        default=[],
+        description=(
+            "Extra SessionSummary attribute names on each digest row. A "
+            "comma-separated string is accepted as well as a list."
+        ),
+    )
+    started_by_session: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions this one started: the starter's engine "
+            "session id, or its Vogt `ses_…` id. Unlinked engine sessions "
+            "(no starter) never match."
+        ),
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities. Default excludes hibernated, stopped "
+            "and exited; pass an empty list for every state."
+        ),
+    )
+    stall_after_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "A running session that has printed nothing for this long is "
+            "classified `stalled` on a digest row."
+        ),
+    )
+    include_hidden: bool = Field(
+        default=False,
+        description=(
+            "Also return sessions the engine hides from its default list "
+            "(WI-1289): aged out, finished or idle-and-not-alive, with no "
+            "recent person input. Off by default. `hidden_count` on the "
+            "result counts them either way, and session.get still resolves one."
+        ),
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _fields_may_be_csv(cls, value: object) -> object:
+        return comma_list(value)
+
+    @field_validator("started_by_session")
+    @classmethod
+    def _starter_is_an_id(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or len(value) > 200):
+            msg = "started_by_session is 1-200 characters"
+            raise ValueError(msg)
+        return None if value is None else value.strip()
+
+
+class EffectivePolicy(Result):
+    """The landing rule a started session runs under (WI-1832)."""
+
+    base_branch: str
+    lands_by: str
+    merge_by: str
+    merge_mode: str
+    deploy_by: str
+    overrides: list[str] = Field(
+        default=[],
+        description=(
+            "Where the task contradicted this policy, one line per axis (PR "
+            "vs push only, merge, base branch, deploy). The policy wins and "
+            "the brief says so; empty when the task agreed or set none."
+        ),
+    )
+
+
+class SessionResult(Result):
+    session: SessionSummary
+    digest: SessionDigest | None = None
+    effective_policy: EffectivePolicy | None = Field(
+        default=None,
+        description=(
+            "On `session.start` for a project with a landing rule: the rule "
+            "the worker runs under and any task lines it overrode."
+        ),
+    )
+
+
+class SessionListResult(Result):
+    sessions: list[SessionSummary] = []
+    digests: list[SessionDigest] = []
+    engine: str | None = Field(
+        default=None,
+        description=(
+            "What the engine said, when it could not be asked. The links are "
+            "still returned: Vogt's record of what it started does not depend "
+            "on the engine being up."
+        ),
+    )
+    total: int = Field(
+        default=0,
+        description=(
+            "How many sessions match the filters, before `limit`/`offset`. "
+            "`truncated` is set when this page is not all of them. When more "
+            "declared links match than `session.list` reads (500), `total` is "
+            "one past the number actually read and `truncated` stays true on "
+            "every page, including an empty one past the end."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description="More sessions match than this page returns.",
+    )
+    hidden_count: int = Field(
+        default=0,
+        description=(
+            "How many sessions the engine left out of its default list "
+            "(WI-1289), counted before this operation's own filters and "
+            "paging. 0 from an engine that does not report it. Those "
+            "sessions are in `sessions` only when `include_hidden` was set."
+        ),
+    )
+
+
+class SessionTemplateRow(Result):
+    name: str
+    agent: str | None = None
+    placements: list[str] = Field(default_factory=list)
+    default_placement: str
+
+
+class SessionTemplateListResult(Result):
+    templates: list[SessionTemplateRow] = []
+    engine: str | None = None
+
+
+# -- session history ------------------------------------------------
+#
+# Three read ops that surface the engine's session history — list, search,
+# read one log's tail — to MCP/CLI/REST. All history lives engine-side; these
+# are pass-throughs that degrade the engine-optional way: an unreachable engine
+# sets the
+# `engine` field and returns an empty view, never an error that reads as "no
+# history". History is a machine surface, so the params carry no `reason`.
+
+_HISTORY_ENGINE_FIELD_DESC = (
+    "What the engine said, when it could not be asked. Empty history is "
+    "returned rather than an error, so an outage never reads as 'no history' "
+    "."
+)
+
+
+class HistoryListParams(Params):
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description="`summary` omits each row's command; `full` (default) keeps it.",
+    )
+
+
+class HistorySessionRow(Result):
+    """One row of the engine's archived-session listing.
+
+    A live session the engine chooses to include carries a null `ended_at`
+    and `exit_code`, exactly as it appears in the GUI history list.
+    """
+
+    id: str
+    name: str
+    created_at: str
+    ended_at: str | None = None
+    exit_code: int | None = None
+    cwd: str | None = None
+    command: str | None = None
+    scrollback_bytes: int = 0
+    template: str | None = Field(
+        default=None, description="The session template it was started from."
+    )
+    role: str | None = Field(
+        default=None,
+        description="`worker` or `oversight`, as last set; null on older rows.",
+    )
+    conversation_agent: str | None = Field(
+        default=None,
+        description=(
+            "The agent CLI of the last conversation the session ran — one the "
+            "engine launched, or one typed into its shell that reported itself."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description=(
+            "That conversation's id. Kept after it ends, so a lost session can "
+            "be resumed: session_start(template=resume_template, "
+            "resume=conversation_id, role=role)."
+        ),
+    )
+    work_item: str | None = Field(
+        default=None,
+        description=(
+            "The work item the session served when it ended, as last bound "
+            "(session.bind_work); null when it was bound to none. Resume "
+            "binds it again: session_start(..., resume=conversation_id) then "
+            "session_bind_work(work_item)."
+        ),
+    )
+    resume_template: str | None = Field(
+        default=None,
+        description=(
+            "The template that resumes conversation_id here, worked out against "
+            "the engine's templates now; null when nothing can resume it."
+        ),
+    )
+
+
+class HistoryListResult(Result):
+    sessions: list[HistorySessionRow] = []
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+# -- runtime-pinned agent CLIs ----------------------------------------
+#
+# The engine decides which version of Claude Code or Codex a new session runs
+# (a deploy-time pin, movable while the pod is up). Vogt surfaces the report
+# and the move so an agent session can say what it is running and an operator
+# can update it from the CLI, REST or MCP without an image build.
+
+_AGENT_CLI_ENGINE_FIELD_DESC = (
+    "What the engine said, when it could not be asked. An empty tool list is "
+    "returned rather than an error, so an outage never reads as 'no agent "
+    "CLIs'."
+)
+
+
+class EngineStatusParams(Params):
+    pass
+
+
+class EngineDiskStatus(Result):
+    """The workspace volume's usage, as the engine reports it (WI-1304)."""
+
+    path: str | None = None
+    total_bytes: int | None = None
+    free_bytes: int | None = None
+    used_percent: int | None = None
+    threshold_percent: int | None = None
+    needs_attention: bool = False
+
+
+class EngineHistoryStatus(Result):
+    """The engine's session-history archive, when it keeps one."""
+
+    enabled: bool = False
+    archived_session_count: int | None = None
+    log_file_count: int | None = None
+    log_bytes: int | None = None
+    db_bytes: int | None = None
+
+
+class EngineAgentTaskStatus(Result):
+    """The engine's scheduled agent tasks and the prompt files they left."""
+
+    task_count: int = 0
+    prompt_task_dir_count: int = 0
+    prompt_file_count: int = 0
+    context_file_count: int = 0
+    session_prompt_file_count: int = 0
+    prompt_bytes: int = 0
+    orphan_task_dir_count: int = 0
+
+
+class EngineLag(Result):
+    """How often one event subscriber fell behind, and by how much."""
+
+    episodes: int = 0
+    events_skipped: int = 0
+
+
+class EngineStatusResult(Result):
+    """The session engine's operational report, as the GUI's Settings shows it.
+
+    `engine` is set, and the rest left at its defaults, when the engine is not
+    configured or could not be asked: an outage is said, never rendered as an
+    idle engine.
+    """
+
+    engine: str | None = Field(
+        default=None,
+        description="Why the engine could not be asked; null when it answered.",
+    )
+    version: str | None = None
+    source_ref: str | None = None
+    source_sha: str | None = None
+    release_url: str | None = None
+    session_count: int | None = None
+    push_subscription_count: int | None = None
+    gui_process_count: int | None = None
+    gui_stream_configured: bool | None = None
+    fcm_enabled: bool | None = None
+    auto_agent_auth: bool | None = Field(
+        default=None,
+        description="Whether the engine resolves agent credentials at launch.",
+    )
+    state_dir: str | None = None
+    workspace_root: str | None = Field(
+        default=None, description="The root every session and file path is under."
+    )
+    history: EngineHistoryStatus | None = None
+    agent_tasks: EngineAgentTaskStatus | None = None
+    event_lag: dict[str, EngineLag] = Field(
+        default_factory=dict,
+        description=(
+            "Event subscribers that fell behind since the engine started, by "
+            "name. Empty is healthy."
+        ),
+    )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume. needs_attention once used space passes the "
+            "engine's threshold (85% by default)."
+        ),
+    )
+
+
+class AgentCliListParams(Params):
+    upstream: bool = Field(
+        default=False,
+        description=(
+            "Also ask npm for each package's latest version; the engine caches "
+            "the answer for an hour and leaves it out when npm does not answer."
+        ),
+    )
+
+
+class AgentCliRow(Result):
+    """One agent CLI as the engine reports it."""
+
+    tool: str
+    package: str
+    binary: str
+    kind: str = Field(
+        default="npm",
+        description=(
+            "How a version of it is fetched, as the engine's tool table names "
+            "it: npm, go-dist, go-src or github-release. A report from before "
+            "kinds existed is npm."
+        ),
+    )
+    env_var: str = Field(description="The variable that pins it at container start.")
+    baked_version: str | None = None
+    active_version: str | None = None
+    source: str = Field(
+        description="Which copy a new session runs: image, runtime or absent."
+    )
+    installed_versions: list[str] = []
+    upstream_latest: str | None = None
+    update_available: bool | None = None
+
+
+class AgentCliListResult(Result):
+    tools: list[AgentCliRow] = []
+    installer_present: bool = False
+    engine: str | None = Field(default=None, description=_AGENT_CLI_ENGINE_FIELD_DESC)
+
+
+class AgentCliUpdateParams(Params):
+    tool: str = Field(
+        description="A tool from agent_cli.list, e.g. claude-code or codex."
+    )
+    version: str = Field(
+        description=(
+            "An exact version (2.1.261), `image` for the copy baked into the "
+            "pod, or a dist-tag (`latest`, `stable`) the deployment has opted "
+            "into."
+        )
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class AgentCliUpdateResult(Result):
+    tool: str
+    requested: str
+    active_version: str | None = None
+    source: str | None = None
+    tools: list[AgentCliRow] = []
+
+
+class LlmProviderParams(Params):
+    pass
+
+
+class LlmProviderSetParams(Params):
+    name: str
+    base_url: str
+    wire_api: Literal["chat", "responses"] = "chat"
+    env_key: str
+    secret_project: str
+    secret_name: str
+    models: list[str] = []
+    reason: Reason
+
+
+class LlmProviderRemoveParams(Params):
+    name: str
+    reason: Reason
+
+
+class LlmProviderRow(Result):
+    name: str
+    base_url: str
+    wire_api: str
+    env_key: str
+    secret_project: str
+    secret_name: str
+    models: list[str] = []
+    state: str
+    detail: str | None = None
+
+
+class LlmProviderListResult(Result):
+    providers: list[LlmProviderRow] = []
+    engine: str | None = None
+
+
+class LlmProviderSetResult(Result):
+    provider: LlmProviderRow
+
+
+class LlmProviderRemoveResult(Result):
+    name: str
+    removed: bool
+
+
+class AgentAuthManifestParams(Params):
+    pass
+
+
+class AgentAuthManifestRow(Result):
+    """One ENGINE_AGENT_AUTH_SECRETS entry: names and flags, never a value."""
+
+    var: str
+    project_id: str
+    secret_name: str
+    policy: Literal["required", "optional", "ondemand"]
+    writable: bool = False
+    source: Literal["deploy", "file", "provider"]
+
+
+class AgentAuthManifestResult(Result):
+    entries: list[AgentAuthManifestRow] = []
+    engine: str | None = None
+
+
+class AgentAuthPolicyCheckParams(Params):
+    var: str = Field(description="The environment variable a session would fetch.")
+    template: str | None = Field(
+        default=None,
+        description=(
+            "The session template the launch would use, echoed back. The manifest "
+            "is deployment-wide, so it does not change the decision."
+        ),
+    )
+
+
+class AgentAuthPolicyCheckResult(Result):
+    var: str
+    decision: Literal["allowed", "refused"]
+    reason: str
+    template: str | None = None
+
+
+class SearchOutputParams(Params):
+    q: str = Field(
+        description=(
+            "Search terms. Plain words, ANDed together — not FTS query syntax."
+        )
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+    include_live: bool = Field(
+        default=True,
+        description=(
+            "Scan running sessions' output too, not just the archive, so "
+            "output that has not been archived yet is still found. Live hits "
+            "are flagged `live: true`."
+        ),
+    )
+
+
+class HistoryOutputMatch(Result):
+    """One hit from a session-output search.
+
+    `live` distinguishes a match in a running session's scrollback from one in
+    the archived index. The snippet is plain text — terminal output is
+    untrusted and is never marked up.
+    """
+
+    session_id: str
+    session_name: str
+    created_at: str
+    match_snippet: str
+    rank: float = 0.0
+    live: bool = Field(
+        default=False,
+        description="True when the match is in a running session's live output.",
+    )
+
+
+class SearchOutputResult(Result):
+    matches: list[HistoryOutputMatch] = []
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+class LogTailParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    tail_bytes: int = Field(
+        default=64 * 1024,
+        ge=1,
+        le=256 * 1024,
+        description="Trailing bytes of the log to read; capped at 256 KiB.",
+    )
+    strip_ansi: bool = Field(
+        default=True,
+        description=(
+            "Remove terminal escape codes so the text is readable. Pass false "
+            "for the raw escape stream."
+        ),
+    )
+
+
+class LogTailResult(Result):
+    """The tail of one session's output log.
+
+    Works for a live session too — the engine reads the on-disk log by id, no
+    archive row required. `session_id` is null when the engine has no log for
+    that id (or could not be asked, with `engine` then set).
+    """
+
+    session_id: str | None = None
+    text: str = ""
+    bytes: int = 0
+    total_bytes: int = 0
+    truncated: bool = False
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+# -- driving a session ------------------------------------------------
+#
+# Typing into a terminal and reading what it currently shows, so an agent can
+# drive another session over MCP/CLI/REST instead of hand-rolling HTTP to the
+# engine. Input is an audited write (who typed into which session, how many
+# bytes — never the text); the screen is a read, scoped like `log_tail`.
+
+#: The keys `session.input` can press by name. Each maps to the byte sequence
+#: an xterm-compatible terminal sends for it (`sessions.SESSION_KEYS`).
+SessionKey = Literal[
+    "enter",
+    "esc",
+    "tab",
+    "up",
+    "down",
+    "left",
+    "right",
+    "ctrl-c",
+    "ctrl-d",
+    "backspace",
+]
+
+#: The engine's cap on one input write, in UTF-8 bytes.
+SESSION_INPUT_MAX_BYTES = 64 * 1024
+
+
+class SessionInputParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text to type, sent verbatim (at most 64 KiB of UTF-8). Sent "
+            "first, before any keys."
+        ),
+    )
+    keys: list[SessionKey] | None = Field(
+        default=None,
+        description=(
+            "Named keys to press after the text, in order: enter, esc, tab, "
+            "up, down, left, right, ctrl-c, ctrl-d, backspace. Each is its "
+            "own write, so an Esc is not read as Alt+<next key>."
+        ),
+    )
+    submit: bool = Field(
+        default=True,
+        description=(
+            "Press Enter last, after the text and keys. The default when text "
+            "is given: the line is sent, not left sitting in the input. A "
+            "call that names only keys does not press Enter unless this is "
+            "set. `draft` or an explicit `false` types without pressing Enter."
+        ),
+    )
+    draft: bool = Field(
+        default=False,
+        description=(
+            "Type but do not press Enter: the text (and any keys) sit in the "
+            "input. Forces `submit` off. Use it to compose a line without "
+            "sending it."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+    confirm: bool = Field(
+        default=True,
+        description=(
+            "When Enter is pressed, watch the session for up to ~2 s and say "
+            "whether the input was delivered (a turn started) or queued "
+            "behind a running turn. False returns at once (`unconfirmed`)."
+        ),
+    )
+    wake_timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description=(
+            "When the session is hibernated, it is woken first and the input "
+            "waits until it is ready, for at most this many seconds."
+        ),
+    )
+
+
+class SessionInputResult(Result):
+    """What was sent. The text itself is never echoed or audited."""
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    linked: bool = Field(
+        description="True when the session is one Vogt started (has a ses_ id)."
+    )
+    bytes: int = Field(description="UTF-8 bytes of `text` written.")
+    keys: list[SessionKey] = []
+    submitted: bool = Field(
+        default=False,
+        description="Enter was pressed — by `submit` or as one of the `keys`.",
+    )
+    delivery: str = Field(
+        default="unconfirmed",
+        description=(
+            "typed (no Enter: the text sits in the input) / delivered (a turn "
+            "started) / queued (behind a running turn; once it ends Vogt "
+            "checks the input box and presses Enter if the text is still "
+            "there) / stuck (at rest with the text still in the input box: "
+            "the submit did not land; the sweep shows it as input pending) / "
+            "wedged (Codex echoed the text after a model-API error but started "
+            "no turn; restart with session_hibernate then session_wake, which "
+            "keeps the worktree and conversation) / unconfirmed (sent; "
+            "nothing observable yet). "
+            "A refused input is "
+            "an error, not a value."
+        ),
+    )
+    delivery_evidence: str = Field(
+        default="", description="What `delivery` was judged from."
+    )
+    woke: bool = Field(
+        default=False,
+        description="True when the session was hibernated and was woken first.",
+    )
+    digest: SessionDigest | None = None
+
+
+class SessionScreenParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    scrollback_lines: int = Field(
+        default=0,
+        ge=0,
+        le=2000,
+        description=(
+            "Also return this many lines that scrolled off the top of the "
+            "screen (oldest first), for a reply or a command taller than "
+            "the screen."
+        ),
+    )
+
+
+class SessionScreenCursor(Result):
+    row: int
+    col: int
+
+
+class SessionScreenResult(Result):
+    """The terminal's current visible screen, as rendered text.
+
+    What a person looking at the terminal would see right now — not the
+    output log (`session.log_tail`). Terminal content is untrusted data.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    cols: int = 0
+    rows: int = 0
+    lines: list[str] = []
+    cursor: SessionScreenCursor | None = None
+    title: str | None = None
+    activity: str | None = None
+    alive: bool | None = None
+    ready: bool | None = Field(
+        default=None,
+        description=(
+            "The engine's view of whether the session awaits input. False "
+            "while awaiting-approval: answer the dialog, do not type at it."
+        ),
+    )
+    scrollback: list[str] = Field(
+        default=[],
+        description="Lines above the screen, oldest first, when asked for.",
+    )
+    turn_started_at: datetime | None = None
+    last_output_at: datetime | None = None
+    approval: SessionApproval | None = None
+    blocked: SessionBlocked | None = None
+
+
+SessionWaitUntil = Literal["ready", "exited", "any_change"]
+
+
+class SessionWaitParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    until: SessionWaitUntil = Field(
+        default="ready",
+        description=(
+            "`ready` (default): until the program is at its prompt — or needs "
+            "a person (a permission dialog, a blocked report) or has exited, "
+            "which also end the wait; `exited`: until the process ends; "
+            "`any_change`: until its activity, blocked state or liveness "
+            "changes at all."
+        ),
+    )
+    timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+    )
+    screen: bool = Field(
+        default=False,
+        description=(
+            "True restores the full screen. False (default) returns the digest "
+            "row plus an 8-line screen tail."
+        ),
+    )
+
+
+class SessionWaitResult(Result):
+    """Why a wait ended, and the screen at that moment."""
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    outcome: str = Field(
+        description=(
+            "ready / awaiting-approval / blocked / exited / changed / timeout "
+            "/ hibernated (the session is hibernated: nothing will happen "
+            "until it is woken, so the wait returns at once with its kept "
+            "screen; session.wake or session.input wakes it)."
+        )
+    )
+    matched: bool = Field(
+        description="True when the outcome is what `until` asked for."
+    )
+    waited_ms: int
+    screen: SessionScreenResult | None = None
+    digest: SessionDigest | None = None
+    screen_tail: list[str] = []
+
+
+class SessionChange(Result):
+    """One session delta, oldest first in a page."""
+
+    seq: int
+    at: datetime | None = None
+    session: str = Field(
+        description=(
+            "The session: Vogt's `ses_…` id when the engine session is linked, "
+            "otherwise the engine's own UUID."
+        )
+    )
+    kind: str = Field(
+        description=(
+            "ready, approval, exited, errored, blocked, unblocked, hibernated or woken."
+        )
+    )
+    summary: str = ""
+
+
+class SessionChangesParams(Params):
+    since: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Return deltas published after this seq. 0 reads the retained "
+            "ring. Pass the previous result's `next_cursor`."
+        ),
+    )
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to read, each `ses_…` or an engine UUID. Empty reads "
+            "every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    limit: int = Field(
+        default=100, ge=1, le=500, description="How many deltas at most (1-500)."
+    )
+
+
+class SessionChangesResult(Result):
+    """Deltas since a cursor, and where to read from next."""
+
+    changes: list[SessionChange] = []
+    next_cursor: int = Field(description="The seq to pass as `since` on the next read.")
+    truncated: bool = Field(
+        description=(
+            "True when the ring no longer holds everything after `since`; "
+            "the page starts at the oldest event still retained."
+        )
+    )
+
+
+class SessionWaitAnyParams(Params):
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits "
+            "on every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    until: list[str] = Field(
+        default=[],
+        description=(
+            "Kinds that end the wait: ready, approval, exited, errored, "
+            "blocked, unblocked, hibernated, woken. Empty uses the engine's "
+            "default (ready, blocked, approval, exited, errored)."
+        ),
+    )
+    cursor: int | str | None = Field(
+        default=None,
+        description=(
+            "Ignore deltas at or before this seq, so a replayed page is not "
+            "waited on twice. Omit to accept the next match. `now` skips "
+            "everything already published and waits only for a change that "
+            "lands after this call starts; the result's `next_cursor` is "
+            "that head when nothing new arrives."
+        ),
+    )
+    timeout_s: int = Field(
+        default=300,
+        ge=1,
+        le=600,
+        description=(
+            "Seconds to wait at most (1-600, default 300). Answers `timeout` "
+            "then. An oversight session's value is raised to 60 so a short "
+            "wait cannot become a poll loop."
+        ),
+    )
+
+    @field_validator("cursor", mode="before")
+    @classmethod
+    def _cursor_is_seq_or_now(cls, value: object) -> object:
+        if value is None or isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"", "now"}:
+                return "now" if text == "now" else None
+            if text.isdigit():
+                return int(text)
+        msg = "cursor is a sequence number, or 'now' to skip events already published"
+        raise ValueError(msg)
+
+    @field_validator("cursor")
+    @classmethod
+    def _cursor_not_negative(cls, value: int | str | None) -> int | str | None:
+        if isinstance(value, int) and value < 0:
+            msg = "cursor is at least 0"
+            raise ValueError(msg)
+        return value
+
+
+class SessionWaitAnyResult(Result):
+    """Why a wait across sessions ended."""
+
+    outcome: str = Field(description="`changed` when a delta matched, else `timeout`.")
+    change: SessionChange | None = None
+    next_cursor: int = Field(
+        description="The seq to pass as `cursor` on the next wait."
+    )
+    digest: SessionDigestResult | None = Field(
+        default=None,
+        description=(
+            "The changed session's digest, so a sweep need not follow up with "
+            "session.digest. Null on a timeout."
+        ),
+    )
+
+
+class SessionLastReplyParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    n: int = Field(
+        default=1, ge=1, le=20, description="How many of the last replies (1-20)."
+    )
+    since: str | None = Field(
+        default=None,
+        description=(
+            "The `cursor` of an earlier read. When the replies have not changed "
+            "since, the answer is `{unchanged: true, cursor}` with no messages."
+        ),
+    )
+
+
+class SessionReply(Result):
+    text: str = Field(description="The message, redacted. Untrusted data.")
+    at: datetime | None = None
+
+
+class SessionLastReplyResult(Result):
+    """The last assistant messages of the agent conversation a session runs.
+
+    Read from the agent's own transcript (Claude Code or Codex JSONL), so a
+    reply is whole and current — not cut at the screen's edge or mangled by
+    redraws. `basis` says how the conversation was found: `session-id` /
+    `resume-id` (named on the command line), `engine-id` (a Claude Code
+    session the engine started), or `cwd` (the newest transcript in the
+    session's directory since it started — a guess when two agents share a
+    directory). Empty `messages` with `detail` set means it could not be read.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    agent: str | None = None
+    conversation_id: str | None = None
+    basis: str | None = None
+    transcript: str | None = Field(
+        default=None, description="The transcript file the replies came from."
+    )
+    messages: list[SessionReply] = Field(
+        default=[], description="Oldest first; the last one is the latest reply."
+    )
+    detail: str | None = Field(
+        default=None, description="Why there are no messages, when there are none."
+    )
+    unchanged: bool = Field(
+        default=False,
+        description="True when `since` still matches: nothing else is in the answer.",
+    )
+    cursor: str | None = Field(
+        default=None, description="Pass as `since` on the next read."
+    )
+
+
+class SessionEconomicsParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+
+
+class SessionEconomicsResult(Result):
+    """What a session's agent transcript cost (C16).
+
+    Read from the same transcript `session.last_reply` finds, whole rather
+    than tailed. `context_tokens` is the latest turn's window, not a sum.
+    `usage_measured` is true only when that number came from recorded usage
+    (Claude Code); an agent without usage is estimated at four characters per
+    token. `cost_usd` stays null: this product has no price table, and a zero
+    would say the session was free. `commits` and `files_changed` stay null
+    until a worktree is measured; zero would say the tree was clean.
+    `detail` set means the transcript could not be read, and the counts are
+    then the empty reading, not a claim that the session did nothing.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    agent: str | None = None
+    account: str | None = Field(
+        default=None,
+        description=(
+            "The named Claude Code account the session ran under, so usage "
+            "can be totalled per subscription. Null is the default account."
+        ),
+    )
+    conversation_id: str | None = None
+    basis: str | None = None
+    transcript: str | None = Field(
+        default=None, description="The transcript file the numbers came from."
+    )
+    turns: int = 0
+    context_tokens: int = 0
+    peak_context_tokens: int = 0
+    compactions: int = 0
+    tool_result_bytes: dict[str, int] = Field(
+        default_factory=dict,
+        description="Bytes of tool result the model was shown, by tool name.",
+    )
+    reads_repeated: int = 0
+    wall_clock_count: int = Field(
+        default=0, description="Gaps between consecutive timestamped turns."
+    )
+    wall_clock_max_ms: int = 0
+    wall_clock_mean_ms: int = 0
+    output_tokens: int = 0
+    usage_measured: bool = False
+    commits: int | None = Field(
+        default=None,
+        description=(
+            "Commits on the worktree since the session started; null when not measured."
+        ),
+    )
+    files_changed: int | None = Field(
+        default=None,
+        description="Files the worktree differs in; null when not measured.",
+    )
+    cost_usd: float | None = Field(
+        default=None,
+        description="Null: no price table is configured, so cost is not claimed.",
+    )
+    budget_line: str = Field(
+        default="",
+        description="The digest line, e.g. `96 turns, 2 compactions`.",
+    )
+    detail: str | None = Field(
+        default=None, description="Why the transcript was not read, when it was not."
+    )
+
+
+class SessionDigestParams(Params):
+    """One session's digest, read from the engine row rather than its transcript."""
+
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The model's context window, in tokens. Given, `context_pct` is "
+            "`context_tokens` over this window; omitted, the percentage is null. "
+            "There is no model table."
+        ),
+    )
+    since: str | None = Field(
+        default=None,
+        description=(
+            "The `cursor` of an earlier read. When the digest has not changed "
+            "since, the answer is `{unchanged: true, cursor}` with no body."
+        ),
+    )
+
+
+class SessionDigestResult(Result):
+    """What an overseer reads instead of screen, last reply and git log (C3).
+
+    One engine `get_session`. Numbers come from that row's `economics` when
+    the engine sends one, and are null when it does not — this read does not
+    meter a transcript and does not open a transcript file. `last_reply_excerpt`
+    is likewise only what the row already carries, clipped to 120 characters.
+    `context_pct` needs the caller to name `context_window`. `budget_line` is
+    the same line `session.economics` builds, from those numbers.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    blocked: SessionBlocked | None = Field(
+        default=None,
+        description="The blocked report (reason and items), or null when not blocked.",
+    )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description="The row's last-reply excerpt, at most 120 characters.",
+    )
+    latest_report: SessionReportView | None = Field(
+        default=None, description="The session's newest `session.report` (WI-2039)."
+    )
+    turns: int | None = None
+    context_tokens: int | None = None
+    peak_context_tokens: int | None = None
+    compactions: int | None = None
+    output_tokens: int | None = None
+    usage_measured: bool | None = Field(
+        default=None,
+        description="Whether context came from recorded usage; null when unmeasured.",
+    )
+    context_pct: int | None = Field(
+        default=None,
+        description=(
+            "context_tokens / context_window as a rounded percent, or null when "
+            "no window was given or no context was measured."
+        ),
+    )
+    budget_line: str | None = Field(
+        default=None,
+        description="The digest line, e.g. `96 turns, 61% ctx, 2 compactions`.",
+    )
+    updated_at: datetime | None = Field(
+        default=None, description="When the session's activity last changed."
+    )
+    unchanged: bool = Field(
+        default=False,
+        description="True when `since` still matches: nothing else is in the answer.",
+    )
+    cursor: str | None = Field(
+        default=None, description="Pass as `since` on the next read."
+    )
+
+
+class ReportBlockedParams(Params):
+    """An agent's own report that it cannot go on without a person."""
+
+    id: str | None = Field(
+        default=None,
+        description=(
+            "The blocked session, in either id form. Omit it from inside a "
+            "session Vogt started (its token names the session); otherwise "
+            "pass `$VOGT_ENGINE_SESSION_ID`."
+        ),
+    )
+    blocker: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            "What you are blocked on, for the person: what they must decide "
+            "or do before you can go on."
+        ),
+    )
+    items: list[str] = Field(
+        default=[],
+        max_length=20,
+        description="The concrete things the person has to do, one per entry.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ReportUnblockedParams(Params):
+    id: str | None = Field(
+        default=None,
+        description=(
+            "The session, in either id form; omit from inside a session Vogt started."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SessionReportParams(Params):
+    """A session's own short, typed report of where it is (WI-2039)."""
+
+    id: str | None = Field(
+        default=None,
+        description=(
+            "The reporting session, in either id form. Omit it from inside a "
+            "session Vogt started (its token names the session)."
+        ),
+    )
+    kind: Literal["progress", "result", "question", "blocker"] = Field(
+        description=(
+            "`progress` while working, `result` when the deliverable is done "
+            "(branch pushed, verdict reached), `question` or `blocker` when it "
+            "needs someone."
+        )
+    )
+    summary: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            "What happened or what is needed, in a sentence or two. Never "
+            "paste credentials: credential-shaped text is redacted before it "
+            "is stored."
+        ),
+    )
+    work_item: str | None = Field(
+        default=None,
+        description=(
+            "The item this is about (`WI-7`). Defaults to the session's bound item."
+        ),
+    )
+    branch: str | None = Field(default=None, max_length=300)
+    sha: str | None = Field(default=None, max_length=80)
+    pr: str | None = Field(
+        default=None, max_length=300, description="PR number or URL, when there is one."
+    )
+    checks: list[str] = Field(
+        default=[],
+        max_length=30,
+        description="Checks run and their outcome, one per entry.",
+    )
+    blockers: list[str] = Field(default=[], max_length=20)
+    next_step: str | None = Field(default=None, max_length=1000)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SessionReportResult(Result):
+    report: SessionReportView
+
+
+class SessionBlockedResult(Result):
+    id: str
+    engine_session_id: str
+    blocked: SessionBlocked | None = Field(
+        default=None, description="The report now on the session; null once cleared."
+    )
+
+
+# -- agent activity index ---------------------------------------------------
+
+
+class AgentActivitySearchParams(Params):
+    """How the agent activity index is narrowed. Every field narrows."""
+
+    q: str | None = Field(
+        default=None,
+        description=(
+            "Text to find, case-insensitively, in a call's tool name, its "
+            "redacted one-line summary, or its error excerpt."
+        ),
+    )
+    service: str | None = Field(
+        default=None,
+        description="A service tag, e.g. github, docker, komodo, infisical.",
+    )
+    tool: str | None = Field(
+        default=None, description="An exact tool name, e.g. Bash or exec_command."
+    )
+    errors_only: bool = Field(default=False, description="Only calls that failed.")
+    since: datetime | None = Field(
+        default=None, description="Inclusive lower bound on the call's time."
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug: calls made in its root or anywhere under it.",
+    )
+    session: str | None = Field(
+        default=None,
+        description=(
+            "A Vogt session (`ses_…`), an engine session id, or an agent's own "
+            "conversation id."
+        ),
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class AgentActivityEvent(Result):
+    """One tool call an agent made, as the index keeps it.
+
+    `summary` and `excerpt` were redacted before they were stored, and the
+    excerpt exists only for a failed call. `services` and `error` are
+    heuristics over the call and its output, not verdicts.
+    """
+
+    id: str
+    at: datetime
+    finished_at: datetime | None = Field(
+        default=None, description="When its result was read; null until then."
+    )
+    duration_ms: int | None = None
+    agent: str = Field(description="Transcript format: claude or codex.")
+    agent_session_id: str = Field(description="The agent's own conversation id.")
+    vogt_session_id: str | None = Field(
+        default=None,
+        description=(
+            "The Vogt session this conversation ran in, where derivable: a "
+            "Claude Code session Vogt started uses the engine session id as its "
+            "conversation id."
+        ),
+    )
+    project: str | None = Field(
+        default=None, description="The registered project whose root holds `cwd`."
+    )
+    cwd: str | None = None
+    tool: str
+    summary: str
+    services: list[str] = []
+    error: bool
+    excerpt: str | None = None
+
+
+class AgentActivitySearchResult(Result):
+    events: list[AgentActivityEvent]
+    total: int = Field(
+        description="Rows on this page; `total == limit` means there may be more."
+    )
+    next_offset: int | None = Field(
+        default=None, description="Pass back as `offset` for the next page."
+    )
+    indexed_at: datetime | None = Field(
+        default=None,
+        description="When the index last finished a sweep; null if it never has.",
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why an empty answer is empty, where that is not 'there are none': "
+            "indexing not configured, or never run."
+        ),
+    )
+
+
+class AgentActivitySummaryParams(Params):
+    """Which agent conversations to summarise. Every field narrows."""
+
+    session: str | None = Field(
+        default=None,
+        description=(
+            "A Vogt session (`ses_…`), an engine session id, or an agent's own "
+            "conversation id."
+        ),
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug: conversations with calls in or under its root.",
+    )
+    since: datetime | None = Field(
+        default=None, description="Count only calls at or after this time."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    economics: bool = Field(
+        default=False,
+        description=(
+            "Also meter each conversation's transcript (turns, context, "
+            "compactions). Off by default: a summary must not read every "
+            "transcript on the page."
+        ),
+    )
+
+
+class AgentActivitySessionSummary(Result):
+    """What one agent conversation's calls add up to."""
+
+    agent: str
+    agent_session_id: str
+    vogt_session_id: str | None = None
+    project: str | None = None
+    cwd: str | None = Field(
+        default=None, description="The working directory of its newest call."
+    )
+    first_at: datetime
+    last_at: datetime
+    calls: int
+    errors: int
+    error_rate: float = Field(description="errors / calls, 0..1.")
+    tool_wait_ms: int = Field(
+        description=(
+            "Wall-clock time spent waiting on tool results, summed over calls "
+            "whose result has been read."
+        )
+    )
+    unfinished: int = Field(description="Calls with no result read (yet).")
+    tools: dict[str, int] = Field(description="Calls per tool, most used first.")
+    services: dict[str, int] = Field(description="Calls per service tag.")
+    turns: int | None = Field(
+        default=None,
+        description=(
+            "Assistant turns in the conversation's transcript. Null when the "
+            "transcript could not be read; zero would claim an empty one."
+        ),
+    )
+    context_tokens: int | None = Field(
+        default=None,
+        description="Latest context size of that transcript. Null when unread.",
+    )
+    peak_context_tokens: int | None = Field(
+        default=None,
+        description="Largest context size read from that transcript. Null when unread.",
+    )
+    compactions: int | None = Field(
+        default=None,
+        description="Compactions counted in that transcript. Null when unread.",
+    )
+
+
+class AgentActivitySummaryResult(Result):
+    sessions: list[AgentActivitySessionSummary]
+    total: int = Field(
+        description="Rows on this page; `total == limit` means there may be more."
+    )
+    next_offset: int | None = None
+    indexed_at: datetime | None = None
+    detail: str | None = None
+
+
+# -- quick chats (WI-1097) -----------------------------------------------------
+#
+# A chat is the engine's: a persistent text conversation with Codex, driven
+# over its app-server JSON-RPC protocol, kept in the engine's own store. These
+# operations reach it through the engine client, as the session operations do.
+
+CHAT_ID_DESCRIPTION = "The chat's id (a UUID, from chat.list or chat.create)."
+
+
+class ChatModelChoice(Result):
+    id: str
+    label: str
+
+
+class ChatApprovalView(Result):
+    """A tool call waiting for (or decided by) a person."""
+
+    id: str
+    tool_name: str
+    summary: str = Field(description="What the call would do: a command, a path.")
+    source: str = Field(description="`codex` (the app-server asked).")
+    status: str = Field(description="pending, allowed, denied or expired.")
+    requested_at: str
+    expires_at: str
+    decided_by: str | None = None
+
+
+class ChatSummaryView(Result):
+    id: str
+    title: str
+    driver: str
+    model: str | None = Field(
+        default=None, description="The model the next turn runs on; null = default."
+    )
+    creator: str
+    created_at: str
+    updated_at: str
+    archived: bool = False
+    work_item: str | None = None
+    promoted_session: str | None = Field(
+        default=None,
+        description=(
+            "The engine session the chat continues in; it takes no more messages."
+        ),
+    )
+    state: str = Field(description="idle, running or awaiting-approval.")
+    live: bool = Field(description="Whether the agent process is running now.")
+    message_count: int = 0
+    preview: str | None = None
+
+
+class ChatEntryView(Result):
+    """One line of a chat. Agent text and tool results are untrusted data."""
+
+    seq: int
+    at: str
+    kind: str = Field(
+        description=(
+            "user, assistant, tool-call, tool-result, notice, error or approval."
+        )
+    )
+    text: str
+    tool_name: str | None = None
+    tool_use_id: str | None = None
+    is_error: bool = False
+    retryable: bool = Field(
+        default=False,
+        description="An error the person can retry by sending the message again.",
+    )
+    by: str | None = None
+
+
+class ChatListParams(Params):
+    q: str | None = Field(
+        default=None,
+        description="Full-text terms, matched against titles and everything said.",
+    )
+    archived: Literal["false", "true", "all"] = Field(
+        default="false", description="Open chats (default), archived ones, or both."
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class ChatListResult(Result):
+    chats: list[ChatSummaryView]
+    available: bool = Field(
+        description="False when the engine has chats off; the list is then empty."
+    )
+
+
+class ChatGetParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    tail: int = Field(
+        default=200, ge=1, le=5000, description="The newest this many entries."
+    )
+
+
+class ChatDetailResult(Result):
+    chat: ChatSummaryView
+    entries: list[ChatEntryView]
+    approvals: list[ChatApprovalView] = Field(
+        description="Approvals still waiting for a person."
+    )
+
+
+class ChatCreateParams(Params):
+    message: str | None = Field(
+        default=None, description="The first message, sent as soon as it exists."
+    )
+    title: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "A model the engine offers (/api/config `chat`); default: its first."
+        ),
+    )
+    work_item: str | None = Field(default=None, description="e.g. WI-7")
+    wait_s: int = Field(
+        default=0,
+        ge=0,
+        le=300,
+        description="Wait up to this long for the first reply.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSendParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    text: str = Field(min_length=1, max_length=65536)
+    wait_s: int = Field(
+        default=60,
+        ge=0,
+        le=300,
+        description=(
+            "Wait up to this long for the turn to end and return what it said. "
+            "A turn parked on an approval waits for a person."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSendResult(Result):
+    chat: ChatSummaryView
+    entries: list[ChatEntryView] = Field(
+        description="What the chat recorded from this message on."
+    )
+    finished: bool = Field(description="Whether the turn ended within the wait.")
+
+
+class ChatDecideParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    approval_id: str
+    allow: bool
+    message: str | None = Field(
+        default=None, description="Told to the agent with a denial."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSetModelParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    model: str = Field(
+        description="A model the engine offers, or `default` for the driver's own."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatIdParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatArchiveParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    archived: bool = True
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatPromoteParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    cwd: str | None = Field(
+        default=None,
+        description="Where the session opens, inside the engine's workspace.",
+    )
+    name: str | None = None
+    work_item: str | None = None
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatPromoteResult(Result):
+    chat: ChatSummaryView
+    engine_session_id: str = Field(
+        description="The terminal session now holding the conversation."
+    )
+    session_name: str
+
+
+class WorkspaceListParams(Params):
+    project: str | None = Field(
+        default=None, description="Only workspaces of this project's sessions (slug)."
+    )
+    alive: bool | None = Field(
+        default=None,
+        description="true: only running sessions; false: only stopped or hibernated.",
+    )
+
+
+class WorkspaceRow(BaseModel):
+    """One session's working tree (WI-1340)."""
+
+    path: str
+    kind: str = Field(description="`worktree` or `checkout`.")
+    branch: str
+    base_sha: str | None = None
+    size_bytes: int | None = Field(
+        default=None, description="Bytes under `path`; null until first measured."
+    )
+    cleaned_at: str | None = Field(
+        default=None,
+        description="When `workspace.clean` last dropped its build output.",
+    )
+    alive: bool
+    merged: bool | None = Field(
+        default=None,
+        description=(
+            "The branch tip is in the project's default branch (git-local "
+            "collector); null when the collector has not observed the branch."
+        ),
+    )
+    work_item: str | None = None
+    session: str = Field(description="`ses_…` id, or the engine UUID when unlinked.")
+    project: str | None = None
+
+
+class WorkspaceListResult(Result):
+    workspaces: list[WorkspaceRow] = []
+
+
+class WorkspaceCleanParams(Params):
+    id: str | None = Field(
+        default=None,
+        description="The session whose workspace to clean (`ses_…` or engine UUID).",
+    )
+    path: str | None = Field(
+        default=None, description="The workspace path, instead of `id`."
+    )
+    mode: Literal["build_output", "remove"] = Field(
+        description=(
+            "`build_output`: drop target/, node_modules, .venv. `remove`: "
+            "`git worktree remove` it, deleting the branch when merged."
+        )
+    )
+    force: bool = Field(
+        default=False,
+        description=(
+            "Remove a worktree whose branch is unmerged (the branch is kept). "
+            "A person only. Never removes a dirty tree or one a session uses."
+        ),
+    )
+    reason: str
+
+
+class WorkspaceCleanResult(Result):
+    path: str
+    mode: str
+    bytes_freed: int
+    removed: bool = False
+    branch_deleted: str | None = None
+    cleaned_at: str | None = None

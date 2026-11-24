@@ -1,0 +1,8 @@
+{"type":"assistant","timestamp":"2026-10-11T02:00:00Z","message":{"content":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}}
+{"type":"user","message":{"content":[{"type":"tool_result","name":"Read","input":{"file_path":"/a.py"},"content":"contents"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","name":"Read","input":{"file_path":"/a.py"},"content":"contents"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","name":"shell","content":"output"}]}}
+{"type":"system","subtype":"compact_boundary"}
+{"type":"assistant","timestamp":"2026-10-11T02:01:00Z","message":{"content":"zzzzzzzzzzzzzzzzzzzz"}}
+{"type":"turn_context","payload":{"content":[{"type":"text","text":"note"}]}}
+{"type":"user","message":{"content":"carry on"}}

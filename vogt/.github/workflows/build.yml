@@ -1,0 +1,1163 @@
+name: build
+
+# A *build*, which is not a release.
+#
+# `release.yml` owns releases: a `v*` tag, semver-tagged images, `latest`,
+# a GitHub Release. This owns the other thing — an image for a commit on main,
+# identified only by its sha, so deploying a fix does not require inventing a
+# version number for it.
+#
+# It is also the ONLY place an image is built. A release is "build once,
+# promote by digest": tagging `vX.Y.Z` on a commit makes `release.yml` find
+# the `sha-<commit>` digests this workflow published (requiring the three
+# image jobs below to have succeeded, by their `name:`), verify this
+# workflow's signature for that exact commit, retag those digests with the
+# semver tags and sign them again under the release identity. So the version
+# baked below (`VOGT_PRODUCT_VERSION`) is the version a release ships, the
+# image job names are a contract (tests/test_release_workflow.py), and a
+# change here changes every future release's bytes.
+#
+# The original rule was that a push to main shall never publish an image, and
+# the effect was that every fix needed a version bump to become deployable:
+# three of them in one afternoon, none marking a release. The rule was revised
+# once the two acts were told apart. What it was protecting is intact:
+#
+#   * merging still cannot cut a release — no semver tag, no `latest`, no
+#     wheel, and nothing here writes a GitHub Release
+#   * merging still cannot deploy anything — a deployment pins a digest this
+#     workflow reports, in a separate, operator-approved step
+#
+# Images are not signed, here or in a release: signing was dropped (operator
+# decision, 2026-10-20). A digest is trusted by its registry name and its
+# SBOM and provenance attestations.
+#
+# One branch builds: `main` → `sha-<commit>`. Every rule below is an explicit
+# equality on the ref, never a negation, so adding a branch must mean adding a
+# rule rather than inheriting one by accident. A `sha-` image never becomes
+# `latest`, so "which build is that?" stays answerable.
+#
+# One exception, and it is a dispatch, not a push: `rust-core` → the Rust
+# core preview (WI-2641). A `workflow_dispatch` on ref `rust-core` builds the
+# two preview images at the bottom of this file (`rust-core-image`,
+# `preview-web-image`), each `sha-<commit>` only, and none of the jobs above.
+# Those jobs carry the one negation in this file, `github.ref !=
+# 'refs/heads/rust-core'`, because they predate the preview and must keep
+# running for every ref they ran for before; the preview jobs are the
+# equality. The rule lives here and not in a separate workflow because
+# GitHub dispatches only a workflow whose file is on the default branch.
+
+on:
+  push:
+    branches:
+      - main
+    # Documentation cannot change what an image contains.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The core alone. Built and pushed per commit until I7 retires the root
+  # Dockerfile. The merged image no longer takes its core from here (WI-1078),
+  # so nothing downstream reads it; it is not a deployment target (DEPLOYMENT.md).
+  IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+  # The product — the Python core *and* the session engine in one container,
+  # which is what `deploy/stack.compose.yml` runs and the one supported
+  # install of Vogt. A separate repository rather than a tag on the core
+  # above, because they are different artefacts: one is a build input, this
+  # is what gets deployed. One repository with two kinds of tag in it is how
+  # somebody eventually pins the wrong one. `main` publishes `sha-<commit>`
+  # and every release publishes the semver pair; nothing else pushes here.
+  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The same merged image built on the public `workbench` pod base instead of
+  # `lean`. Additive: nothing in this repository deploys it. A derivative that
+  # wants the public session tools (Chrome, Python 3.12, Terraform, sshpass,
+  # pingcli, actionlint, the Tailscale client) builds `FROM` this digest.
+  STACK_WORKBENCH_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack-workbench
+  # Static public-demo image. It contains neither the engine nor the core and
+  # is published from `main`; deployment is a separate digest handoff.
+  DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
+  # The first-party voice sidecar: native Whisper + Piper with a small
+  # baked default model set, so the shipped stack has working speech out of the
+  # box. It publishes to one repository from `main` and every release;
+  # `stack.compose.yml` names it by version and reaches it over the Compose
+  # network.
+  VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
+  # The Rust core preview (WI-2641): `deploy/rust-core.Dockerfile` and the PWA
+  # bundle it is served with, built only on a dispatch of `rust-core`. Their
+  # own repositories, so a preview build can never be pinned as the product.
+  RUST_CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-core-rust
+  PREVIEW_WEB_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-web-preview
+  # Where BuildKit's layer cache lives.
+  #
+  # An operator-owned plaintext LAN registry, not GHCR and not a cache mount
+  # or a persistent named builder. The runners are a fleet and a job lands on
+  # whichever worker is free, so anything held in a builder's local state is
+  # cold on most runs by construction; a registry is the only cache all the
+  # workers can see. This one is local — the cache never leaves the host —
+  # while GHCR's `type=registry` (or `type=gha`) is a WAN round-trip from the
+  # same runners. `VOGT_BUILDKIT_CACHE_REGISTRY` names that operator-owned
+  # endpoint and `dind-daemon.json` on the workers trusts it over HTTP.
+  #
+  # Its own repository rather than tags alongside the images, for the reason
+  # `vogt` and `vogt-stack` are two repositories: one repository holding two
+  # kinds of tag is how somebody eventually pins the wrong one. Cache tags are
+  # keyed per image *and* per ref (`core-<ref>`, `stack-<ref>`) so the core and
+  # stack streams never evict each other.
+  CACHE_IMAGE: ${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}/vogt-buildcache
+
+concurrency:
+  # Newest-wins, by ref: a superseded build — pending or in progress — is
+  # cancelled when a newer push joins its group. Only the newest commit of a
+  # burst gets images, and that is the commit anything would deploy; a
+  # superseded commit's missing `sha-` image costs nothing, because nothing
+  # pins a digest it was never offered. The cost this accepts is the
+  # burst-tail gap: while a merge train runs, the branch has no *fresh*
+  # completed image until the final run lands.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Docker Hub is not on the critical path: both Dockerfiles
+  # build `FROM` this organisation's GHCR mirror of the library images, and
+  # this job makes sure the mirror holds what this commit's Dockerfiles ask
+  # for before either image job starts.
+  #
+  # A prerequisite rather than a companion, and that is the whole point.
+  # Renovate bumps a base digest; the merge is a push; the push builds. If
+  # the mirror were a parallel job — or worse, only a scheduled one — the
+  # build would reach a digest nobody had copied yet and fail at `FROM`,
+  # which is precisely the failure this change exists to remove. Running it
+  # first costs a few seconds: the copy is skipped entirely when the digest
+  # is already in GHCR.
+  base-images:
+    name: the bases are in GHCR
+    uses: ./.github/workflows/mirror-base-images.yml
+    permissions:
+      contents: read
+      packages: write
+
+  image:
+    name: build and publish a commit image
+    needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    # The merged image derives its core from this one by digest, so the
+    # digest has to leave this job rather than being re-derived from a tag.
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          # The layer cache lives on the operator's configured plaintext LAN
+          # registry. The default
+          # docker-container builder speaks HTTPS to every registry and sits
+          # on a bridge network, so the first attempt at this failed its cache
+          # import with `http: server gave HTTP response to HTTPS client`
+          # before any layer was reused. Host networking reaches the LAN
+          # address; the inline buildkitd entry says HTTP is intentional.
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      # No Docker Hub login, deliberately — and this is a trap worth naming,
+      # because the obvious "improvement" is to add one.
+      #
+      # A Docker Hub credential shared across an organisation's CI has its
+      # 200 pulls/hour split between every job that uses it, so it is empty
+      # exactly when CI is busy — which is when builds happen — while the
+      # anonymous per-IP allowance of a single self-hosted runner is barely
+      # touched. Authenticating trades a bucket this repository mostly
+      # controls for one it does not control at all.
+      #
+      # So this build does not reach Docker Hub at all. The bases are
+      # `ghcr.io/thedancingdeveloper-org/vogt-base/*`, copied there by
+      # `mirror-base-images.yml`, which the `base-images` job runs as a
+      # prerequisite so a Renovate digest bump is mirrored before anything
+      # builds from it. A Docker Hub login here would not help anything and
+      # would put a shared bucket on this repository's critical path.
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          # A commit and nothing else. No semver, and explicitly no `latest`:
+          # a moving alias is what makes "which build is that?" unanswerable,
+          # and deployed references are digest-pinned anyway (NFR-PO4).
+          # This action no longer applies the tag. The build pushes by digest
+          # and `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. The line stays because release.yml and
+          # tests/test_release_workflow.py treat it as the contract for what
+          # main publishes.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      # Built once and pushed by digest, with no tag. The smoke below pulls
+      # that digest, so what is tested is what was pushed. A failed smoke
+      # leaves an untagged orphan; ghcr-retention.yml prunes untagged
+      # versions after the pinned policy's grace period (7 days). Nothing is
+      # tagged until the smoke passes, and the layer cache is
+      # written once, here.
+      #
+      # v0.1.0 shipped an image whose entrypoint did not exist and v0.1.1 one
+      # that imported no application; both builds were green and both
+      # artefacts had never been started.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
+          build-args: |
+            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+
+      - name: the image runs
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # The digest just pushed, never a tag: the tag does not exist yet.
+          # The pull is local; this runner built it.
+          docker pull "${IMAGE}@${DIGEST}"
+          CANDIDATE="${IMAGE}@${DIGEST}"
+          docker run --rm "$CANDIDATE" --version
+          # git is a runtime dependency and nothing else is red when it is
+          # missing: `project.import` shells out to it, and the `git-local`
+          # collector shells out to it, so the loss shows up only in
+          # production, as an import that cannot run and a collector recording
+          # a checkout it never read. Reading the Dockerfile cannot catch a
+          # build that silently drops a package; running the binary can.
+          docker run --rm --entrypoint git "$CANDIDATE" --version
+          if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
+            echo "serve started without being told where to listen" >&2
+            exit 1
+          fi
+          echo "image runs, has git, and still refuses to guess an address"
+
+      # Registry-side manifest write. `release.yml` finds the image by this
+      # `sha-<commit>` tag, and only a digest that passed the smoke gets one.
+      # `--prefer-index=false` keeps buildx from wrapping the manifest in a
+      # new index, which would change the digest release.yml pins.
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${IMAGE}:sha-${GITHUB_SHA:0:7}" "${IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Built the core from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "A standalone core image. The stack image no longer takes its"
+            echo "core from this one, so this is not the image to pin: pin the"
+            echo "*merged* stack digest reported below."
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "This is a build, not a release: no version was assigned, no"
+            echo "semver tag was created, and \`latest\` did not move."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  voice-image:
+    name: build and publish the voice sidecar
+    needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.VOICE_IMAGE }}
+          # Same rule as the core image: a commit, never a moving alias.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      # Built and *run* before it is pushed. A voice image that assembles is
+      # not a voice image that transcribes: the native runtimes and the baked
+      # models are exactly the parts a green build does not exercise. This does
+      # a full local round trip — synthesise wav, feed it back, read a
+      # transcript — so a broken model or a missing runtime library fails here
+      # rather than as inert controls on a fresh install.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: candidate
+        with:
+          context: voice
+          file: voice/Dockerfile
+          load: true
+          tags: ${{ env.VOICE_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
+
+      - name: the sidecar transcribes and speaks
+        env:
+          CANDIDATE: ${{ env.VOICE_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/vogt-voice "$CANDIDATE" --version
+          docker run -d --name voice-smoke "$CANDIDATE"
+          trap 'docker logs voice-smoke || true; docker rm -f voice-smoke >/dev/null 2>&1 || true' EXIT
+
+          # Wait for the baked models to load — /health gates on it. Up to
+          # 6 min: the ci-runner-1 runners load the models far slower than
+          # node-f and timed out at the old 2 min (2026-10-23).
+          ready=""
+          for _ in $(seq 1 180); do
+            if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "voice sidecar never became healthy" >&2; exit 1; }
+
+          # The OpenAI sidecar contract advertises both halves.
+          models="$(docker exec voice-smoke curl -fsS http://127.0.0.1:8000/v1/models)"
+          echo "$models" | grep -q '"whisper-1"'
+          echo "$models" | grep -q '"tts-1"'
+
+          # TTS: synthesise real wav from the baked Piper voice.
+          docker exec voice-smoke sh -c 'curl -fsS -X POST http://127.0.0.1:8000/v1/audio/speech -H "content-type: application/json" -d "{\"model\":\"tts-1\",\"voice\":\"alloy\",\"input\":\"the quick brown fox\",\"response_format\":\"wav\"}" -o /tmp/out.wav'
+          docker exec voice-smoke sh -c 'test "$(wc -c < /tmp/out.wav)" -gt 1000' || { echo "TTS produced a trivially small file" >&2; exit 1; }
+          docker exec voice-smoke sh -c 'head -c 4 /tmp/out.wav | grep -q RIFF' || { echo "TTS output is not a RIFF/WAV" >&2; exit 1; }
+
+          # STT: feed that audio back through the baked Whisper model and prove
+          # it returns a non-empty transcript.
+          transcript="$(docker exec voice-smoke curl -fsS -X POST http://127.0.0.1:8000/v1/audio/transcriptions -F model=whisper-1 -F file=@/tmp/out.wav)"
+          echo "transcript: $transcript"
+          echo "$transcript" | grep -qE '"text":"[^"]+"' || { echo "STT returned an empty transcript" >&2; exit 1; }
+          echo "voice sidecar speaks and transcribes with the baked models"
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: voice
+          file: voice/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
+
+  demo-image:
+    name: build, smoke, and publish the static public demo
+    # The normal stack runs first and exports its web-build layer. This target
+    # imports that cache and augments those exact bytes; it does not compile a
+    # second PWA and merely hope for deterministic output.
+    needs: [base-images, stack-image]
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: demo-meta
+        with:
+          images: ${{ env.DEMO_IMAGE }}
+          tags: |
+            type=sha,format=long,prefix=main-
+            type=raw,value=main
+          flavor: |
+            latest=false
+
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: demo-candidate
+        with:
+          context: .
+          file: engine/Dockerfile
+          target: demo-runtime
+          load: true
+          tags: ${{ env.DEMO_IMAGE }}:smoke-test
+          labels: ${{ steps.demo-meta.outputs.labels }}
+          build-args: |
+            VOGT_SOURCE_REF=main
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_GIT_SHA=${{ github.sha }}
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
+            type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main,mode=max
+
+      - name: static demo serves provenance and refuses APIs
+        env:
+          CANDIDATE: ${{ env.DEMO_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          # Probe from inside the container, not through a published host port.
+          # On the self-hosted runner the daemon publishes `-p 127.0.0.1::8910`
+          # onto its own loopback, which this step's process cannot reach, so the
+          # curl failed with an immediate connection-refused even though the
+          # container was serving. `docker exec ... node` runs in the container's
+          # own namespace — the same way the deployed healthcheck reaches it — so
+          # it is independent of the runner's docker networking topology. (The
+          # showcase links are hash-router fragments that never leave the browser,
+          # so on the wire every one of them is a request for `/`.)
+          cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "$CANDIDATE")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          # Fetch a path from inside the container; non-2xx or a transport error
+          # exits non-zero and (under set -e) fails the step.
+          get() {
+            docker exec "$cid" node -e '
+              fetch("http://127.0.0.1:8910/" + process.argv[1])
+                .then(async (r) => { if (!r.ok) process.exit(1); process.stdout.write(await r.text()); })
+                .catch(() => process.exit(1));
+            ' "$1"
+          }
+
+          for _ in $(seq 1 30); do
+            get healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          manifest="$(get demo-manifest.json)"
+          build="$(get demo-build.json)"
+          grep -F '"full-demo-v1"' <<<"$manifest"
+          grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$manifest"
+          grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$build"
+          get '' | grep -F 'id="root"'
+          mobile="$(get mobile-demo.html)"
+          grep -F 'id="mobile-demo-title"' <<<"$mobile"
+          grep -F 'src="/index.html#/sessions"' <<<"$mobile"
+
+          # The origin has no server-side API: a write is refused with 404 and an
+          # explanatory body, checked from inside the container as well.
+          docker exec "$cid" node -e '
+            fetch("http://127.0.0.1:8910/api/sessions", { method: "POST" })
+              .then(async (r) => {
+                const body = await r.text();
+                if (r.status !== 404) { console.error("unexpected status", r.status); process.exit(1); }
+                if (!body.includes("no server-side API")) { console.error("unexpected body", body); process.exit(1); }
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          '
+
+          # A dedicated mobile hostname runs the same image with only
+          # its root document changed. Prove that mode independently: `/`
+          # must be the showcase while `/index.html` stays the PWA embedded by
+          # its frame (rather than recursively loading the showcase).
+          docker rm -f "$cid" >/dev/null
+          cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env DEMO_ROOT_DOCUMENT=mobile-demo.html \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "$CANDIDATE")"
+          for _ in $(seq 1 30); do
+            get healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          get '' | grep -F 'id="mobile-demo-title"'
+          get index.html | grep -F 'id="root"'
+
+      - name: scan the static demo image
+        # The self-hosted runner cannot use trivy-action's GitHub Releases
+        # installer, but it can pull from GHCR. Run the scanner from an exact
+        # image digest instead, against the candidate in the runner's Docker
+        # daemon. The database's :2 tag is intentionally moving: unlike the
+        # scanner executable, a vulnerability database has to stay current.
+        env:
+          CANDIDATE: ${{ env.DEMO_IMAGE }}:smoke-test
+          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c # 0.69.3
+        run: |
+          set -euo pipefail
+          cache_volume="vogt-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$cache_volume" >/dev/null
+          trap 'docker volume rm "$cache_volume" >/dev/null 2>&1 || true' EXIT
+
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "${cache_volume}:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2 \
+            --scanners vuln \
+            --skip-version-check \
+            --format table \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity CRITICAL,HIGH \
+            "$CANDIDATE"
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: demo-push
+        with:
+          context: .
+          file: engine/Dockerfile
+          target: demo-runtime
+          push: true
+          tags: ${{ steps.demo-meta.outputs.tags }}
+          labels: ${{ steps.demo-meta.outputs.labels }}
+          build-args: |
+            VOGT_SOURCE_REF=main
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_GIT_SHA=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
+            type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main,mode=max
+
+      - name: report the demo digest to pin
+        env:
+          DIGEST: ${{ steps.demo-push.outputs.digest }}
+        run: |
+          {
+            echo "### Static public demo from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Pin this digest in the demo deployment:"
+            echo
+            echo '```yaml'
+            echo "image: ${DEMO_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "That one digest serves both the standard demo at \`/\` and"
+            echo "the mobile showcase at \`/mobile-demo.html\`. For a separate"
+            echo "mobile-first hostname, apply \`deploy/mobile-demo.overlay.yml\`"
+            echo "to the same digest-pinned service."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The dev-pod toolchain, built (or found already published) before anything
+  # that consumes it. Same prerequisite shape as `base-images` and for
+  # the same reason: the common case is a lookup that costs seconds, and having
+  # it as a companion job instead would mean the image build racing the thing it
+  # is built on. `needs: base-images` because the pod base builds `FROM` a
+  # mirrored Ubuntu, which the mirror job must have copied first.
+  pod-base:
+    name: the pod base is in GHCR
+    needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      # `lean` (no Flutter) is the pod variant the published stack builds on.
+      # The `full` variant adds the mobile SDK for building the Android app
+      # in-pod and is not part of the published stack image.
+      variant: lean
+    permissions:
+      contents: read
+      packages: write
+
+  estate-base:
+    name: the Vogt estate base is in GHCR
+    needs: pod-base
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/estate-base.yml
+    with:
+      pod_base_image: ${{ needs.pod-base.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+
+  stack-image:
+    name: build and publish the merged image
+    # `needs: pod-base` supplies the toolchain base it now builds `FROM`. The
+    # core-image job is not a dependency: the stack builds its own vogt-core.
+    needs: [base-images, pod-base, estate-base]
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          # The layer cache lives on the operator's configured plaintext LAN
+          # registry. The default
+          # docker-container builder speaks HTTPS to every registry and sits
+          # on a bridge network, so the first attempt at this failed its cache
+          # import with `http: server gave HTTP response to HTTPS client`
+          # before any layer was reused. Host networking reaches the LAN
+          # address; the inline buildkitd entry says HTTP is intentional.
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      # There is deliberately no runner-side `pnpm build` here.
+      #
+      # There was one, and it never reached the image. `rust-embed` does read
+      # `web/dist/` at compile time — that part was right — but the bundle it
+      # reads is the one stage 1 of `engine/Dockerfile` builds inside the build
+      # itself, and `engine/Dockerfile.dockerignore` lists `web/dist`, so the
+      # runner's copy was excluded from the context it would have had to arrive
+      # through. It was a step that looked load-bearing, cost a Node toolchain
+      # and a pnpm install, and produced a directory nothing read. The PWA is
+      # still built before the engine that embeds it — stage 1 before stage 2 —
+      # which `tests/test_deploy.py` now asserts against `engine/Dockerfile`.
+
+      # No Docker Hub login, deliberately — and this is a trap worth naming,
+      # because the obvious "improvement" is to add one. See the core image
+      # job above for why a shared credential is the wrong remedy for a 429
+      # at `FROM`; the bases come from the GHCR mirror the `base-images` job
+      # fills first.
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.STACK_IMAGE }}
+          # The tag is not applied here. The bake pushes by digest and
+          # `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. The line stays because
+          # release.yml and tests/test_release_workflow.py treat it as the
+          # contract for what main publishes.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
+      # One BuildKit invocation (`.github/stack-bake.hcl`). `stack` is pushed
+      # by digest with provenance and an SBOM and no tag. The smoke below pulls
+      # the digest; the tag and the signature come only after it passes. A
+      # failed smoke leaves an untagged orphan, which ghcr-retention.yml prunes
+      # after the pinned policy's 7-day grace.
+      - name: build the stack once, by digest
+        id: push
+        env:
+          POD_BASE_IMAGE: ${{ needs.pod-base.outputs.image }}
+          ESTATE_IMAGE: ${{ needs.estate-base.outputs.image }}
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
+          # metadata-action's `labels` output is newline-separated key=value
+          # (no sep-labels). Do not split it on commas.
+          LABELS: ${{ steps.meta.outputs.labels }}
+          # The bake file's CACHE_REF. Without this, cache-from and cache-to
+          # are an empty ref and the stack layer cache is lost.
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
+          META_FILE: ${{ runner.temp }}/stack-bake-meta.json
+        run: |
+          set -euo pipefail
+          args=(
+            --file .github/stack-bake.hcl
+            --metadata-file "$META_FILE"
+            --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
+            --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
+            --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
+            --set "*.args.VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_GIT_SHA=${{ github.sha }}"
+            --set "*.args.INSTALL_AI_CLIENTS=true"
+          )
+          # One label per line. A value is a url, a revision or a timestamp.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
+          docker buildx bake "${args[@]}" stack
+          python3 - "$META_FILE" <<'PY'
+          import json, os, sys
+          meta = json.load(open(sys.argv[1]))
+          digest = meta["stack"]["containerimage.digest"]
+          if not isinstance(digest, str) or not digest.startswith("sha256:"):
+              raise SystemExit(f"stack bake produced no digest: {digest!r}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"digest={digest}\n")
+          print(digest)
+          PY
+
+      - name: the merged image runs both halves
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "${STACK_IMAGE}@${DIGEST}"
+          CANDIDATE="${STACK_IMAGE}@${DIGEST}"
+          # The same lesson the core-only smoke test records: two releases
+          # shipped images that had never been started. This one has two
+          # processes, so it is asked about both — and about the seam, which
+          # is the part that cannot be checked by reading.
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
+          echo "both halves are present and start"
+
+          # A stack image without the agent CLIs is not the product: with
+          # `INSTALL_AI_CLIENTS` silently false a stack runs with neither
+          # `claude` nor `codex`, and nothing is red. A build arg that
+          # nothing asserts is a default waiting to be forgotten, so
+          # the published image is asked for the clients it is built to carry.
+          docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
+          docker run --rm --entrypoint sh "$CANDIDATE" -ceu '
+            table=/usr/local/share/vogt/agent-clis.tools
+            while IFS="$(printf "\\t")" read -r tool source binary env_var kind; do
+              [ -n "$tool" ] && [ "${tool#\#}" = "$tool" ] || continue
+              command -v "$binary" >/dev/null || {
+                echo "agent CLI $tool is missing binary $binary from PATH" >&2
+                exit 1
+              }
+            done < "$table"
+          '
+          for tool in claude codex; do
+            docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
+              || { echo "the stack image is missing $tool" >&2; exit 1; }
+          done
+          echo "stack image carries the agent CLIs"
+
+      # Registry-side manifest write, and only after the smoke passed.
+      # `release.yml` finds the stack by this tag.
+      # `--prefer-index=false` keeps the tag on the digest that was smoked.
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${STACK_IMAGE}:sha-${GITHUB_SHA:0:7}" "${STACK_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Merged stack image from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Pin this immutable digest in your deployment:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "See \`docs/DEPLOYMENT.md\` before the first deploy: the"
+            echo "smoke test above proves the halves start, not that the front"
+            echo "door reaches a core."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The workbench pod base, built (or found already published) only for the
+  # workbench stack below. Separate from `pod-base` so the lean stack keeps
+  # the prerequisite it has always had and the two variants do not share a
+  # concurrency group.
+  pod-base-workbench:
+    name: the workbench pod base is in GHCR
+    needs: base-images
+    # Not on a `rust-core` dispatch: that builds only the preview images below.
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: workbench
+    permissions:
+      contents: read
+      packages: write
+
+  estate-base-workbench:
+    name: the workbench estate base is in GHCR
+    needs: pod-base-workbench
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/estate-base.yml
+    with:
+      pod_base_image: ${{ needs.pod-base-workbench.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+
+  stack-workbench-image:
+    name: build and publish the workbench stack image
+    needs: [base-images, pod-base-workbench, estate-base-workbench]
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        id: meta
+        with:
+          images: ${{ env.STACK_WORKBENCH_IMAGE }}
+          # The tag is not applied here. The bake pushes by digest and
+          # `tag the smoked digest` writes `sha-<commit>` only after the
+          # smoke passes. release.yml finds the image by this tag.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
+
+      # Same shape as the lean stack's bake (`.github/stack-bake.hcl`), its
+      # own file so the two jobs do not share a bake definition while S2 is
+      # in flight. Pushed by digest with provenance and an SBOM; the tag and
+      # the signature come only after the smoke. A failed smoke leaves an
+      # untagged orphan, which ghcr-retention.yml prunes after the policy's
+      # 7-day grace — that policy lists this package below.
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
+      - name: build the workbench stack once, by digest
+        id: push
+        env:
+          POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
+          ESTATE_IMAGE: ${{ needs.estate-base-workbench.outputs.image }}
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+          CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-workbench-${{ github.ref_name }}
+          META_FILE: ${{ runner.temp }}/workbench-bake-meta.json
+        run: |
+          set -euo pipefail
+          args=(
+            --file .github/workbench-bake.hcl
+            --metadata-file "$META_FILE"
+            --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
+            --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
+            --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
+            --set "*.args.VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_GIT_SHA=${{ github.sha }}"
+          )
+          # metadata-action's labels are newline-separated key=value.
+          while IFS= read -r pair || [ -n "$pair" ]; do
+            [ -n "$pair" ] || continue
+            args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
+          done <<< "$LABELS"
+          docker buildx bake "${args[@]}" stack
+          python3 - "$META_FILE" <<'PY'
+          import json, os, sys
+          meta = json.load(open(sys.argv[1]))
+          digest = meta["stack"]["containerimage.digest"]
+          if not isinstance(digest, str) or not digest.startswith("sha256:"):
+              raise SystemExit(f"workbench bake produced no digest: {digest!r}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"digest={digest}\n")
+          print(digest)
+          PY
+
+      - name: the workbench image runs, and carries the workbench tools
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+          docker pull "$image"
+          docker run --rm --entrypoint vogt "$image" --version >/dev/null
+          docker run --rm --entrypoint vogt-engine "$image" --help >/dev/null
+          docker run --rm --entrypoint vogt-verify-agent-clis "$image"
+          for tool in claude codex google-chrome chrome-ci python3.12 terraform pingcli actionlint tailscale; do
+            docker run --rm --entrypoint "$tool" "$image" --version >/dev/null \
+              || { echo "the workbench image is missing $tool" >&2; exit 1; }
+          done
+          # sshpass has no --version; -V prints its version and exits 0.
+          docker run --rm --entrypoint sshpass "$image" -V >/dev/null \
+            || { echo "the workbench image is missing sshpass" >&2; exit 1; }
+          echo "workbench image runs both halves and carries its tools"
+
+      - name: tag the smoked digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${STACK_WORKBENCH_IMAGE}:sha-${GITHUB_SHA:0:7}" \
+            "${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Workbench stack image from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing in this repository deploys this image. A derivative"
+            echo "that wants the public workbench tools pins this digest:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_WORKBENCH_IMAGE}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── The Rust core preview (WI-2641) ──────────────────────────────────────
+  #
+  # A dispatch of `rust-core` and nothing else. The preview is a separate
+  # instance on a copy of vogt-dev's data, with no engine and no sessions:
+  # the Rust core, and the PWA bundle served beside it (the stack lives in the
+  # ops repository, `personal/vogt-rust`). Each image is pushed by digest,
+  # smoked, and only then tagged `sha-<commit>`. Never `latest`, never a
+  # semver tag, and never the `vogt` or `vogt-stack` repositories, so nothing
+  # can promote a preview build as the product.
+  rust-core-image:
+    name: build and publish the rust-core preview core
+    needs: base-images
+    if: github.ref == 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # The same builder as the core image above, for the same reason: the
+      # layer cache is on the operator's plaintext LAN registry.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The build stage takes the mirrored Rust base. The runtime base,
+      # `debian:bookworm-slim`, is not mirrored (nothing the mirror reads names
+      # it), so this one manual path pulls it from Docker Hub anonymously.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          file: deploy/rust-core.Dockerfile
+          outputs: type=image,name=${{ env.RUST_CORE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=rust-core-${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }},mode=max
+          build-args: |
+            RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
+
+      # What the preview stack does on every start: `init` on an empty data
+      # directory, then `serve`, and readiness answers 200. python3 is checked
+      # because vogt-lifecycle's health mode shells out to it.
+      - name: the image initialises, serves and is ready
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          CANDIDATE="${RUST_CORE_IMAGE}@${DIGEST}"
+          docker pull "$CANDIDATE"
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint git "$CANDIDATE" --version
+          docker run --rm --entrypoint python3 "$CANDIDATE" --version
+          name="rust-core-smoke-${GITHUB_RUN_ID}"
+          trap 'docker logs "$name" 2>&1 | tail -40 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --entrypoint /bin/sh "$CANDIDATE" \
+            -c 'vogt init && exec vogt serve --host 127.0.0.1 --port 8000'
+          for _ in $(seq 1 30); do
+            if docker exec "$name" python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).status == 200 else 1)" 2>/dev/null; then
+              echo "rust core initialised, served and reported ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the rust core never reported ready" >&2
+          exit 1
+
+      - name: tag the smoked digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${RUST_CORE_IMAGE}:sha-${GITHUB_SHA:0:7}" "${RUST_CORE_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Rust core preview from \`${GITHUB_SHA:0:7}\` (rust-core)"
+            echo
+            echo "For the core-only preview stack (ops \`personal/vogt-rust\`)."
+            echo "Not a product image and not a release."
+            echo
+            echo '```yaml'
+            echo "    image: ${RUST_CORE_IMAGE}@${DIGEST}  # sha-${GITHUB_SHA:0:7}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  preview-web-image:
+    name: build and publish the rust-core preview web bundle
+    needs: base-images
+    if: github.ref == 'refs/heads/rust-core'
+    runs-on: [self-hosted, publish]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        id: push
+        with:
+          context: .
+          file: deploy/rust-core-preview-web.Dockerfile
+          outputs: type=image,name=${{ env.PREVIEW_WEB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:preview-web-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:preview-web-${{ github.ref_name }},mode=max
+          build-args: |
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=rust-core-preview
+
+      - name: the bundle is in the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          CANDIDATE="${PREVIEW_WEB_IMAGE}@${DIGEST}"
+          docker pull "$CANDIDATE"
+          docker run --rm "$CANDIDATE" test -s /srv/web/index.html
+          docker run --rm "$CANDIDATE" ls /srv/web/assets >/dev/null
+          echo "the PWA bundle is at /srv/web"
+
+      - name: tag the smoked digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            -t "${PREVIEW_WEB_IMAGE}:sha-${GITHUB_SHA:0:7}" "${PREVIEW_WEB_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Preview web bundle from \`${GITHUB_SHA:0:7}\` (rust-core)"
+            echo
+            echo '```yaml'
+            echo "    image: ${PREVIEW_WEB_IMAGE}@${DIGEST}  # sha-${GITHUB_SHA:0:7}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

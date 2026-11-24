@@ -1,0 +1,1494 @@
+#!/usr/bin/env bash
+# Idempotently register Vogt for clients present in the image.
+# Registration stores only the endpoint and wrapper command; no bearer value.
+set -euo pipefail
+
+# Where an agent in this session should reach Vogt, in the order of what
+# actually knows the answer:
+#
+#   1. `VOGT_MCP_URL`, an explicit override. Unchanged.
+#   2. The session's own `VOGT_URL`. `vogt session start` exports the endpoint
+#      the operator configured for clients, and it is the only thing
+#      here that knows which deployment this session belongs to. Ignoring it
+#      is what this script used to do.
+#   3. The front door on loopback. In the merged stack the engine is the only
+#      published port and the agent runs in this container, so
+#      loopback needs no DNS and no certificate — and it cannot go on naming
+#      a deployment after that deployment is retired, which is what a default
+#      pointing at a specific host would do. The loopback front door belongs to
+#      whatever deployment this session is part of.
+_vogt_endpoint="${VOGT_MCP_URL:-}"
+if [[ -z "$_vogt_endpoint" && -n "${VOGT_URL:-}" ]]; then
+    _vogt_endpoint="${VOGT_URL%/}/mcp"
+fi
+readonly VOGT_ENDPOINT="${_vogt_endpoint:-http://127.0.0.1:8910/mcp}"
+unset _vogt_endpoint
+readonly VOGT_WRAPPER="/usr/local/bin/vogt-mcp"
+readonly VOGT_SRC="${VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
+
+# An optional agent client's state directory is created only when this uid can
+# create it. This script runs from `vogt-agent-auth run` on every launch, under
+# `set -euo pipefail`, for whichever agent (or non-agent payload) the session
+# is starting. One client's home can be unwritable — a vogt-dev engine
+# container has no XDG_DATA_HOME, and `~/.local/share` is a root-owned parent
+# the kubelet made for the state mount, so opencode's own
+# `mkdir ~/.local/share/opencode` returns EACCES. That costs that client's
+# registration, never the launch.
+# Several clients check the same directory (Vogt, each read-only server,
+# Cadastre), so the warning is printed once per directory (WI-4298); the later
+# callers still get the failing status.
+OPTIONAL_DIR_WARNED=""
+optional_dir() {
+    local dir="$1" what="$2"
+    [[ -d "$dir" ]] && return 0
+    if mkdir -p "$dir" 2>/dev/null; then
+        return 0
+    fi
+    case "$OPTIONAL_DIR_WARNED" in
+        *"|$dir|"*) ;;
+        *)
+            OPTIONAL_DIR_WARNED="$OPTIONAL_DIR_WARNED|$dir|"
+            printf 'mcp-bootstrap: %s is not writable (%s); skipping\n' "$what" "$dir" >&2
+            ;;
+    esac
+    return 1
+}
+
+# Run one optional client step. A failure in a client this session is not
+# starting is reported, and the next step still runs.
+optional_step() {
+    local what="$1"
+    shift
+    "$@" || printf 'mcp-bootstrap: %s failed; continuing\n' "$what" >&2
+    return 0
+}
+
+# Whether Claude Code already runs `name` with `command` (and `arg`, when
+# given), read straight from its config (WI-927). `claude mcp get` answers the
+# same question but starts node and health-checks the server, ~0.7 s a call,
+# and this script asks it several times on every session launch. Only a "yes"
+# is trusted: anything else (no jq, no file, a project-scope .mcp.json, a stale
+# entry) falls through to the CLI path below, which is unchanged.
+claude_runs() {
+    local name="$1" command="$2" arg="${3:-}" config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+    command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
+    jq -e --arg n "$name" --arg c "$command" --arg a "$arg" --arg cwd "$PWD" '
+        [.mcpServers[$n]?, .projects[$cwd].mcpServers[$n]?]
+        | map(select(. != null))
+        | length > 0 and all(.command == $c
+            and ($a == "" or ((.args // []) | index($a)) != null))' \
+        "$config" >/dev/null 2>&1
+}
+
+# Whether `name` appears in no Claude Code config this session can see: user
+# or local scope in Claude Code's config (`$CLAUDE_CONFIG_DIR/.claude.json`, else
+# ~/.claude.json: a profile has its own), or the project's .mcp.json. Lets an
+# unwanted read-only server be skipped without asking the CLI to look for it.
+claude_lacks() {
+    local name="$1" config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+    command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
+    jq -e --arg n "$name" --arg cwd "$PWD" '
+        (.mcpServers[$n]? == null) and (.projects[$cwd].mcpServers[$n]? == null)' \
+        "$config" >/dev/null 2>&1 || return 1
+    [[ ! -f "$PWD/.mcp.json" ]] || ! grep -qF "\"$name\"" "$PWD/.mcp.json"
+}
+
+install_vogt_bridge() {
+    # Vogt is not on PyPI, so the image cannot install the bridge at build
+    # time. The workspace checkout is the only source. When vogt goes public
+    # this moves into the Dockerfile and this becomes a no-op fallback.
+    command -v vogt-mcp-remote >/dev/null 2>&1 && return 0
+    if [[ ! -f "$VOGT_SRC/pyproject.toml" ]]; then
+        printf 'mcp-bootstrap: no vogt checkout at %s; Vogt bridge unavailable\n' \
+            "$VOGT_SRC" >&2
+        return 0
+    fi
+    if ! pip3 install --user --break-system-packages --no-cache-dir --quiet \
+        -e "$VOGT_SRC"; then
+        printf 'mcp-bootstrap: failed to install vogt-mcp-remote from %s\n' \
+            "$VOGT_SRC" >&2
+        return 0
+    fi
+    command -v vogt-mcp-remote >/dev/null 2>&1 || printf \
+        'mcp-bootstrap: vogt-mcp-remote still not on PATH after install\n' >&2
+}
+
+install_vogt_codex() {
+    command -v codex >/dev/null 2>&1 || return 0
+    # Reconcile the URL rather than checking the key exists: a presence-only
+    # check pins whatever URL was current when the client was first registered,
+    # so a moved endpoint keeps failing to hand-shake and re-running changes
+    # nothing.
+    local registered
+    if registered="$(codex mcp get vogt 2>/dev/null)"; then
+        if grep -qF "$VOGT_ENDPOINT" <<<"$registered"; then
+            return 0
+        fi
+        codex mcp remove vogt >/dev/null 2>&1 || return 0
+    fi
+    codex mcp add vogt --url "$VOGT_ENDPOINT" \
+        --bearer-token-env-var VOGT_HTTP_TOKEN >/dev/null
+}
+
+install_vogt_claude() {
+    command -v claude >/dev/null 2>&1 || return 0
+    # Reconcile the COMMAND, not mere name-presence. A name-only guard pins
+    # whatever launcher path was stored when the client was first registered, so
+    # a renamed or relocated wrapper (e.g. an older `mydevenv2-*` path carried
+    # into a new image) leaves a stale `command` that Claude fails to spawn
+    # (`ENOENT`), and re-running never heals it. Mirror the codex branch:
+    # replace the registration unless its command already is the current wrapper.
+    claude_runs vogt "$VOGT_WRAPPER" && return 0
+    if claude mcp get vogt >/dev/null 2>&1; then
+        if claude mcp get vogt 2>/dev/null | grep -qF "$VOGT_WRAPPER"; then
+            return 0
+        fi
+        # No --scope: remove wherever the stale entry lives.
+        claude mcp remove vogt >/dev/null 2>&1 || return 0
+    fi
+    claude mcp add --scope user vogt -- "$VOGT_WRAPPER" >/dev/null
+}
+
+install_vogt_opencode() {
+    command -v opencode >/dev/null 2>&1 || return 0
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    # opencode keeps its registration under XDG_CONFIG_HOME but its database
+    # under XDG_DATA_HOME (a Bun default of ~/.local/share). Create both when
+    # this uid can, and skip this client when it cannot: the session may be
+    # starting Codex, and opencode's own mkdir must not abort that launch.
+    optional_dir "$config_dir" "opencode config directory" || return 0
+    optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+        "opencode data directory" || return 0
+    # Reconcile the COMMAND, not mere name-presence (same stale-launcher bug as
+    # the claude branch). opencode has no `mcp remove`, but `mcp add` upserts,
+    # so re-adding overwrites a stale command with the current wrapper. Skip only
+    # when the current wrapper is already the registered command.
+    if rg -qF "$VOGT_WRAPPER" \
+        "$config_dir/opencode.json" \
+        "$config_dir/opencode.jsonc" \
+        "$PWD/opencode.json" \
+        "$PWD/opencode.jsonc" 2>/dev/null; then
+        return 0
+    fi
+    # No `--env VOGT_URL`: this registration is written once and reused by every
+    # later session, so pinning a URL here freezes whichever deployment happened
+    # to be current when a client was first registered — and it would *override*
+    # the session's own `VOGT_URL`, the one value that knows where this session's
+    # Vogt is. The wrapper reads it at spawn instead.
+    opencode mcp add vogt \
+        -- "$VOGT_WRAPPER" >/dev/null \
+        || printf 'mcp-bootstrap: opencode registration of vogt failed\n' >&2
+}
+
+# Optional read-only MCP servers (docs/ENGINE.md §4). Each is registered only
+# while this session holds its token, and unregistered when it does not, so a
+# deployment opts in by adding the token to its agent-auth manifest and opts
+# out by removing it. The registration names `vogt-readonly-mcp <server>` and
+# nothing else: the token stays in the session's environment, read at spawn,
+# and the read-only switches live in the wrapper where a session cannot edit
+# them. Names end in `-ro` so a server an operator registered by hand under
+# the plain name is never replaced or removed.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly READONLY_WRAPPER="${VOGT_READONLY_MCP_WRAPPER:-/usr/local/bin/vogt-readonly-mcp}"
+# name | wrapper argument | upstream binary | variables that enable it (all
+# required) and that Codex must pass through to the server (Codex starts stdio
+# servers with a minimal environment unless told which variables to forward).
+readonly READONLY_SERVERS=(
+    "github-ro|github|github-mcp-server|GITHUB_MCP_TOKEN|VOGT_GITHUB_MCP_TOOLSETS"
+    "grafana-ro|grafana|mcp-grafana|GRAFANA_URL GRAFANA_SERVICE_ACCOUNT_TOKEN|"
+    "forgejo-ro|gitea|gitea-mcp|GITEA_HOST GITEA_MCP_TOKEN|"
+    "k8s-ro|k8s|kubernetes-mcp-server|K8S_AGENT_READONLY_KUBECONFIG|"
+)
+
+readonly_wanted() {
+    local var
+    for var in $1; do
+        [[ -n "${!var:-}" ]] || return 1
+    done
+    return 0
+}
+
+# Cadastre tools that only read. Codex pre-approves exactly these, per tool;
+# the write tools (add, update, annotate, accept, acknowledge, leave_contested
+# and any later one) keep the normal approval prompt (WI-4288). A pinned list,
+# because the bootstrap runs before any server is connected and cannot read the
+# tool annotations; a new read tool needs a line here.
+readonly CADASTRE_READ_TOOLS="${CADASTRE_READ_TOOLS:-lookup brief check context_for credential_for dns_chain drift observations manifest_backlog manifest_brief manifest_drift manifest_next manifest_repo manifest_why question secret_describe version}"
+export CADASTRE_READ_TOOLS
+
+# Write one read-only server table into Codex's config.toml (GitHub #914).
+#
+# Several sessions start at once, and each used to check then append (`>>`)
+# with nothing held between the two, so the file grew a second copy of every
+# `[mcp_servers.*]` table. Duplicate tables do not parse, and a file that does
+# not parse then failed the "already registered" check, so every later start
+# appended again.
+#
+# The whole read-modify-write is one flock on a lock next to the config. The
+# new file is written beside the old one and renamed over it, so a reader never
+# sees a partial write. A config that does not parse is left exactly as it is:
+# appending to it cannot repair it and would only add another copy. A table
+# this script already wrote (one whose command is the wrapper) is replaced, so
+# a second start changes nothing; a table an operator wrote under the same
+# name, running something else, is left where it is.
+# The wrapper (fifth argument) defaults to the read-only one; an empty
+# argument writes `args = []`.
+readonly_codex_write() {
+    local config="$1" name="$2" arg="$3" vars="$4" wrapper="${5:-$READONLY_WRAPPER}" lockdir
+    lockdir="$(dirname "$config")"
+    optional_dir "$lockdir" "Codex config directory" || return 0
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_SERVER="$name" CODEX_ARG="$arg" \
+            CODEX_VARS="$vars" CODEX_WRAPPER="$wrapper" \
+            python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+name = os.environ["CODEX_SERVER"]
+header = f"[mcp_servers.{name}]"
+
+def approval_row(source: str) -> str:
+    # This writer replaces its own table whole, so an operator's explicit mode
+    # has to be read first and carried into the new block (WI-1634). Without
+    # that, every start would turn a "prompt" back into "approve".
+    # Cadastre has write tools, so it never gets a blanket "approve" (WI-4288):
+    # its read tools are approved one by one below.
+    blanket = name != "cadastre"
+    for row in source.splitlines():
+        head = row.split("#", 1)[0]
+        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            if not blanket and head.split("=", 1)[1].strip() == '"approve"':
+                return ""
+            return row if row.endswith("\n") else row + "\n"
+    return 'default_tools_approval_mode = "approve"\n' if blanket else ""
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+lines = text.splitlines(keepends=True)
+kept: list[str] = []
+existing = ""
+index = 0
+while index < len(lines):
+    stripped = lines[index].strip()
+    if stripped == header:
+        index += 1
+        while index < len(lines) and not lines[index].lstrip().startswith("["):
+            existing += lines[index]
+            index += 1
+        continue
+    kept.append(lines[index])
+    index += 1
+
+# Read-only by construction, so pre-approved (WI-1634). Written here as well
+# as by the driven-session bundle, or each start would drop it. The key lives
+# in the session's own config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary.
+arg = os.environ["CODEX_ARG"]
+args_row = f'args = ["{arg}"]\n' if arg else "args = []\n"
+block = (
+    f"{header}\n"
+    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
+    f"{args_row}"
+    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
+    f"{approval_row(existing)}"
+)
+if name == "cadastre":
+    # Per-tool tables stay where they are (an operator's setting survives a
+    # re-run); only the pinned read tools that have none yet are added.
+    # Read from the parsed TOML, not header text: a quoted header such as
+    # [mcp_servers.cadastre.tools."lookup"] is the same table (WI-4294).
+    present_tools = (
+        tomllib.loads(text).get("mcp_servers", {}).get("cadastre", {}).get("tools", {})
+        if text.strip()
+        else {}
+    )
+    for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
+        tool_header = f"[mcp_servers.cadastre.tools.{tool}]"
+        if tool not in present_tools:
+            block += f'\n{tool_header}\napproval_mode = "approve"\n'
+body = "".join(kept).rstrip("\n")
+new = f"{body}\n\n{block}" if body else block
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# The app-server daemon (WI-1142) copies the invoking binary into
+# $CODEX_HOME/packages and execs that copy, which then sits outside the pin.
+# Written on its own path: a session with no read-only server still needs it,
+# and an existing [features] table must gain the key rather than hide it.
+codex_disable_daemon() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    optional_dir "$lockdir" "Codex config directory" || return 0
+    (
+        flock 9
+        CODEX_CONFIG="$config" python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+lines = text.splitlines(keepends=True)
+out: list[str] = []
+index = 0
+found_table = False
+found_key = False
+while index < len(lines):
+    stripped = lines[index].strip()
+    if stripped == "[features]":
+        found_table = True
+        out.append(lines[index])
+        index += 1
+        while index < len(lines) and not lines[index].lstrip().startswith("["):
+            row = lines[index]
+            key = row.split("=", 1)[0].strip() if "=" in row else ""
+            if key == "daemon_auto_start":
+                found_key = True
+                out.append("daemon_auto_start = false\n")
+            else:
+                out.append(row)
+            index += 1
+        if not found_key:
+            while out and out[-1].strip() == "":
+                out.pop()
+            out.append("daemon_auto_start = false\n")
+        if index < len(lines) and lines[index].lstrip().startswith("["):
+            while out and out[-1].strip() == "":
+                out.pop()
+            out.append("\n")
+        continue
+    out.append(lines[index])
+    index += 1
+
+if not found_table:
+    # After the root keys, not before them: a table header swallows every
+    # following assignment until the next header, and model/model_provider
+    # live at the root.
+    split_at = next(
+        (i for i, row in enumerate(out) if row.lstrip().startswith("[")),
+        len(out),
+    )
+    table = "[features]\ndaemon_auto_start = false\n"
+    head = "".join(out[:split_at]).rstrip("\n")
+    tail = "".join(out[split_at:]).rstrip("\n")
+    parts = [part for part in (head, table.rstrip("\n"), tail) if part]
+    new = "\n\n".join(parts) + "\n"
+else:
+    new = "".join(out)
+    if not new.endswith("\n"):
+        new += "\n"
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Codex compacts its own context at min(model_auto_compact_token_limit, 90% of
+# the window) (WI-1575). Vogt owns that limit so a fresh pod does not run the
+# model default: the top-level key (ENGINE_CODEX_AUTO_COMPACT_TOKENS, default
+# 200000) and its scope "total" are written only when absent. An operator's
+# value is never overridden, and a config that does not parse is left alone.
+codex_auto_compact() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    optional_dir "$lockdir" "Codex config directory" || return 0
+    (
+        flock 9
+        CODEX_CONFIG="$config" \
+            CODEX_AUTO_COMPACT="${ENGINE_CODEX_AUTO_COMPACT_TOKENS:-200000}" \
+            python3 - <<'PY'
+import os, sys, tempfile, tomllib
+
+path = os.environ["CODEX_CONFIG"]
+limit = os.environ["CODEX_AUTO_COMPACT"]
+if not limit.isdigit() or int(limit) <= 0:
+    print(
+        f"mcp-bootstrap: ENGINE_CODEX_AUTO_COMPACT_TOKENS={limit!r} is not a "
+        "positive integer; left alone",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+try:
+    parsed = tomllib.loads(text)
+except tomllib.TOMLDecodeError as exc:
+    print(f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+wanted = [
+    ("model_auto_compact_token_limit", str(int(limit))),
+    ("model_auto_compact_token_limit_scope", '"total"'),
+]
+rows = [f"{key} = {value}\n" for key, value in wanted if key not in parsed]
+if not rows:
+    sys.exit(0)
+lines = text.splitlines(keepends=True)
+if lines and not lines[-1].endswith("\n"):
+    lines[-1] += "\n"
+# Root keys go before the first table header, which would swallow them.
+split_at = next(
+    (i for i, row in enumerate(lines) if row.lstrip().startswith("[")),
+    len(lines),
+)
+head = lines[:split_at]
+while head and head[-1].strip() == "":
+    head.pop()
+tail = lines[split_at:]
+new = "".join(head + rows + (["\n"] if tail else []) + tail)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Route Codex through the estate LiteLLM router (WI-1147). The estate fork
+# (WI-1286) speaks the Chat Completions wire as well as Responses, and grok
+# returns tool calls only over chat, so the router is used with
+# wire_api = "chat". The session key is the env var named by env_key — never a
+# token written into this file. theclawbay stays as a fallback profile and is
+# not given a bearer here: a profile this script did not write is left as the
+# operator has it, and one it did write carries no secret.
+#
+# The router's groups have no entry in Codex's bundled catalog, and the
+# fallback metadata offers no apply_patch tool and does not turn code mode off.
+# Alongside the provider this writes a catalog of the groups that answered a
+# chat completion with the session key (WI-1592), apply_patch freeform and
+# tool_mode omitted, and points model_catalog_json at it. Listed, in order:
+# grok, code, small, reasoning, vision, the OpenRouter groups that answer
+# (or-deepseek-flash, or-gemini-flash, or-glm-5-3 — not or-deepseek, which
+# LiteLLM blocks), and the DLab models whose plan actually serves them.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not listed: live probes
+# (WI-1147, cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH) showed they fail inside LiteLLM
+# (408 / hang). Re-adding them is WI-1631. Priority is the index in that
+# order,
+# because the fork sorts ascending and defaults to the first visible model,
+# so grok stays the default. premium is hidden from the picker. Not listed,
+# because a completion does not succeed: bedrock (no such model on the
+# router), the DLab Gemini preview and Claude Haiku (plan / availability
+# errors), and the DLab free gpt-6 aliases (auth error).
+# absent or when it already names the file this writer owns; an operator's
+# catalog is left alone. Top-level model and model_provider are set only when
+# absent or when they already name this bundle (litellm, or theclawbay as the
+# provider). An operator's other provider and model are left alone. A config
+# that does not parse is left alone, same as the other writers above.
+codex_litellm_provider() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    optional_dir "$lockdir" "Codex config directory" || return 0
+    (
+        flock 9
+        CODEX_CONFIG="$config" python3 - <<'PY'
+import json, os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+# The catalog Codex deserializes as ModelsResponse (protocol openai_models.rs).
+# One entry per LiteLLM router group, the same shape the grok entry had.
+# apply_patch_tool_type "freeform" is what makes Codex offer the apply_patch
+# tool; tool_mode is omitted, which is code mode off. availability_nux has no
+# serde default, so it must be present (null). The catalog deserializer rejects
+# a model with neither base_instructions nor model_messages.instructions_template,
+# so the template is a short non-empty string. The fork sorts by priority
+# ascending and marks the first visible model as the default, so priority is
+# the index in router order and grok stays first. premium is the router's
+# opt-in group, so its visibility is "hide": choosable by name, not in the picker.
+# Groups a chat completion with the session key actually answered (WI-1592).
+# or-deepseek is blocked at the router and is not here. Bedrock is not a
+# model on this router. DLab models that 400/401/503 are not here either.
+# qwen3-coder, qwen3-8-27b and gpt-oss-120b are not here either: they fail
+# inside LiteLLM (408 / hang, WI-1147 cmt_01M4YZWG8B7E9YE5Y8FNJ7H2GH).
+# Re-adding them is WI-1631.
+ROUTER_GROUPS = (
+    "grok",
+    "code",
+    "small",
+    "reasoning",
+    "vision",
+    "or-deepseek-flash",
+    "or-gemini-flash",
+    "or-glm-5-3",
+    "dlab-deepseek-v4-pro",
+    "dlab-deepseek-v4-1-flash",
+    "dlab-grok-4-5",
+    "dlab-grok-4-6",
+    "dlab-grok-4-7",
+    "dlab-gemini-3-8-flash",
+    "dlab-glm-5-3",
+    "dlab-glm-5-3-flash",
+    "dlab-glm-5-3-flashx",
+    "dlab-kimi-k3",
+    "premium",
+)
+
+def _catalog_model(priority: int, slug: str) -> dict[str, object]:
+    return {
+        "slug": slug,
+        "display_name": slug,
+        "description": f"Estate LiteLLM {slug} group.",
+        "supported_reasoning_levels": [],
+        "shell_type": "unified_exec",
+        "visibility": "hide" if slug == "premium" else "list",
+        "supported_in_api": True,
+        "priority": priority,
+        "availability_nux": None,
+        "upgrade": None,
+        "model_messages": {
+            "instructions_template": (
+                f"You are Codex, running through the estate LiteLLM router as {slug}."
+            ),
+            "approvals": None,
+            "collaboration_modes": None,
+            "auto_review": None,
+            "permissions": None,
+            "multi_agent": None,
+        },
+        "default_reasoning_summary": "none",
+        "support_verbosity": False,
+        "default_verbosity": None,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "context_window": 256000,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+    }
+
+CATALOG = {"models": [_catalog_model(i, slug) for i, slug in enumerate(ROUTER_GROUPS)]}
+catalog_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.json")
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+LITELLM = (
+    "[model_providers.litellm]\n"
+    'name = "LiteLLM"\n'
+    'base_url = "http://100.92.54.45:4000/v1"\n'
+    'wire_api = "chat"\n'
+    "requires_openai_auth = false\n"
+    "supports_websockets = false\n"
+    'env_key = "HOMELAB_LITELLM_SESSION_KEY"\n'
+)
+CLAWBAY = (
+    "[model_providers.theclawbay]\n"
+    'name = "OpenAI"\n'
+    'base_url = "https://api.theclawbay.com/backend-api/codex"\n'
+    'wire_api = "responses"\n'
+    "requires_openai_auth = false\n"
+    "supports_websockets = false\n"
+)
+
+def _drop(lines: list[str], header: str) -> list[str]:
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped == header or stripped.startswith(header + "."):
+            index += 1
+            while index < len(lines) and not lines[index].lstrip().startswith("["):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return kept
+
+lines = text.splitlines(keepends=True)
+# Keep an operator-written theclawbay profile (it may hold their own auth).
+# Replace only a profile this writer owns: no experimental_bearer_token.
+owns_clawbay = False
+in_clawbay = False
+clawbay_body: list[str] = []
+for row in lines:
+    stripped = row.strip()
+    if stripped.startswith("["):
+        if in_clawbay and not any(
+            part.strip().startswith("experimental_bearer_token")
+            for part in clawbay_body
+        ):
+            owns_clawbay = True
+        in_clawbay = stripped == "[model_providers.theclawbay]"
+        clawbay_body = []
+        continue
+    if in_clawbay:
+        clawbay_body.append(row)
+if in_clawbay and not any(
+    part.strip().startswith("experimental_bearer_token") for part in clawbay_body
+):
+    owns_clawbay = True
+
+lines = _drop(lines, "[model_providers.litellm]")
+if owns_clawbay or not any(
+    row.strip() == "[model_providers.theclawbay]" for row in lines
+):
+    lines = _drop(lines, "[model_providers.theclawbay]")
+    write_clawbay = True
+else:
+    write_clawbay = False
+
+def _in_table(index: int) -> bool:
+    for earlier in range(index - 1, -1, -1):
+        stripped = lines[earlier].strip()
+        if stripped.startswith("["):
+            return True
+    return False
+
+def _root_slots(key: str) -> list[int]:
+    slots: list[int] = []
+    for index, row in enumerate(lines):
+        if _in_table(index) or "=" not in row or row.lstrip().startswith("#"):
+            continue
+        if row.split("=", 1)[0].strip() == key:
+            slots.append(index)
+    return slots
+
+def _root_value(key: str) -> str | None:
+    slots = _root_slots(key)
+    if not slots:
+        return None
+    raw = lines[slots[-1]]
+    try:
+        import tomllib
+        value = tomllib.loads(raw).get(key)
+    except ValueError:
+        return raw.split("=", 1)[1].strip().strip('"').strip("'")
+    return value if isinstance(value, str) else None
+
+def _set_root(key: str, value: str, when: set[str | None]) -> None:
+    current = _root_value(key)
+    if current not in when:
+        return
+    # A TOML basic string: json's escapes are a subset TOML reads the same
+    # way, so a slug or path with a quote or backslash stays one value
+    # (WI-2744 N4).
+    rendered = f"{key} = {json.dumps(value)}\n"
+    slots = _root_slots(key)
+    if slots:
+        lines[slots[-1]] = rendered
+        return
+    # A key appended after the last table belongs to that table. Root keys
+    # that are new go before the first header.
+    at = next(
+        (i for i, row in enumerate(lines) if row.lstrip().startswith("[")),
+        len(lines),
+    )
+    lines.insert(at, rendered)
+
+# Switch the default only when it is unset or already one of ours.
+_set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
+# Under the router, a model the catalog does not list cannot be served: a
+# leftover theclawbay default such as gpt-6-astra makes every model-less
+# `codex exec` fail (WI-1640). So the default moves to grok unless it already
+# names a catalog group.
+if _root_value("model_provider") == "litellm":
+    _model = _root_value("model")
+    if _model not in ROUTER_GROUPS:
+        _set_root("model", "grok", {_model})
+# Point at the catalog this writer owns. A path an operator chose stays.
+_set_root("model_catalog_json", catalog_path, {None, catalog_path})
+
+body = "".join(lines).rstrip("\n")
+extra = LITELLM + ("\n" + CLAWBAY if write_clawbay else "")
+new = f"{body}\n\n{extra}" if body else extra
+if not new.endswith("\n"):
+    new += "\n"
+catalog_text = json.dumps(CATALOG, indent=2) + "\n"
+try:
+    with open(catalog_path, encoding="utf-8") as fh:
+        catalog_current = fh.read()
+except FileNotFoundError:
+    catalog_current = None
+except OSError as exc:
+    print(
+        f"mcp-bootstrap: cannot read {catalog_path} ({exc}); left alone",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+# The catalog is only rewritten while config points at it. An operator who
+# keeps their own model_catalog_json is not handed a file they did not ask for.
+owns_catalog = _root_value("model_catalog_json") == catalog_path
+if new == text and (not owns_catalog or catalog_current == catalog_text):
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+if owns_catalog and catalog_current != catalog_text:
+    fd, tmp = tempfile.mkstemp(prefix=".vogt-model-catalog.json.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(catalog_text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, catalog_path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+if new == text:
+    sys.exit(0)
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+readonly_codex() {
+    local name="$1" arg="$2" required="$3" optional="$4" config vars var
+    command -v codex >/dev/null 2>&1 || return 0
+    config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    if [[ "$5" != "yes" ]]; then
+        # Remove only what this script wrote: an entry running the wrapper.
+        if codex mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+            codex mcp remove "$name" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    vars=""
+    for var in $required $optional; do
+        vars+="${vars:+, }\"$var\""
+    done
+    readonly_codex_write "$config" "$name" "$arg" "$vars"
+}
+
+readonly_claude() {
+    local name="$1" arg="$2"
+    command -v claude >/dev/null 2>&1 || return 0
+    if [[ "$3" != "yes" ]]; then
+        claude_lacks "$name" && return 0
+        if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+            claude mcp remove --scope user "$name" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    # Claude Code hands a stdio server the session's own environment, so the
+    # registration needs no `-e`: an `-e TOKEN=...` would store the value.
+    claude_runs "$name" "$READONLY_WRAPPER" "$arg" && return 0
+    if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+        return 0
+    fi
+    claude mcp remove --scope user "$name" >/dev/null 2>&1 || true
+    claude mcp add --scope user "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
+}
+
+readonly_opencode() {
+    local name="$1" arg="$2" config_dir
+    command -v opencode >/dev/null 2>&1 || return 0
+    # opencode has no `mcp remove`, and its config is JSONC an operator edits
+    # by hand, so an unwanted entry is left where it is: without its token
+    # the wrapper refuses to start, so a stale entry is one failed server,
+    # never a credential (WI-975).
+    [[ "$3" == "yes" ]] || return 0
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    optional_dir "$config_dir" "opencode config directory" || return 0
+    optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+        "opencode data directory" || return 0
+    # opencode passes a local server the session's own environment, so the
+    # registration carries no `--env`. `mcp add` upserts, so a present name
+    # that does not yet run the wrapper is simply overwritten.
+    if grep -qsF "\"$name\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+        && grep -qsF "$READONLY_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
+        return 0
+    fi
+    opencode mcp add "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
+}
+
+install_readonly_servers() {
+    local entry name arg bin required optional wanted
+    for entry in "${READONLY_SERVERS[@]}"; do
+        IFS='|' read -r name arg bin required optional <<<"$entry"
+        wanted=no
+        if readonly_wanted "$required"; then
+            if [[ -x "$READONLY_WRAPPER" ]] && command -v "$bin" >/dev/null 2>&1; then
+                wanted=yes
+            else
+                printf 'mcp-bootstrap: %s token present but %s or %s is not installed; not registered\n' \
+                    "$name" "$READONLY_WRAPPER" "$bin" >&2
+            fi
+        fi
+        readonly_codex "$name" "$arg" "$required" "$optional" "$wanted" \
+            || printf 'mcp-bootstrap: codex registration of %s failed\n' "$name" >&2
+        readonly_claude "$name" "$arg" "$wanted" \
+            || printf 'mcp-bootstrap: claude registration of %s failed\n' "$name" >&2
+        readonly_opencode "$name" "$arg" "$wanted" \
+            || printf 'mcp-bootstrap: opencode registration of %s failed\n' "$name" >&2
+    done
+}
+
+# The driven-session bundle (WI-1149). A Codex the engine starts is not an
+# operator's interactive CLI, so the config it reads is shaped for that:
+#
+#   - project_doc_fallback_filenames = ["CLAUDE.md"], so a checkout that only
+#     carries CLAUDE.md still has instructions. project_doc_mode = "all" and the
+#     claude-compat provider are the fork's job (WI-1131, WI-1132), not this one.
+#   - [tui] animations = false and terminal_title = ["agent-state"]: a driven
+#     session's title is state the engine reads, and animation bytes are noise.
+#   - [features] memories = true, beside the daemon_auto_start key the other
+#     writer forces off.
+#
+# Skills are a symlink, not a config key. [skills] extra_roots is the fork's
+# (WI-1133); until then ~/.agents/skills points at the workspace .claude/skills
+# when that directory exists, and otherwise at ~/.claude/skills. An existing
+# directory or symlink is left where it is.
+#
+# vogt and cadastre publish tool schemas larger than Codex's 5,000 byte default,
+# so a table this script can see for either server gets
+# tool_input_schema_max_bytes raised. A server an operator never registered is
+# not invented here, and a table that already carries a larger cap is not
+# lowered. A config that does not parse is left alone, like every writer above.
+#
+# The estate's trusted servers get default_tools_approval_mode = "approve"
+# (WI-1634, operator-approved 2026-10-15). A driven Codex runs `-a on-request`,
+# so every MCP call otherwise stops at a permission prompt only a person may
+# answer, and an autonomous session cannot use the estate's tools at all. The
+# fork's per-server key (codex-rs/config mcp_types.rs AppToolApproval, read by
+# requires_mcp_tool_approval_for_mode in core mcp_tool_call.rs) skips the
+# prompt for that server only; requirements.toml cannot carry it, its
+# [mcp_servers] is an identity allowlist. The list mirrors what the Claude
+# driven-session policy lets a Claude session call without a person: vogt and
+# cadastre (the session's own scoped token decides what it may write) and the
+# three read-only forge and Grafana wrappers. komodo is deliberately absent,
+# because its deploy_stack and
+# write_stack_file mutate running stacks, and so is every server not named
+# here: those keep the person gate. A table an operator gave an explicit mode
+# keeps it, and a server nobody registered is not created. The key lives in the
+# session's own ~/.codex/config.toml, which the session can edit, so it is a
+# convenience for autonomous work and not a security boundary; the engine's
+# person gate (WI-1355) is the boundary.
+# Nothing is written for a server with no [mcp_servers.<name>] table: run
+# `codex mcp add` first (install_vogt_codex does).
+readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
+
+codex_driven_session() {
+    local config="$1" lockdir skills
+    lockdir="$(dirname "$config")"
+    optional_dir "$lockdir" "Codex config directory" || return 0
+    skills="${CODEX_SKILLS_LINK:-$HOME/.agents/skills}"
+    if [[ -d "$PWD/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$PWD/.claude/skills"
+    elif [[ -d "$HOME/.claude/skills" ]]; then
+        _codex_link_skills "$skills" "$HOME/.claude/skills"
+    fi
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_SCHEMA_MAX="$CODEX_SCHEMA_MAX_BYTES" python3 - <<'PY'
+import os, re, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+schema_max = int(os.environ["CODEX_SCHEMA_MAX"])
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+parsed_existing: dict = {}
+if text.strip():
+    try:
+        import tomllib
+        parsed_existing = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+ROOT = {
+    "project_doc_fallback_filenames": 'project_doc_fallback_filenames = ["CLAUDE.md"]\n',
+}
+TABLES = {
+    "tui": 'animations = false\nterminal_title = ["agent-state"]\n',
+    "features": "memories = true\n",
+}
+SCHEMA_SERVERS = ("vogt", "cadastre")
+APPROVED_SERVERS = (
+    "vogt",
+    "cadastre",
+    "github-ro",
+    "forgejo-ro",
+    "grafana-ro",
+    "k8s-ro",
+)
+APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
+# Vogt's own MCP calls: Codex cuts a tool call at 300 s unless told otherwise,
+# and the wait tools block longer. Only raised, never lowered (WI-1574).
+VOGT_TOOL_TIMEOUT = 660
+VOGT_STARTUP_TIMEOUT = 30
+# The session-self tools get an explicit per-tool approval, so they stay
+# pre-approved even if the server-wide default above is ever narrowed. Exactly
+# these five and no others: the session's token scope is the real guard.
+VOGT_SELF_TOOLS = (
+    "session_bind_work",
+    "session_report",
+    "session_report_blocked",
+    "session_report_unblocked",
+    "work_comment",
+)
+
+def key_of(row: str) -> str:
+    head = row.split("#", 1)[0]
+    return head.split("=", 1)[0].strip() if "=" in head else ""
+
+def render(rows: list[str]) -> str:
+    body = "".join(rows).rstrip("\n")
+    return f"{body}\n" if body else ""
+
+def header_line(row: str) -> bool:
+    # A value such as terminal_title = ["agent-state"] is not a table header.
+    # Quoted segments are allowed (a header may be [a."b"]); a bare key name
+    # or a value never starts with "[" followed by only key characters.
+    return re.match(
+        r"""\s*\[\[?\s*[\w.\-"' ]+\]\]?\s*(#.*)?$""", row.rstrip("\n")
+    ) is not None
+
+lines = text.splitlines(keepends=True)
+# Which per-tool tables exist is read from the parsed TOML, not from header
+# text: an operator may have written the table with a quoted header, dotted
+# keys or an inline table, and a second copy would stop Codex parsing the file.
+existing_vogt_tools = (
+    parsed_existing.get("mcp_servers", {}).get("vogt", {}).get("tools", {})
+)
+existing_cadastre_tools = (
+    parsed_existing.get("mcp_servers", {}).get("cadastre", {}).get("tools", {})
+)
+out: list[str] = []
+index = 0
+seen_tables: set[str] = set()
+seen_root: set[str] = set()
+while index < len(lines):
+    stripped = lines[index].strip()
+    table = next((name for name in TABLES if stripped.lstrip() == f"[{name}]"), None)
+    if table is not None:
+        seen_tables.add(table)
+        wanted = {
+            row.split("=", 1)[0].strip(): row
+            for row in TABLES[table].splitlines(keepends=True)
+        }
+        out.append(lines[index])
+        index += 1
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            key = key_of(row)
+            if key in wanted:
+                out.append(wanted.pop(key))
+            else:
+                out.append(row)
+            index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        out.extend(wanted.values())
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
+        continue
+    server = next(
+        (name for name in APPROVED_SERVERS if stripped == f"[mcp_servers.{name}]"),
+        None,
+    )
+    if server is not None:
+        out.append(lines[index])
+        table_start = len(out)
+        index += 1
+        present = None
+        approval = False
+        timeout_rows = {"tool_timeout_sec": None, "startup_timeout_sec": None}
+        while index < len(lines) and not header_line(lines[index]):
+            row = lines[index]
+            if server in SCHEMA_SERVERS and key_of(row) == "tool_input_schema_max_bytes":
+                present = row
+            elif server == "vogt" and key_of(row) in timeout_rows:
+                timeout_rows[key_of(row)] = row
+            else:
+                approval = approval or key_of(row) == "default_tools_approval_mode"
+                out.append(row)
+            index += 1
+        while out and out[-1].strip() == "":
+            out.pop()
+        # Before the cap, which is always lifted and re-appended last: the
+        # other order would move a line on every run and rewrite the file.
+        if server == "cadastre":
+            # No blanket approval (WI-4288): drop one an older start wrote.
+            # Only this table's rows: earlier servers keep their own mode.
+            out[table_start:] = [
+                r for r in out[table_start:]
+                if not (
+                    key_of(r) == "default_tools_approval_mode"
+                    and r.split("#", 1)[0].split("=", 1)[1].strip() == '"approve"'
+                )
+            ]
+        elif not approval:
+            out.append(APPROVAL_ROW)
+        if server == "vogt":
+            for key, wanted_value in (
+                ("tool_timeout_sec", VOGT_TOOL_TIMEOUT),
+                ("startup_timeout_sec", VOGT_STARTUP_TIMEOUT),
+            ):
+                row = timeout_rows[key]
+                # A string value ("900") is invalid for Codex: it counts as 0
+                # and the row is replaced with the wanted value.
+                try:
+                    value = float(row.split("=", 1)[1].split("#", 1)[0]) if row else 0
+                except ValueError:
+                    value = 0
+                keep_row = row if row and value >= wanted_value else None
+                out.append(keep_row or f"{key} = {wanted_value}\n")
+        if server not in SCHEMA_SERVERS:
+            if index < len(lines) and header_line(lines[index]):
+                out.append("\n")
+            continue
+        keep = present
+        if present is not None:
+            try:
+                if int(present.split("=", 1)[1].strip()) < schema_max:
+                    keep = None
+            except ValueError:
+                pass
+        # The cap line was lifted out of the table, so the blank line that
+        # separated it from the next header has to come back with it. Without
+        # that, a kept cap sits flush against the following [table].
+        while out and out[-1].strip() == "":
+            out.pop()
+        out.append(keep or f"tool_input_schema_max_bytes = {schema_max}\n")
+        if server == "vogt":
+            # Right after the table, not at the end of the file: the other
+            # writers move their own tables, and anything appended last would
+            # shift on the next run.
+            for tool in VOGT_SELF_TOOLS:
+                header = f"[mcp_servers.vogt.tools.{tool}]"
+                if tool not in existing_vogt_tools:
+                    out.extend(["\n", header + "\n", 'approval_mode = "approve"\n'])
+        if server == "cadastre":
+            for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
+                if tool not in existing_cadastre_tools:
+                    out.extend(
+                        [
+                            "\n",
+                            f"[mcp_servers.cadastre.tools.{tool}]\n",
+                            'approval_mode = "approve"\n',
+                        ]
+                    )
+        if index < len(lines) and header_line(lines[index]):
+            out.append("\n")
+        continue
+    root_key = key_of(lines[index])
+    if root_key in ROOT:
+        seen_root.add(root_key)
+        out.append(ROOT[root_key])
+        index += 1
+        continue
+    out.append(lines[index])
+    index += 1
+
+missing_root = [row for key, row in ROOT.items() if key not in seen_root]
+if missing_root:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    out[split_at:split_at] = missing_root
+
+missing_tables = [
+    f"[{name}]\n{TABLES[name]}" for name in TABLES if name not in seen_tables
+]
+if missing_tables:
+    split_at = next(
+        (i for i, row in enumerate(out) if header_line(row)),
+        len(out),
+    )
+    head = render(out[:split_at])
+    tail = render(out[split_at:])
+    parts = [part.rstrip("\n") for part in (head, *missing_tables, tail) if part.strip()]
+    new = "\n\n".join(parts) + "\n"
+else:
+    new = render(out)
+
+if new == text:
+    sys.exit(0)
+# Validate what is about to be written, not only what was read: a rewrite that
+# does not parse would stop Codex starting for every session.
+try:
+    tomllib.loads(new)
+except tomllib.TOMLDecodeError as exc:
+    print(
+        f"mcp-bootstrap: rewritten {path} would not parse ({exc}); left alone",
+        file=sys.stderr,
+    )
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Point the skills link at target, but only when nothing is there yet. A
+# directory or a symlink an operator already made is theirs.
+_codex_link_skills() {
+    local link="$1" target="$2"
+    [[ -e "$link" || -L "$link" ]] && return 0
+    optional_dir "$(dirname "$link")" "Codex skills directory" || return 0
+    ln -s "$target" "$link" 2>/dev/null || true
+}
+
+# Cadastre (the estate inventory) is a remote HTTP MCP server, reached through
+# `cadastre-mcp` (WI-4288). It used to be registered as HTTP with a header
+# naming `${CADASTRE_HTTP_TOKEN}`, which connects only while that variable is
+# exported, and a brokered session declares it `ondemand`, so a hand-started
+# agent had no working cadastre. Now every client runs the wrapper, which
+# resolves the token at spawn, so no registration stores a token or the URL.
+# There is no built-in endpoint: a deployment opts in by setting
+# CADASTRE_MCP_URL. The server is registered only while the session can also
+# get the token (CADASTRE_HTTP_TOKEN or CADASTRE_HTTP_TOKEN_FILE in its
+# environment, or CADASTRE_HTTP_TOKEN declared `ondemand` in the agent-auth
+# manifest) and removed when it cannot.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly CADASTRE_WRAPPER="${CADASTRE_MCP_WRAPPER:-/usr/local/bin/cadastre-mcp}"
+# What Codex must forward to the wrapper: its own inputs, and the broker's.
+readonly CADASTRE_CODEX_VARS='"CADASTRE_MCP_URL", "CADASTRE_HTTP_TOKEN", "CADASTRE_HTTP_TOKEN_FILE", "VOGT_ENGINE_BROKER_URL", "VOGT_ENGINE_URL", "VOGT_ENGINE_BROKER_TOKEN_FILE", "VOGT_SESSION_TOKEN_FILE", "VOGT_ENGINE_EXTRA_CA_FILE", "ENGINE_AGENT_AUTH_EXTRA_CA_FILE"'
+# The reference the earlier HTTP registration stored; an entry carrying it is
+# ours and is replaced or removed, one an operator wrote differently is not.
+# Single quotes on purpose: the literal reference is what was stored.
+# shellcheck disable=SC2016
+readonly CADASTRE_OLD_HEADER='Bearer ${CADASTRE_HTTP_TOKEN}'
+
+cadastre_wanted() {
+    [[ -n "${CADASTRE_MCP_URL:-}" ]] || return 1
+    [[ -n "${CADASTRE_HTTP_TOKEN:-}" || -n "${CADASTRE_HTTP_TOKEN_FILE:-}" ]] && return 0
+    [[ " ${AGENT_AUTH_ONDEMAND:-} " == *" CADASTRE_HTTP_TOKEN "* ]]
+}
+
+# Whether ~/.claude.json holds an entry this script wrote: the wrapper, or the
+# earlier HTTP registration (its token reference as the header).
+cadastre_claude_ours() {
+    local config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+    command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
+    jq -e --arg w "$CADASTRE_WRAPPER" --arg h "$CADASTRE_OLD_HEADER" '
+        .mcpServers.cadastre? as $s
+        | $s != null and ($s.command? == $w or $s.headers.Authorization? == $h)' \
+        "$config" >/dev/null 2>&1
+}
+
+install_cadastre() {
+    local wanted=no config_dir
+    cadastre_wanted && wanted=yes
+    if command -v codex >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            readonly_codex_write "${CODEX_HOME:-$HOME/.codex}/config.toml" cadastre "" \
+                "$CADASTRE_CODEX_VARS" "$CADASTRE_WRAPPER" \
+                || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
+        elif codex mcp get cadastre 2>/dev/null \
+            | grep -qE "$CADASTRE_WRAPPER|CADASTRE_HTTP_TOKEN"; then
+            codex mcp remove cadastre >/dev/null 2>&1 || true
+        fi
+    fi
+    if command -v claude >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            if ! claude_runs cadastre "$CADASTRE_WRAPPER"; then
+                # A stale entry (the HTTP form, another URL) is replaced.
+                claude mcp remove --scope user cadastre >/dev/null 2>&1 || true
+                claude mcp add --scope user cadastre -- "$CADASTRE_WRAPPER" >/dev/null \
+                    || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
+            fi
+        elif ! claude_lacks cadastre && cadastre_claude_ours; then
+            claude mcp remove --scope user cadastre >/dev/null 2>&1 || true
+        fi
+    fi
+    # opencode has no `mcp remove` (see readonly_opencode): an unwanted entry
+    # stays, and without a URL or token the wrapper refuses to start.
+    if command -v opencode >/dev/null 2>&1 && [[ "$wanted" == yes ]]; then
+        config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+        optional_dir "$config_dir" "opencode config directory" || return 0
+        optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+            "opencode data directory" || return 0
+        if grep -qsF "\"cadastre\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+            && grep -qsF "$CADASTRE_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
+            return 0
+        fi
+        opencode mcp add cadastre -- "$CADASTRE_WRAPPER" >/dev/null \
+            || printf 'mcp-bootstrap: opencode registration of cadastre failed\n' >&2
+    fi
+    return 0
+}
+
+# A second, remote Vogt (WI-4289): a dev session reaches prod as `vogt-prod`,
+# with a token scoped for that. Registered only while VOGT_PROD_MCP_URL is set
+# and the session can get the token — VOGT_PROD_TOKEN or VOGT_PROD_TOKEN_FILE
+# in its environment, or VOGT_PROD_TOKEN declared `ondemand` in the agent-auth
+# manifest (AGENT_AUTH_ONDEMAND), which is the shipped shape — and removed when
+# it cannot. Every client runs `vogt-prod-mcp`, which resolves the token at
+# spawn, so no registration stores a token or the URL; an `ondemand` token is
+# never in the environment at launch, so a header naming a variable (as for
+# cadastre) would never connect.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly VOGT_PROD_WRAPPER="${VOGT_PROD_MCP_WRAPPER:-/usr/local/bin/vogt-prod-mcp}"
+# What Codex must forward to the wrapper: its own inputs, and the broker's.
+readonly VOGT_PROD_CODEX_VARS='"VOGT_PROD_MCP_URL", "VOGT_PROD_TOKEN", "VOGT_PROD_TOKEN_FILE", "VOGT_ENGINE_BROKER_URL", "VOGT_ENGINE_URL", "VOGT_ENGINE_BROKER_TOKEN_FILE", "VOGT_SESSION_TOKEN_FILE", "VOGT_ENGINE_EXTRA_CA_FILE", "ENGINE_AGENT_AUTH_EXTRA_CA_FILE"'
+
+vogt_prod_wanted() {
+    [[ -n "${VOGT_PROD_MCP_URL:-}" ]] || return 1
+    [[ -n "${VOGT_PROD_TOKEN:-}" || -n "${VOGT_PROD_TOKEN_FILE:-}" ]] && return 0
+    [[ " ${AGENT_AUTH_ONDEMAND:-} " == *" VOGT_PROD_TOKEN "* ]]
+}
+
+install_vogt_prod() {
+    local wanted=no config_dir
+    vogt_prod_wanted && wanted=yes
+    if command -v codex >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            readonly_codex_write "${CODEX_HOME:-$HOME/.codex}/config.toml" vogt-prod "" \
+                "$VOGT_PROD_CODEX_VARS" "$VOGT_PROD_WRAPPER" \
+                || printf 'mcp-bootstrap: codex registration of vogt-prod failed\n' >&2
+        elif codex mcp get vogt-prod 2>/dev/null | grep -qF "$VOGT_PROD_WRAPPER"; then
+            codex mcp remove vogt-prod >/dev/null 2>&1 || true
+        fi
+    fi
+    if command -v claude >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            if ! claude_runs vogt-prod "$VOGT_PROD_WRAPPER"; then
+                claude mcp remove --scope user vogt-prod >/dev/null 2>&1 || true
+                claude mcp add --scope user vogt-prod -- "$VOGT_PROD_WRAPPER" >/dev/null \
+                    || printf 'mcp-bootstrap: claude registration of vogt-prod failed\n' >&2
+            fi
+        elif ! claude_lacks vogt-prod \
+            && claude mcp get vogt-prod 2>/dev/null | grep -qF "$VOGT_PROD_WRAPPER"; then
+            claude mcp remove --scope user vogt-prod >/dev/null 2>&1 || true
+        fi
+    fi
+    # opencode has no `mcp remove` (see readonly_opencode): an unwanted entry
+    # stays, and without a URL or token the wrapper refuses to start.
+    if command -v opencode >/dev/null 2>&1 && [[ "$wanted" == yes ]]; then
+        config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+        optional_dir "$config_dir" "opencode config directory" || return 0
+        optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+            "opencode data directory" || return 0
+        if grep -qsF "\"vogt-prod\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+            && grep -qsF "$VOGT_PROD_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
+            return 0
+        fi
+        opencode mcp add vogt-prod -- "$VOGT_PROD_WRAPPER" >/dev/null \
+            || printf 'mcp-bootstrap: opencode registration of vogt-prod failed\n' >&2
+    fi
+    return 0
+}
+
+# crw, the estate's web scrape and search service (WI-2742): one streamable
+# HTTP server at the Node B tailnet address (ops personal/crw). It needs no
+# token, so the registration is a URL only. VOGT_CRW_MCP_URL moves it, and an
+# empty value removes an entry this script wrote. Each CLI is asked only when
+# the stored URL differs, so a session launch costs one jq or python read.
+# WI-2745: the URL this script last wrote is kept in a marker file beside each
+# CLI's config; an entry with any other URL (one added by hand) is left alone.
+# An unmarked entry at the default URL counts as ours (written before markers).
+CRW_DEFAULT_URL="http://100.92.54.45:18190/mcp"
+CRW_MCP_URL="${VOGT_CRW_MCP_URL-$CRW_DEFAULT_URL}"
+
+# crw_action CURRENT MARKER: CURRENT is the crw URL now in the CLI's
+# config ("" if none). Prints "add", "replace", "remove" or nothing.
+crw_action() {
+    local current="$1" marker="$2" url="$CRW_MCP_URL" owned=""
+    if [[ -n "$current" ]]; then
+        if [[ -f "$marker" ]]; then
+            [[ "$(cat "$marker")" == "$current" ]] && owned=1
+        elif [[ "$current" == "$CRW_DEFAULT_URL" ]]; then
+            owned=1
+        fi
+    fi
+    if [[ -z "$url" ]]; then
+        [[ -n "$owned" ]] && echo remove
+    elif [[ -z "$current" ]]; then
+        echo add
+    elif [[ "$current" != "$url" ]]; then
+        if [[ -n "$owned" ]]; then
+            echo replace
+        else
+            printf 'mcp-bootstrap: crw entry at %s was not written by Vogt; left alone\n' "$current" >&2
+        fi
+    fi
+    return 0
+}
+
+install_crw_server() {
+    local url="$CRW_MCP_URL" config marker current action
+    if command -v claude >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+        marker="${CLAUDE_CONFIG_DIR:-$HOME}/.vogt-crw-url"
+        current="$(jq -r '.mcpServers.crw.url // empty' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && claude mcp remove --scope user crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if claude mcp add --scope user --transport http crw "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: claude registration of crw failed\n' >&2
+            fi
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+        marker="${CODEX_HOME:-$HOME/.codex}/vogt-crw-url"
+        # Read [mcp_servers.crw].url itself, not a url line anywhere.
+        current="$(python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        url = tomllib.load(fh).get("mcp_servers", {}).get("crw", {}).get("url", "")
+except (OSError, ValueError, AttributeError):
+    url = ""
+print(url if isinstance(url, str) else "")
+' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && codex mcp remove crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if codex mcp add crw --url "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: codex registration of crw failed\n' >&2
+            fi
+        fi
+    fi
+    return 0
+}
+
+# Vogt registrations are best-effort: a failure here must not cost an agent its
+# git/gh credentials.
+optional_step "Vogt bridge" install_vogt_bridge
+optional_step "Codex Vogt registration" install_vogt_codex
+optional_step "Claude Vogt registration" install_vogt_claude
+optional_step "opencode Vogt registration" install_vogt_opencode
+optional_step "cadastre registration" install_cadastre
+optional_step "vogt-prod registration" install_vogt_prod
+if command -v codex >/dev/null 2>&1; then
+    codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2
+    codex_auto_compact "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex auto-compact limit\n' >&2
+    codex_litellm_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
+    codex_driven_session "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
+fi
+install_readonly_servers
+install_crw_server
+
+# stderr, like every other message in this script, because of who calls it.
+#
+# `vogt-agent-auth run` invokes this bootstrap on every launch, and one of
+# the things it launches is a stdio MCP server — `vogt-mcp`. For a
+# stdio MCP server, stdout *is* the transport, so a line here is not a banner:
+# it is the first frame of the protocol, and it does not parse. `tests/test_bridge.py`
+# already forbids this of the bridge — "a diagnostic on stdout corrupts framing
+# and looks like a client bug" — and the bridge obeys it. The launcher above it
+# did not, so the rule held in the one place that was tested and broke in the
+# layer that wraps it.
+#
+# Everything an operator wants to see is still shown: an interactive shell
+# prints stderr too. The only reader that notices the difference is the one
+# that must.
+printf "mcp-bootstrap: Vogt MCP client registrations written; endpoint was not probed — run \`vogt-agent-auth check\` for that\\n" >&2

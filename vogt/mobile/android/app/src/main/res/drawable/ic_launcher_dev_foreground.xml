@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dev launcher foreground: the same V glyph as the shipped icon, inked
+     dark on the amber background, with a "DEV" ribbon across the bottom
+     corner drawn as paths (VectorDrawable has no text). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportHeight="108"
+    android:viewportWidth="108">
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M29,32h15l10,32 10,-32h15l-18,46h-14z" />
+    <path
+        android:pathData="M30,26h48"
+        android:strokeColor="#FDE68A"
+        android:strokeLineCap="round"
+        android:strokeWidth="5" />
+    <!-- ribbon -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M60,90 L108,42 L108,58 L76,90 Z" />
+    <!-- D E V, stroked letters on the ribbon (rotated 45° diagonal baseline) -->
+    <group android:rotation="-45" android:pivotX="88" android:pivotY="70">
+        <path
+            android:pathData="M74,66 v8 h3 a4,4 0 0 0 0,-8 z"
+            android:strokeColor="#FDE68A"
+            android:strokeWidth="1.6"
+            android:fillColor="#00000000" />
+        <path
+            android:pathData="M84,66 h-4 v8 h4 M80,70 h3"
+            android:strokeColor="#FDE68A"
+            android:strokeWidth="1.6"
+            android:fillColor="#00000000" />
+        <path
+            android:pathData="M88,66 l3,8 l3,-8"
+            android:strokeColor="#FDE68A"
+            android:strokeWidth="1.6"
+            android:fillColor="#00000000" />
+    </group>
+</vector>

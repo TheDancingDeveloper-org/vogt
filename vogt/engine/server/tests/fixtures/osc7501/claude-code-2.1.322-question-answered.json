@@ -1,0 +1,17 @@
+{
+ "agent": "claude-code",
+ "version": "2.1.322",
+ "scenario": "question-answered",
+ "term": "xterm-256color unless named",
+ "note": "OSC and BEL sequences only, in order; screen frames omitted; cwd redacted",
+ "sequences": [
+  "\u001b]0;✳ Claude Code\u0007",
+  "\u001b]7501;?\u0007",
+  "\u001b]7501;state=idle:app=claude-code\u0007",
+  "\u001b]0;Claude Code\u0007",
+  "\u001b]7501;state=working:app=claude-code\u0007",
+  "\u001b]0;AskUserQuestion red or blue preference\u0007",
+  "\u001b]7501;state=blocked:app=claude-code:kind=question:msg=YW5zd2VyOiBEbyB5b3UgcHJlZmVyIHJlZCBvciBibHVlPyAoUmVkIMK3IEJsdWUp\u0007",
+  "\u001b]7501;state=idle:app=claude-code\u0007"
+ ]
+}

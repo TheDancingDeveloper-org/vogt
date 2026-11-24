@@ -1,0 +1,96 @@
+"""Shipped migrations are byte-frozen once released.
+
+The migrator records `sha256(sql.strip())` for every applied migration and
+refuses to boot if an applied migration's file no longer matches (see
+``migrator.py``). So editing a *shipped* migration — even a comment — silently
+breaks every existing database on its next deploy.
+
+This test freezes the checksum of every shipped migration against a recorded
+golden value. Adding a new migration means adding its id + checksum here in the
+same change. A failure means an already-shipped migration was edited: revert the
+edit and add a new forward migration instead. Do not "fix" this test by pasting
+the new checksum for an existing id.
+
+Backstory: the 2026-09 history reset scrubbed citation comments inside applied
+migration SQL, which changed their checksums and crash-looped the engine on
+deploy. This guard exists so that cannot recur silently.
+"""
+
+from __future__ import annotations
+
+from vogt.storage.sqlite import declared, observed
+from vogt.storage.sqlite.migrator import checksum_of, load_migrations
+
+# id (relative to migrations/) -> sha256(sql.strip()). Frozen at release.
+FROZEN: dict[str, str] = {
+    "declared/0001_foundation": "83cf77f4abe04e89c2efa22271c6d9275532f1dd37a270b7667226b3748ae643",
+    "declared/0002_work": "f690b73e4b9523cd85b818ac11c6fecf086c020683324dccbc03ec3d7b59627d",
+    "declared/0003_observed_first": "9032649fc02951fe5d6340a6f9576a45b8d7197057990c68dca834a1d26f48b8",
+    "declared/0004_drift": "cc588f67774949d31caf0305200e557cc666617b8f5a2469f958f511944ee3f4",
+    "declared/0005_tokens": "0e2adf0935fc90a6810710297ab3490edb430b47d9d169a2166ae189c24223b2",
+    "declared/0006_writeback": "37b95c74c33d9d7c5ee649ab72b265b4de517b41a40cb3a2c768099f210b0f58",
+    "declared/0007_sessions": "47c82ee427931ca7c0a3a8d047298ffe5c2b2ad49ff06f83b00acf59306a1ff6",
+    "declared/0008_superseded_drift": "f533369dd3625830341933caac68f4611a02d0e4055b9d37a62db9c59f731ce3",
+    "declared/0009_inbox_triage": "b0ca1559346b05c6ef818b3b65c2ae798f05c755c7a0dd326c73227da770c226",
+    "declared/0010_session_model": "de3f70faf7ccb5fd276455a9a56eb7a731c8334fb6964ea6d5eb2407dbcb03f5",
+    "declared/0011_contract_adoption": "7b4ab541ce8b97e31f1871373c6400e7a6390bdc70356fe703f3aa5e29211582",
+    "declared/0012_forge_accounts": "c819361c246e6c76035ed27c1a296d723235259c449a2ee2ce192163b8cb8a3a",
+    "declared/0013_upstream_truth": "fa8e380cd0761fe49bf3a46fd7e9305799fe8f142fdc331c71d2a0836fa00c3f",
+    "declared/0014_native_migration": "2fef3fae64abd522ef65b21eef63f5a93d2b44ded81e5836da1288639a59a70d",
+    "declared/0015_work_overlay_branches": "6f60bd5cae2d90f79cfb72228c88b21927958bdeedc7f00da59835c3e18a928c",
+    "declared/0016_perf_indexes": "e9d6f101a8d95929b51b6dd9a4d1ccc0e3a732e49fd605c60de3ee849be7a113",
+    "declared/0017_password_credentials": "3131bbedaed1c58d3997598f18e8f30d103ec6f1447d38dcaa2a2846f1b7d8f8",
+    "declared/0018_actor_preferences": "a04732a0b920af03fc8731b513260caf81d25216533efb8c8eac030185371c00",
+    "declared/0019_session_grants": "2c307b06be247b5b5739230750785d9209dee953a22da0354952ebe1cf45811d",
+    "declared/0020_install_latch": "e5fd2b7bd062d50c9d21a923df3176e9e5b69e9fb06b0dd6bf75b295d694b761",
+    "declared/0021_agent_policy": "9f11063cfd66c2940b21819453fa18f16123b56f59ce77f2bad74d50523d5127",
+    "declared/0022_comment_kind": "1a86e121ab2879671fd44ee5a9276e05d4af19bb4b98e71e3426634958be7078",
+    "declared/0023_decisions": "8fb4506bf7517137f5e20b26525268bda7af4bcd45057731547564d5428f615e",
+    "declared/0024_session_started_by": "806ade321a5da9c91bbbbff49927587f48cb214cadca672c1b5a705d60662cf9",
+    "declared/0025_charters": "39c513695672864f65465500b0db7d9ecd09728be5bb251bd805cfe5c977ab69",
+    "declared/0026_watches": "73ea5a941f794756676cfc84313cbaf519834ea587fc1a738b4aeb59af61e6df",
+    "declared/0027_session_reports": "cd0c625480c5ffa4d0b07287e8e8ab19e71f72a27ab5f6e56d21d1fee0f8d01a",
+    "declared/0028_session_cold_wake": "8a6b44c9d25f06e23605b47f667d11b312511b37ba25759a040f95cb985b4a1a",
+    "declared/0029_comment_verdict": "09c5df020a9d1d8b679a01bbb29eb634e505f3447542cd10ab3e82afce49e26e",
+    "declared/0030_project_mcp_extra": "100c0453a19af8c40a1994fcef12924c07de003a32abb37531ec5bdf33992ac6",
+    "declared/0031_project_default_branch": "f03c87d4d0e7c0751d98d367201f006412b3667a976c2a4b99d8478e1fdcac59",
+    "observed/0001_foundation": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
+    "observed/0002_evidence": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
+    "observed/0003_inherited_dep_refs": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
+    "observed/0004_forge_sync": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
+    "observed/0005_perf_indexes": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
+    "observed/0006_agent_activity": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+    "observed/0007_coverage_index": "4439cea33143634769fbf8f3fad8719decc9e2e2553e6f8ca711844fe4f4a8a3",
+    "observed/0008_latest_observed_order": "3f17aa0db3b726fd4d098079a2247c71fa8c43be1058f7e9b24efbef3403c18d",
+}
+
+
+def _live_checksums() -> dict[str, str]:
+    live: dict[str, str] = {}
+    for name, directory in (
+        ("declared", declared.MIGRATIONS_DIR),
+        ("observed", observed.MIGRATIONS_DIR),
+    ):
+        for migration in load_migrations(directory):
+            live[f"{name}/{migration.id}"] = checksum_of(migration.sql)
+    return live
+
+
+def test_shipped_migrations_are_frozen() -> None:
+    live = _live_checksums()
+
+    added = sorted(set(live) - set(FROZEN))
+    removed = sorted(set(FROZEN) - set(live))
+    changed = sorted(mid for mid in set(live) & set(FROZEN) if live[mid] != FROZEN[mid])
+
+    assert not changed, (
+        "A shipped migration was edited after release, which breaks every "
+        "existing database on deploy (the migrator verifies checksums and is "
+        "forward-only). Revert the edit and add a new forward migration "
+        f"instead. Edited: {changed}"
+    )
+    assert not removed, f"A shipped migration disappeared from the tree: {removed}"
+    assert not added, (
+        "A new migration was added without freezing its checksum. Add it to "
+        f"FROZEN in this test in the same change: {added}"
+    )
