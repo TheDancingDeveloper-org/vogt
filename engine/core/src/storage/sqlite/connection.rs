@@ -433,9 +433,69 @@ pub fn close_pooled(data_dir: &Path) {
     }
 }
 
+/// Fold the write-ahead log of every pooled database back into its file and
+/// truncate it (WI-4638). Each pass takes the pool's single writer in turn, so
+/// it queues behind a running write instead of racing it; readers are never
+/// blocked (SQLite waits only for readers still on old frames, bounded by the
+/// busy timeout). Returns the files it checkpointed and the ones that failed.
+pub fn checkpoint_all() -> (usize, Vec<(PathBuf, String)>) {
+    let pools: Vec<Arc<ConnPool>> = {
+        let registry = pool_registry().lock().unwrap_or_else(|e| e.into_inner());
+        registry.values().filter_map(Weak::upgrade).collect()
+    };
+    let mut done = 0;
+    let mut failed = Vec::new();
+    for pool in pools {
+        if !pool.path.exists() {
+            continue;
+        }
+        let result = pool
+            .writer(false)
+            .and_then(|conn| conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())));
+        match result {
+            Ok(()) => done += 1,
+            Err(err) => failed.push((pool.path.clone(), err.to_string())),
+        }
+    }
+    (done, failed)
+}
+
 type Registry = Mutex<HashMap<(PathBuf, String), Weak<ConnPool>>>;
 
 fn pool_registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_all_truncates_the_wal_and_keeps_the_data() {
+        let dir = std::env::temp_dir().join(format!("vogt-ckpt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ckpt.sqlite3");
+        let pool = ConnPool::for_path(&path, "normal");
+        {
+            let conn = pool.writer(true).unwrap();
+            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('a'), ('b');")
+                .unwrap();
+        }
+        let wal = dir.join("ckpt.sqlite3-wal");
+        assert!(
+            std::fs::metadata(&wal).unwrap().len() > 0,
+            "writes sit in the WAL"
+        );
+        let (done, failed) = checkpoint_all();
+        assert!(done >= 1);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
+        let reader = pool.reader().unwrap();
+        let n: i64 = reader
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
 }
