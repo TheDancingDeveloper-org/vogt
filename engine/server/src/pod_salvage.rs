@@ -903,7 +903,10 @@ pub async fn upload(
         return crate::error::ApiError::BadRequest("invalid salvage request".into())
             .into_response();
     };
-    let (_, keep, max) = crate::sessions::salvage_settings();
+    let (keep, max) = (
+        state.config.pod_salvage.keep,
+        state.config.pod_salvage.max_bytes,
+    );
     match store(
         state.sessions.state_dir(),
         session,

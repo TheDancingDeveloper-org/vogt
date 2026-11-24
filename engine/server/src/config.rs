@@ -340,6 +340,45 @@ pub struct HostPlacement {
     pub wake_transcript_check: bool,
 }
 
+/// `ENGINE_POD_SALVAGE` (on unless explicitly off) and the retention bounds
+/// `ENGINE_POD_SALVAGE_KEEP` / `ENGINE_POD_SALVAGE_MAX_BYTES`. Unparsable or
+/// zero bounds fall back to the defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PodSalvageSettings {
+    pub enabled: bool,
+    pub keep: usize,
+    pub max_bytes: u64,
+}
+
+impl Default for PodSalvageSettings {
+    fn default() -> Self {
+        Self::from_lookup(|_| None)
+    }
+}
+
+impl PodSalvageSettings {
+    pub fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        use vogt_engine_contract::salvage::{DEFAULT_KEEP_PER_SESSION, DEFAULT_MAX_SESSION_BYTES};
+        Self {
+            enabled: get("ENGINE_POD_SALVAGE")
+                .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
+                .unwrap_or(true),
+            keep: get("ENGINE_POD_SALVAGE_KEEP")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_KEEP_PER_SESSION),
+            max_bytes: get("ENGINE_POD_SALVAGE_MAX_BYTES")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_MAX_SESSION_BYTES),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -614,6 +653,10 @@ pub struct Config {
     /// Public URL used by pod sessions to reach the engine. Local sessions
     /// deliberately continue to use the loopback URL.
     pub agent_auth_public_url: Option<String>,
+    /// The pod backend settings (`ENGINE_POD_*`), parsed once at load.
+    pub pod: crate::pod_backend::PodConfig,
+    /// Pod salvage switch and retention bounds, parsed once at load.
+    pub pod_salvage: PodSalvageSettings,
     /// Optional Cadastre MCP endpoint for pod sessions. Unset means no
     /// Cadastre entry is handed to a pod (the tailnet default is unreachable).
     pub cadastre_mcp_url: Option<String>,
@@ -1407,6 +1450,8 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_PUBLIC_URL").ok())
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty()),
+        pod: Default::default(),
+        pod_salvage: PodSalvageSettings::from_env(),
         agent_auth_public_url: validate_https_origin(
             "ENGINE_AGENT_AUTH_PUBLIC_URL",
             from_file
@@ -1535,6 +1580,10 @@ pub fn load(
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from),
     };
+    // Parsed once, here: a bad `ENGINE_POD_*` value fails engine start, not the
+    // first pod spawn.
+    config.pod = crate::pod_backend::PodConfig::from_env(config.agent_auth_public_url.clone())
+        .map_err(|e| ApiError::Config(format!("pod settings: {e}")))?;
     // Every file API is confined to `workspace_root`; a root of `/` or `$HOME`
     // would quietly put the engine's state and every credential in the home
     // directory behind it. Fail the start instead.
@@ -2529,6 +2578,25 @@ fn codex_home_for_transcript_root(root: &str, home: Option<&Path>) -> Option<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pod_salvage_settings_keep_their_names_defaults_and_fallbacks() {
+        use vogt_engine_contract::salvage::{DEFAULT_KEEP_PER_SESSION, DEFAULT_MAX_SESSION_BYTES};
+        let d = PodSalvageSettings::from_lookup(|_| None);
+        assert!(d.enabled);
+        assert_eq!(d.keep, DEFAULT_KEEP_PER_SESSION);
+        assert_eq!(d.max_bytes, DEFAULT_MAX_SESSION_BYTES);
+        let get = |name: &str| match name {
+            "ENGINE_POD_SALVAGE" => Some(" off ".to_string()),
+            "ENGINE_POD_SALVAGE_KEEP" => Some("0".to_string()),
+            "ENGINE_POD_SALVAGE_MAX_BYTES" => Some(" 42 ".to_string()),
+            _ => None,
+        };
+        let s = PodSalvageSettings::from_lookup(get);
+        assert!(!s.enabled);
+        assert_eq!(s.keep, DEFAULT_KEEP_PER_SESSION);
+        assert_eq!(s.max_bytes, 42);
+    }
 
     /// WI-3865: a pod Codex write-back must land where the core reads. The
     /// live mismatch was a deployment that set `VOGT_SESSION_TRANSCRIPT_ROOTS`
