@@ -37,11 +37,7 @@ const INIT_REASON: &str = "instance bootstrap";
 const WORK_REF_PREFIX: &str = "WI-";
 
 fn sql_err(err: rusqlite::Error) -> VogtError {
-    // A constraint, lock or I/O failure is the store breaking, not the caller
-    // sending a bad request. Python surfaces sqlite3.Error as a 500. The
-    // rusqlite sentence names SQL and paths, so it stays in the log.
-    tracing::error!(error = %err, "storage query failed");
-    VogtError::MigrationError("Internal Server Error".to_string())
+    VogtError::from_sqlite(&err)
 }
 
 /// A meta counter that cannot be read as an integer is corrupt, not zero.
@@ -3941,6 +3937,37 @@ fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
 mod overlay_tests {
     use super::tests::{moment, project, store};
     use super::*;
+
+    #[test]
+    fn a_write_lock_held_past_the_busy_timeout_is_a_503() {
+        let dir = std::env::temp_dir().join(format!("vogt-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let holder = Connection::open(dir.join("declared.sqlite3")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let err = store.write().err().expect("the write lock is held");
+        assert_eq!(err.http_status(), 503);
+        assert_eq!(err.code(), "storage_busy");
+        assert!(!err.message().to_lowercase().contains("sqlite"));
+    }
+
+    #[test]
+    fn a_duplicate_unique_insert_is_a_409_without_sql_text() {
+        let dir = std::env::temp_dir().join(format!("vogt-unique-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let first = project(&store, "dup");
+        let mut second = project(&store, "dup");
+        second.id = "prj_other".into();
+        let mut txn = store.write().unwrap();
+        txn.insert_project(&first).unwrap();
+        let err = txn.insert_project(&second).unwrap_err();
+        assert_eq!(err.http_status(), 409);
+        assert!(!err.message().contains("UNIQUE"));
+        assert!(!err.message().contains("projects"));
+    }
 
     #[test]
     fn an_overlay_keeps_its_first_created_at_and_a_link_resolves_the_item() {
