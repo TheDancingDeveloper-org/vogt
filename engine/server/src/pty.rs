@@ -1820,7 +1820,10 @@ pub fn spawn_remote(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn assemble_session(
     id: Uuid,
     spec: &SessionSpec,

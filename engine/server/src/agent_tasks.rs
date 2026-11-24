@@ -3745,7 +3745,10 @@ fn spawn_workflow_tracker(
 /// that poll fails or is no longer terminal, the stream's own state is recorded
 /// with an empty conclusion. Either way the run is concluded — never left
 /// running on the strength of a stream event alone.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 async fn finalize_workflow_run(
     registry: &Arc<AgentTaskRegistry>,
     provider: &HttpWorkflowProvider,
