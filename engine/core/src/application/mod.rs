@@ -44,6 +44,7 @@ pub mod session_report;
 pub mod session_work;
 pub mod suppressions;
 pub mod taxonomy;
+pub mod typed;
 pub(crate) mod unchanged;
 pub mod upstream;
 pub mod usage;
