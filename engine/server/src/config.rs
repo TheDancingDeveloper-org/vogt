@@ -806,12 +806,8 @@ struct FileConfig {
     vogt_core_token_file: Option<String>,
 }
 
-pub fn load(
-    file: Option<&Path>,
-    cli_bind: Option<String>,
-    cli_token: Option<String>,
-) -> Result<Config> {
-    let from_file: FileConfig = match file {
+fn read_file_config(file: Option<&Path>) -> Result<FileConfig> {
+    Ok(match file {
         Some(path) => {
             let raw = std::fs::read_to_string(path)
                 .map_err(|e| ApiError::Config(format!("reading {}: {e}", path.display())))?;
@@ -819,33 +815,36 @@ pub fn load(
                 .map_err(|e| ApiError::Config(format!("parsing {}: {e}", path.display())))?
         }
         None => FileConfig::default(),
-    };
+    })
+}
 
-    // `ENGINE_BIND`/`ENGINE_TOKEN` are the env names; the CLI flag
-    // still wins. Precedence: CLI flag > env > config file.
+/// `ENGINE_BIND` is the env name; the CLI flag still wins.
+/// Precedence: CLI flag > env > config file.
+fn resolve_bind(cli_bind: Option<String>, file_bind: Option<String>) -> Result<SocketAddr> {
     let bind_str = cli_bind
         .or_else(|| {
             engine_env("ENGINE_BIND")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
         })
-        .or(from_file.bind)
+        .or(file_bind)
         .unwrap_or_else(|| "127.0.0.1:8910".to_string());
     let bind: SocketAddr = bind_str
         .parse()
         .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
+    Ok(bind)
+}
 
-    // Optional: a front door with a core behind it authenticates every
-    // bearer against the core, and needs no static token at all. One that
-    // is set is the break-glass credential, and is held to the same floor a
-    // core token is.
+/// The static break-glass token, when one is set, held to the same floor a
+/// core token is.
+fn resolve_token(cli_token: Option<String>, file_token: Option<String>) -> Result<Option<String>> {
     let token = cli_token
         .or_else(|| {
             engine_env("ENGINE_TOKEN")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
         })
-        .or(from_file.token)
+        .or(file_token)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     if let Some(value) = token.as_deref() {
@@ -855,26 +854,29 @@ pub fn load(
             ));
         }
     }
-    let token_mutating_request_limit_per_minute =
-        parse_u32_env("ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
-            .or(from_file.token_mutating_request_limit_per_minute)
-            .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
+    Ok(token)
+}
 
-    // Profiles from the file, then from the environment, then validated as one
-    // list — a container that adds OpenRouter with a variable and a file that
-    // already names it must not silently end up with two `openrouter`s, one of
-    // which is never reachable.
-    let mut assistant_profiles = from_file.assistant_profiles.unwrap_or_default();
+struct AssistantChat {
+    profiles: Vec<AssistantProfile>,
+    default_profile: Option<String>,
+    api_key: Option<String>,
+    key_present: bool,
+}
+
+fn resolve_assistant_chat(
+    file_profiles: Option<Vec<AssistantProfile>>,
+    file_default_profile: Option<String>,
+    file_api_key: Option<String>,
+) -> Result<AssistantChat> {
+    let mut assistant_profiles = file_profiles.unwrap_or_default();
     if let Some(env_profiles) = parse_assistant_profiles_env("ENGINE_ASSISTANT_PROFILES_JSON")? {
         assistant_profiles.extend(env_profiles);
     }
-    let assistant_default_profile = from_file
-        .assistant_default_profile
+    let assistant_default_profile = file_default_profile
         .or_else(|| engine_env("ENGINE_ASSISTANT_DEFAULT_PROFILE").ok())
         .filter(|s| !s.trim().is_empty());
-    let assistant_api_key = from_file
-        .assistant_api_key
-        .clone()
+    let assistant_api_key = file_api_key
         .or_else(|| engine_env("ENGINE_ASSISTANT_API_KEY").ok())
         .filter(|s| !s.trim().is_empty());
     let assistant_key_present = assistant_api_key.is_some();
@@ -883,46 +885,39 @@ pub fn load(
         &assistant_profiles,
         assistant_default_profile.as_deref(),
     )?;
+    Ok(AssistantChat {
+        profiles: assistant_profiles,
+        default_profile: assistant_default_profile,
+        api_key: assistant_api_key,
+        key_present: assistant_key_present,
+    })
+}
 
-    // Server-side speech. Read independently of the chat keys above:
-    // the base URLs and key here point at an OpenAI-compatible *audio* provider,
-    // which need not be — and under the POC's OpenRouter chat profile, is not —
-    // the same place chat runs. The base URLs are an ordered fallback list
-    // (voicemode's `VOICEMODE_*_BASE_URLS` semantics: local first, cloud next);
-    // a half is enabled when its list is non-empty. A key against an empty list
-    // is refused, matching the chat key's destination rule.
-    let assistant_stt_base_urls = parse_url_list(
-        from_file.assistant_stt_base_urls,
-        engine_env("ENGINE_ASSISTANT_STT_BASE_URLS").ok(),
-        DEFAULT_STT_BASE_URLS,
+/// One half (STT or TTS) of the server-side speech settings: the ordered
+/// base-URL fallback list and the API key, validated together.
+fn resolve_speech_half(
+    label: &str,
+    kind: &str,
+    file_base_urls: Option<Vec<String>>,
+    file_api_key: Option<String>,
+    base_urls_env: &str,
+    default_base_urls: &[&str],
+    api_key_env: &str,
+) -> Result<(Vec<String>, Option<String>)> {
+    let base_urls = parse_url_list(
+        file_base_urls,
+        engine_env(base_urls_env).ok(),
+        default_base_urls,
     );
-    let assistant_stt_api_key = from_file
-        .assistant_stt_api_key
-        .or_else(|| engine_env("ENGINE_ASSISTANT_STT_API_KEY").ok())
+    let api_key = file_api_key
+        .or_else(|| engine_env(api_key_env).ok())
         .filter(|s| !s.trim().is_empty());
-    validate_speech_half(
-        "STT",
-        "stt",
-        &assistant_stt_base_urls,
-        &assistant_stt_api_key,
-    )?;
-    let assistant_tts_base_urls = parse_url_list(
-        from_file.assistant_tts_base_urls,
-        engine_env("ENGINE_ASSISTANT_TTS_BASE_URLS").ok(),
-        DEFAULT_TTS_BASE_URLS,
-    );
-    let assistant_tts_api_key = from_file
-        .assistant_tts_api_key
-        .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_API_KEY").ok())
-        .filter(|s| !s.trim().is_empty());
-    validate_speech_half(
-        "TTS",
-        "tts",
-        &assistant_tts_base_urls,
-        &assistant_tts_api_key,
-    )?;
+    validate_speech_half(label, kind, &base_urls, &api_key)?;
+    Ok((base_urls, api_key))
+}
 
-    let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
+fn resolve_workspace_root(file_root: Option<String>) -> std::path::PathBuf {
+    let workspace_root_raw = file_root.map(std::path::PathBuf::from);
     let workspace_root_candidate = workspace_root_raw
         .or_else(|| dirs_home().map(|h| h.join("Working")))
         .or_else(|| std::env::current_dir().ok())
@@ -932,32 +927,18 @@ pub fn load(
     // current directory (canonicalised) and finally to the raw path rather than
     // aborting startup. A deployment that wants a specific root sets
     // `workspace_root` in the config file and gets that path back.
-    let workspace_root = workspace_root_candidate
+    workspace_root_candidate
         .canonicalize()
         .or_else(|_| std::env::current_dir().and_then(|d| d.canonicalize()))
-        .unwrap_or(workspace_root_candidate);
+        .unwrap_or(workspace_root_candidate)
+}
 
-    let codex_session_id = match std::env::var("VOGT_CODEX_SESSION_ID") {
-        Ok(value) => Some(parse_bool_env("VOGT_CODEX_SESSION_ID", &value)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => {
-            return Err(ApiError::Config(format!(
-                "reading VOGT_CODEX_SESSION_ID: {error}"
-            )));
-        }
-    }
-    .or(from_file.codex_session_id)
-    .unwrap_or(true);
-
-    let codex_approval_policy = crate::agent_cli::parse_codex_approval_policy(
-        engine_env("ENGINE_CODEX_APPROVAL_POLICY")
-            .ok()
-            .as_deref()
-            .or(from_file.codex_approval_policy.as_deref()),
-    )?;
-
+fn resolve_codex_transcript_root(
+    file_session_roots: Option<BTreeMap<String, String>>,
+    file_codex_root: Option<String>,
+) -> Result<Option<std::path::PathBuf>> {
     let session_roots = session_transcript_roots(
-        from_file.session_transcript_roots,
+        file_session_roots,
         engine_env("VOGT_SESSION_TRANSCRIPT_ROOTS").ok(),
     )?;
     let home = dirs_home();
@@ -966,11 +947,7 @@ pub fn load(
         .map(|path| path.trim().to_string())
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            from_file
-                .codex_transcript_root
-                .map(std::path::PathBuf::from)
-        })
+        .or_else(|| file_codex_root.map(std::path::PathBuf::from))
         .or_else(|| {
             session_roots
                 .get("codex")
@@ -978,33 +955,11 @@ pub fn load(
         })
         .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
         .or_else(|| home.map(|home| home.join(".codex")));
+    Ok(codex_transcript_root)
+}
 
-    let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
-        Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(e) => {
-            return Err(ApiError::Config(format!(
-                "reading ENGINE_AUTO_AGENT_AUTH: {e}"
-            )));
-        }
-    }
-    .or(from_file.auto_agent_auth)
-    .unwrap_or(false);
-
-    let pod_backends_enabled = match engine_env("ENGINE_POD_BACKENDS_ENABLED") {
-        Ok(v) => Some(parse_bool_env("ENGINE_POD_BACKENDS_ENABLED", &v)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(e) => {
-            return Err(ApiError::Config(format!(
-                "reading ENGINE_POD_BACKENDS_ENABLED: {e}"
-            )))
-        }
-    }
-    .or(from_file.pod_backends_enabled)
-    .unwrap_or(false);
-
-    let session_default_backend = default_templates_backend(pod_backends_enabled)?;
-    let host_placement = HostPlacement {
+fn resolve_host_placement() -> Result<HostPlacement> {
+    Ok(HostPlacement {
         allow_workers: match engine_env("ENGINE_HOST_PLACEMENT_ALLOW_WORKERS") {
             Ok(v) => parse_bool_env("ENGINE_HOST_PLACEMENT_ALLOW_WORKERS", &v)?,
             Err(std::env::VarError::NotPresent) => false,
@@ -1029,42 +984,197 @@ pub fn load(
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from),
+    })
+}
+
+fn resolve_vogt_core_token(
+    file_token_file: Option<&str>,
+    file_token: Option<String>,
+) -> Result<Option<String>> {
+    let vogt_core_token = match read_token_path(file_token_file)? {
+        Some(value) => Some(value),
+        None => match file_token {
+            Some(value) => Some(value),
+            None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
+                Some(value) => Some(value),
+                None => std::env::var("VOGT_CORE_TOKEN").ok(),
+            },
+        },
     };
+    Ok(vogt_core_token)
+}
 
-    let gui_stream_verified = match std::env::var("GUI_STREAM_VERIFIED") {
-        Ok(value) => Some(parse_bool_env("GUI_STREAM_VERIFIED", &value)?),
+fn vogt_core_url_configured(file_url: Option<&str>) -> bool {
+    file_url.map(str::trim).filter(|s| !s.is_empty()).is_some()
+        || std::env::var("VOGT_CORE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+}
+
+fn resolve_assistant_base_url(
+    file_base_url: Option<String>,
+    assistant_key_present: bool,
+) -> Result<String> {
+    Ok(
+        match file_base_url
+            .or_else(|| engine_env("ENGINE_ASSISTANT_BASE_URL").ok())
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(url) => url,
+            // The endpoint an API key is sent to is an exposure decision, so
+            // it is never guessed: a key with no stated destination is a
+            // configuration error, not a silent default provider.
+            None if assistant_key_present => {
+                return Err(ApiError::Config(
+                    "assistant_api_key is set but assistant_base_url is not; \
+                     name the OpenAI-compatible endpoint the key belongs to \
+                     (assistant_base_url / ENGINE_ASSISTANT_BASE_URL)"
+                        .into(),
+                ));
+            }
+            // Without a key the assistant is disabled and this value is
+            // never dialled; a non-routable placeholder keeps the field
+            // total without inventing a provider.
+            None => "https://assistant.invalid/v1".to_string(),
+        },
+    )
+}
+
+fn resolve_assistant_starts_per_hour(file_value: Option<u32>) -> Result<u32> {
+    let value = parse_u32_env("ENGINE_ASSISTANT_STARTS_PER_HOUR")?
+        .or(file_value)
+        .unwrap_or(3);
+    if value == 0 {
+        return Err(ApiError::Config(
+            "assistant_starts_per_hour / ENGINE_ASSISTANT_STARTS_PER_HOUR \
+                     must be a positive integer"
+                .into(),
+        ));
+    }
+    Ok(value)
+}
+
+fn file_or_env_nonblank(file: Option<String>, env: &str, default: &str) -> String {
+    file.or_else(|| engine_env(env).ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// A boolean read from the environment, else the config file's value.
+fn bool_env_over_file(name: &str, file: Option<bool>) -> Result<Option<bool>> {
+    let from_env = match engine_env(name) {
+        Ok(value) => Some(parse_bool_env(name, &value)?),
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => {
-            return Err(ApiError::Config(format!(
-                "reading GUI_STREAM_VERIFIED: {error}"
-            )));
+            return Err(ApiError::Config(format!("reading {name}: {error}")));
         }
-    }
-    .or(from_file.gui_stream_verified)
+    };
+    Ok(from_env.or(file))
+}
+
+pub fn load(
+    file: Option<&Path>,
+    cli_bind: Option<String>,
+    cli_token: Option<String>,
+) -> Result<Config> {
+    let from_file = read_file_config(file)?;
+
+    // `ENGINE_BIND`/`ENGINE_TOKEN` are the env names; the CLI flag
+    // still wins. Precedence: CLI flag > env > config file.
+    let bind = resolve_bind(cli_bind, from_file.bind)?;
+
+    // Optional: a front door with a core behind it authenticates every
+    // bearer against the core, and needs no static token at all. One that
+    // is set is the break-glass credential, and is held to the same floor a
+    // core token is.
+    let token = resolve_token(cli_token, from_file.token)?;
+    let token_mutating_request_limit_per_minute =
+        parse_u32_env("ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
+            .or(from_file.token_mutating_request_limit_per_minute)
+            .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
+
+    // Profiles from the file, then from the environment, then validated as one
+    // list — a container that adds OpenRouter with a variable and a file that
+    // already names it must not silently end up with two `openrouter`s, one of
+    // which is never reachable.
+    let AssistantChat {
+        profiles: assistant_profiles,
+        default_profile: assistant_default_profile,
+        api_key: assistant_api_key,
+        key_present: assistant_key_present,
+    } = resolve_assistant_chat(
+        from_file.assistant_profiles,
+        from_file.assistant_default_profile,
+        from_file.assistant_api_key.clone(),
+    )?;
+
+    // Server-side speech. Read independently of the chat keys above:
+    // the base URLs and key here point at an OpenAI-compatible *audio* provider,
+    // which need not be — and under the POC's OpenRouter chat profile, is not —
+    // the same place chat runs. The base URLs are an ordered fallback list
+    // (voicemode's `VOICEMODE_*_BASE_URLS` semantics: local first, cloud next);
+    // a half is enabled when its list is non-empty. A key against an empty list
+    // is refused, matching the chat key's destination rule.
+    let (assistant_stt_base_urls, assistant_stt_api_key) = resolve_speech_half(
+        "STT",
+        "stt",
+        from_file.assistant_stt_base_urls,
+        from_file.assistant_stt_api_key,
+        "ENGINE_ASSISTANT_STT_BASE_URLS",
+        DEFAULT_STT_BASE_URLS,
+        "ENGINE_ASSISTANT_STT_API_KEY",
+    )?;
+    let (assistant_tts_base_urls, assistant_tts_api_key) = resolve_speech_half(
+        "TTS",
+        "tts",
+        from_file.assistant_tts_base_urls,
+        from_file.assistant_tts_api_key,
+        "ENGINE_ASSISTANT_TTS_BASE_URLS",
+        DEFAULT_TTS_BASE_URLS,
+        "ENGINE_ASSISTANT_TTS_API_KEY",
+    )?;
+
+    let workspace_root = resolve_workspace_root(from_file.workspace_root);
+
+    let codex_session_id =
+        bool_env_over_file("VOGT_CODEX_SESSION_ID", from_file.codex_session_id)?.unwrap_or(true);
+
+    let codex_approval_policy = crate::agent_cli::parse_codex_approval_policy(
+        engine_env("ENGINE_CODEX_APPROVAL_POLICY")
+            .ok()
+            .as_deref()
+            .or(from_file.codex_approval_policy.as_deref()),
+    )?;
+
+    let codex_transcript_root = resolve_codex_transcript_root(
+        from_file.session_transcript_roots,
+        from_file.codex_transcript_root,
+    )?;
+
+    let auto_agent_auth =
+        bool_env_over_file("ENGINE_AUTO_AGENT_AUTH", from_file.auto_agent_auth)?.unwrap_or(false);
+
+    let pod_backends_enabled = bool_env_over_file(
+        "ENGINE_POD_BACKENDS_ENABLED",
+        from_file.pod_backends_enabled,
+    )?
     .unwrap_or(false);
 
-    let ws_query_token_allowed = match std::env::var("ENGINE_WS_QUERY_TOKEN") {
-        Ok(value) => Some(parse_bool_env("ENGINE_WS_QUERY_TOKEN", &value)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => {
-            return Err(ApiError::Config(format!(
-                "reading ENGINE_WS_QUERY_TOKEN: {error}"
-            )));
-        }
-    }
-    .or(from_file.ws_query_token_allowed)
-    .unwrap_or(false);
+    let session_default_backend = default_templates_backend(pod_backends_enabled)?;
+    let host_placement = resolve_host_placement()?;
 
-    let push_allow_insecure_endpoints = match std::env::var("ENGINE_PUSH_ALLOW_INSECURE") {
-        Ok(value) => Some(parse_bool_env("ENGINE_PUSH_ALLOW_INSECURE", &value)?),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => {
-            return Err(ApiError::Config(format!(
-                "reading ENGINE_PUSH_ALLOW_INSECURE: {error}"
-            )));
-        }
-    }
-    .or(from_file.push_allow_insecure_endpoints)
+    let gui_stream_verified =
+        bool_env_over_file("GUI_STREAM_VERIFIED", from_file.gui_stream_verified)?.unwrap_or(false);
+
+    let ws_query_token_allowed =
+        bool_env_over_file("ENGINE_WS_QUERY_TOKEN", from_file.ws_query_token_allowed)?
+            .unwrap_or(false);
+
+    let push_allow_insecure_endpoints = bool_env_over_file(
+        "ENGINE_PUSH_ALLOW_INSECURE",
+        from_file.push_allow_insecure_endpoints,
+    )?
     .unwrap_or(false);
 
     let agent_auth_helper = engine_env("ENGINE_AGENT_AUTH_HELPER")
@@ -1116,30 +1226,15 @@ pub fn load(
     // the deployment-wide one, which is the sort of asymmetry that is
     // discovered by an operator writing the obvious key and getting a
     // refusal that names something else.
-    let vogt_core_token = match read_token_path(from_file.vogt_core_token_file.as_deref())? {
-        Some(value) => Some(value),
-        None => match from_file.vogt_core_token {
-            Some(value) => Some(value),
-            None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
-                Some(value) => Some(value),
-                None => std::env::var("VOGT_CORE_TOKEN").ok(),
-            },
-        },
-    };
+    let vogt_core_token = resolve_vogt_core_token(
+        from_file.vogt_core_token_file.as_deref(),
+        from_file.vogt_core_token,
+    )?;
 
     // Nothing could authenticate on a door with neither a core to ask nor
     // a static token to compare: refuse to boot rather than refuse every
     // request.
-    let vogt_core_url_configured = from_file
-        .vogt_core_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || std::env::var("VOGT_CORE_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some();
+    let vogt_core_url_configured = vogt_core_url_configured(from_file.vogt_core_url.as_deref());
     if token.is_none() && !vogt_core_url_configured {
         return Err(ApiError::Config(
             "no way to authenticate anybody: set VOGT_CORE_URL (credentials are checked \
@@ -1196,11 +1291,11 @@ pub fn load(
             from_file.fcm_service_account_file.as_deref(),
             from_file.fcm_service_account_json,
         )?,
-        vapid_subject: from_file
-            .vapid_subject
-            .or_else(|| engine_env("ENGINE_VAPID_SUBJECT").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "mailto:admin@example.invalid".to_string()),
+        vapid_subject: file_or_env_nonblank(
+            from_file.vapid_subject,
+            "ENGINE_VAPID_SUBJECT",
+            "mailto:admin@example.invalid",
+        ),
         allowed_origins: parse_allowed_origins(
             from_file.allowed_origins,
             engine_env("ENGINE_ALLOWED_ORIGINS").ok(),
@@ -1230,49 +1325,21 @@ pub fn load(
         pod_backends_enabled,
         host_placement,
         assistant_api_key,
-        assistant_base_url: match from_file
-            .assistant_base_url
-            .or_else(|| engine_env("ENGINE_ASSISTANT_BASE_URL").ok())
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(url) => url,
-            // The endpoint an API key is sent to is an exposure decision, so
-            // it is never guessed: a key with no stated destination is a
-            // configuration error, not a silent default provider.
-            None if assistant_key_present => {
-                return Err(ApiError::Config(
-                    "assistant_api_key is set but assistant_base_url is not; \
-                     name the OpenAI-compatible endpoint the key belongs to \
-                     (assistant_base_url / ENGINE_ASSISTANT_BASE_URL)"
-                        .into(),
-                ));
-            }
-            // Without a key the assistant is disabled and this value is
-            // never dialled; a non-routable placeholder keeps the field
-            // total without inventing a provider.
-            None => "https://assistant.invalid/v1".to_string(),
-        },
-        assistant_model: from_file
-            .assistant_model
-            .or_else(|| engine_env("ENGINE_ASSISTANT_MODEL").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+        assistant_base_url: resolve_assistant_base_url(
+            from_file.assistant_base_url,
+            assistant_key_present,
+        )?,
+        assistant_model: file_or_env_nonblank(
+            from_file.assistant_model,
+            "ENGINE_ASSISTANT_MODEL",
+            "gpt-5.4-mini",
+        ),
         assistant_max_tool_calls: parse_u32_env("ENGINE_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),
-        assistant_starts_per_hour: {
-            let value = parse_u32_env("ENGINE_ASSISTANT_STARTS_PER_HOUR")?
-                .or(from_file.assistant_starts_per_hour)
-                .unwrap_or(3);
-            if value == 0 {
-                return Err(ApiError::Config(
-                    "assistant_starts_per_hour / ENGINE_ASSISTANT_STARTS_PER_HOUR \
-                     must be a positive integer"
-                        .into(),
-                ));
-            }
-            value
-        },
+        assistant_starts_per_hour: resolve_assistant_starts_per_hour(
+            from_file.assistant_starts_per_hour,
+        )?,
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
             .or_else(|| engine_env("ENGINE_ASSISTANT_REASONING_EFFORT").ok())
@@ -1298,11 +1365,11 @@ pub fn load(
             .unwrap_or(256 * 1024),
         assistant_stt_base_urls,
         assistant_stt_api_key,
-        assistant_stt_model: from_file
-            .assistant_stt_model
-            .or_else(|| engine_env("ENGINE_ASSISTANT_STT_MODEL").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "whisper-1".to_string()),
+        assistant_stt_model: file_or_env_nonblank(
+            from_file.assistant_stt_model,
+            "ENGINE_ASSISTANT_STT_MODEL",
+            "whisper-1",
+        ),
         assistant_stt_language: from_file
             .assistant_stt_language
             .or_else(|| engine_env("ENGINE_ASSISTANT_STT_LANGUAGE").ok())
@@ -1311,21 +1378,21 @@ pub fn load(
             .to_string(),
         assistant_tts_base_urls,
         assistant_tts_api_key,
-        assistant_tts_model: from_file
-            .assistant_tts_model
-            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_MODEL").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "tts-1-hd".to_string()),
-        assistant_tts_voice: from_file
-            .assistant_tts_voice
-            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_VOICE").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "nova".to_string()),
-        assistant_tts_format: from_file
-            .assistant_tts_format
-            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_FORMAT").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "mp3".to_string()),
+        assistant_tts_model: file_or_env_nonblank(
+            from_file.assistant_tts_model,
+            "ENGINE_ASSISTANT_TTS_MODEL",
+            "tts-1-hd",
+        ),
+        assistant_tts_voice: file_or_env_nonblank(
+            from_file.assistant_tts_voice,
+            "ENGINE_ASSISTANT_TTS_VOICE",
+            "nova",
+        ),
+        assistant_tts_format: file_or_env_nonblank(
+            from_file.assistant_tts_format,
+            "ENGINE_ASSISTANT_TTS_FORMAT",
+            "mp3",
+        ),
         assistant_speech_attempt_timeout_ms: parse_u64_env("ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS")?
             .or(from_file.assistant_speech_attempt_timeout_ms)
             .unwrap_or(30_000),
