@@ -439,6 +439,14 @@ pub fn load_all(state_dir: &Path) -> Vec<Record> {
             .map_err(|e| e.to_string())
             .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).map_err(|e| e.to_string()));
         match parsed {
+            Ok(record) if record.version != RECORD_VERSION => {
+                tracing::warn!(
+                    path = %path.display(),
+                    found = record.version,
+                    supported = RECORD_VERSION,
+                    "session record has an unsupported version (written by a newer or unknown engine); ignored and left in place"
+                );
+            }
             Ok(record)
                 if path.file_stem().and_then(|s| s.to_str())
                     == Some(record.id.to_string().as_str()) =>
@@ -732,6 +740,23 @@ mod tests {
         std::fs::write(&misfiled, serde_json::to_vec(&other).unwrap()).unwrap();
         assert!(load_all(dir.path()).is_empty());
         assert!(bad.exists() && misfiled.exists());
+    }
+
+    #[test]
+    fn a_record_with_an_unknown_version_is_refused_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let mut record = Record::new(id, "x".into(), String::new());
+        record.version = RECORD_VERSION + 1;
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join(format!("{id}.json"));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(load_all(dir.path()).is_empty());
+        assert!(path.exists(), "the record is left for a person to look at");
+        record.version = RECORD_VERSION;
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(load_all(dir.path()).len(), 1);
     }
 
     #[cfg(target_os = "linux")]

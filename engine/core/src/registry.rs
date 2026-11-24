@@ -380,12 +380,10 @@ impl Operation {
         }
     }
 
-    /// The REST route. Only an HTTP-transport operation has one, and the
-    /// registry checks that when it is built, so an HTTP adapter may rely on it.
-    pub fn http_route(&self) -> &HttpRoute {
-        self.route
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} has no HTTP route", self.name))
+    /// The REST route, or `None` for a local-only operation. Callers handle the
+    /// absence rather than panicking.
+    pub fn http_route(&self) -> Option<&HttpRoute> {
+        self.route.as_ref()
     }
 
     /// MCP tool names use underscores; everything else is identical.
@@ -1040,6 +1038,8 @@ mod tests {
     fn clone_is_local_only_and_declares_no_route() {
         let registry = registry();
         assert!(registry.get("clone").unwrap().route.is_none());
+        // Asking a local-only operation for its route is `None`, not a panic.
+        assert!(registry.get("clone").unwrap().http_route().is_none());
         assert_eq!(registry.transports_for("clone"), vec![Transport::Cli]);
     }
 
@@ -1068,7 +1068,10 @@ mod tests {
             "a duplicate route",
             Scope::Read,
             false,
-            HttpRoute::new(work_get.http_route().method, work_get.http_route().path),
+            HttpRoute::new(
+                work_get.http_route().unwrap().method,
+                work_get.http_route().unwrap().path,
+            ),
             work_get.cli.clone(),
         ));
         let error = OperationRegistry::new(operations).unwrap_err();

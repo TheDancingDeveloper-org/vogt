@@ -6114,7 +6114,15 @@ mod tests {
                         .pop()
                         .unwrap_or_else(|| b"null".to_vec())
                 } else {
-                    body.to_vec()
+                    // An engine session row always has an id; a request body
+                    // echoed back as the reply gains one when it has none.
+                    match serde_json::from_slice::<serde_json::Value>(body) {
+                        Ok(mut row) if row.is_object() && row.get("id").is_none() => {
+                            row["id"] = json!("eng-echo");
+                            serde_json::to_vec(&row).unwrap()
+                        }
+                        _ => body.to_vec(),
+                    }
                 };
                 (200, answer)
             })),
@@ -6818,7 +6826,7 @@ mod tests {
             person(),
             None,
             |_| {},
-            vec![renamed("eng-1", "after"), b"{}".to_vec()],
+            vec![renamed("eng-1", "after"), renamed("eng-1", "after")],
         );
         record_session(&built, "ses_1", "eng-1");
         let result = rename_session_op(
@@ -6857,7 +6865,7 @@ mod tests {
             person(),
             None,
             |_| {},
-            vec![live_session("eng-1"), b"{}".to_vec()],
+            vec![live_session("eng-1"), live_session("eng-1")],
         );
         let old = record_session(&built, "ses_1", "eng-1");
         let result = remove_session_op(&built, json!({"id": "ses_1", "reason": "done"})).unwrap();
@@ -6908,7 +6916,7 @@ mod tests {
             person(),
             None,
             |_| {},
-            vec![live_session("eng-9"), b"{}".to_vec()],
+            vec![live_session("eng-9"), live_session("eng-9")],
         );
         let result = remove_session_op(&built, json!({"id": "eng-9", "reason": "gone"})).unwrap();
         assert_eq!(result["session"]["linked"], false);
