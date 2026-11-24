@@ -33,18 +33,13 @@ parity goldens) and stops at the first failure with one line.
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
   `mobile/`, also read `engine/AGENTS.md`; its more specific rules supplement
   this file. `CLAUDE.md` files are pointers, not a second source of rules.
-- **Landing base is `integrate/vogt-next`, not `main`.** Workers branch from
-  `origin/integrate/vogt-next` in their own worktree, on `wi-<n>-<slug>`, and
-  land by pushing that branch only: no pull request. Oversight merges reviewed
-  branches into `integrate/vogt-next` by rebase or fast-forward. The operator
-  approves the integration pull request to `main` and every deploy. `main` is
-  rebase-only with linear history, and releases are `v*` tags on `main`. The
-  integration branch is rebased onto `origin/main`; `main` is never merged into
-  it. From now on, oversight merges into `integrate/*` by rebase or
-  fast-forward only, and no merge commit lands there. `integrate/vogt-next`
-  still carries merge commits from earlier oversight merges; WI-1315 cleans
-  that up. See
-  [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#2-workflow) for the full flow.
+- **Landing base is the graft line `rust-2`, not `main`.** Workers clone the
+  line with `g clone vogt <dir> --line rust-2` and land with `g land`: no git
+  branch and no pull request. Oversight batches the line into a pull request
+  to `main` with `graft-mirror pr-batch`. The operator approves every deploy.
+  `main` is rebase-only with linear history, and releases are `v*` tags on
+  `main`. See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#2-workflow) for the
+  full flow.
 - Run `git status --short --branch` before editing. Preserve unrelated staged,
   unstaged, and untracked work; do not fold it into the task or rewrite it to
   make checks pass.
@@ -92,8 +87,8 @@ Rust engine front door <- Solid PWA <- browser / installed PWA / Android shell
 - `tests/` — Python unit, integration, contract, migration, transport-parity,
   packaging, and deployment tests. Put a regression at the lowest layer that
   proves the behavior, then add boundary coverage where the contract changes.
-- `engine/` — its own Cargo workspace (`engine/Cargo.toml`, crates `server` and
-  `contract`). `engine/contract` holds shared wire DTOs. Read
+- `engine/` — its own Cargo workspace (`engine/Cargo.toml`, crates `server`,
+  `contract`, `core` and `session-agent`). `engine/contract` holds shared wire DTOs. Read
   `engine/AGENTS.md` and `docs/ENGINE.md` before changing it.
 - `web/` — the Solid/Vite PWA and the only GUI. Unit/component tests live in
   `web/src/__tests__/`; Playwright journeys and snapshots live in
@@ -384,6 +379,6 @@ does not need an APK rebuild.
 - Relevant surface gates pass, and the PR records the exact commands run plus
   any intentionally skipped external or live validation.
 - `git diff --check`, `git status`, and the final diff show only intended
-  changes. A worker's branch lands on `integrate/vogt-next` by push and gets
-  no pull request. A pull request to `main` (the integration pull request, or
+  changes. A worker lands on the graft line `rust-2` with `g land` and opens
+  no pull request. A pull request to `main` (the batch pull request, or
   a fork pull request) follows `.github/PULL_REQUEST_TEMPLATE.md`.
