@@ -360,6 +360,18 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
+/// Run blocking file I/O without holding a tokio worker. On a multi-thread
+/// runtime the worker is handed over with `block_in_place`; on a
+/// current-thread runtime (tests) or outside a runtime the work runs inline.
+pub fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 pub fn write(state_dir: &Path, record: &Record) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
     write_atomic(&record_path(state_dir, record.id), &json)
