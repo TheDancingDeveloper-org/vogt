@@ -3156,54 +3156,14 @@ impl SessionRegistry {
         // The child runs in the worktree now; it stays.
         cut.keep();
         let session = spawned.session;
-        session.set_conversation(conversation.clone());
-        // The posture as the wire names it, `None` for the default one.
-        let posture = spec
-            .permission_mode
-            .as_deref()
-            .map(str::trim)
-            .map(|m| m.replace('_', "-"))
-            .filter(|m| !m.is_empty() && m != "default");
-        session.set_permission_mode(posture.clone());
-        // A wake replays only the posture a person gave at the start. One the
-        // session showed on screen before it slept and does not have now is
-        // said, so the operator can grant it again (WI-2252).
-        if let Some(record) = recorded {
-            let lost = hibernation::posture_lost(
-                record.observed_permission_mode.as_deref(),
-                posture.as_deref(),
-            );
-            if lost {
-                tracing::warn!(
-                    session = %id,
-                    granted = posture.as_deref().unwrap_or("default"),
-                    "woken without the bypass it showed before hibernating; a person must grant it again"
-                );
-            }
-            session.set_posture_lost_on_resume(lost);
-        }
-        session.set_account(account.clone());
-        session.set_mcp_set(Some(mcp_set.name().to_string()));
-        session.set_autopilot(spec.autopilot);
-        session.set_policy(spec.policy.clone());
-        session.set_budget(spec.budget.clone());
-        session.set_role(spec.role);
-        session.set_work_item(spec.work_item.clone());
-        session.set_supervisor(spec.supervisor);
-        session.set_wake_on(spec.wake_on.clone());
-        session.set_workspace(workspace.clone());
-        // An oversight session is the one that brings the others back, so it
-        // must come back by itself: pinned awake, it is never hibernated by
-        // policy and is woken at boot (WI-957).
-        if spec.role == SessionRole::Oversight {
-            session.set_keep_awake(true);
-        }
-        session.set_template(
-            spec.template
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(str::to_string),
+        let posture = apply_spawned_state(
+            &session,
+            &spec,
+            recorded.map(Box::as_ref),
+            &conversation,
+            &account,
+            mcp_set,
+            &workspace,
         );
 
         // The record is written before the session is listed, so there is no
@@ -6048,6 +6008,69 @@ fn normalize_session_name(name: &str) -> Result<String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// Give a freshly spawned session the state the request, and for a wake the
+/// record, asked for. Returns the posture as the wire names it.
+fn apply_spawned_state(
+    session: &Arc<Session>,
+    spec: &SessionSpec,
+    recorded: Option<&Record>,
+    conversation: &Option<vogt_engine_contract::AgentConversation>,
+    account: &Option<String>,
+    mcp_set: crate::mcp_set::McpSet,
+    workspace: &Option<vogt_engine_contract::Workspace>,
+) -> Option<String> {
+    session.set_conversation(conversation.clone());
+    // The posture as the wire names it, `None` for the default one.
+    let posture = spec
+        .permission_mode
+        .as_deref()
+        .map(str::trim)
+        .map(|m| m.replace('_', "-"))
+        .filter(|m| !m.is_empty() && m != "default");
+    session.set_permission_mode(posture.clone());
+    // A wake replays only the posture a person gave at the start. One the
+    // session showed on screen before it slept and does not have now is
+    // said, so the operator can grant it again (WI-2252).
+    if let Some(record) = recorded {
+        let lost = hibernation::posture_lost(
+            record.observed_permission_mode.as_deref(),
+            posture.as_deref(),
+        );
+        if lost {
+            tracing::warn!(
+                session = %session.id,
+                granted = posture.as_deref().unwrap_or("default"),
+                "woken without the bypass it showed before hibernating; a person must grant it again"
+            );
+        }
+        session.set_posture_lost_on_resume(lost);
+    }
+    session.set_account(account.clone());
+    session.set_mcp_set(Some(mcp_set.name().to_string()));
+    session.set_autopilot(spec.autopilot);
+    session.set_policy(spec.policy.clone());
+    session.set_budget(spec.budget.clone());
+    session.set_role(spec.role);
+    session.set_work_item(spec.work_item.clone());
+    session.set_supervisor(spec.supervisor);
+    session.set_wake_on(spec.wake_on.clone());
+    session.set_workspace(workspace.clone());
+    // An oversight session is the one that brings the others back, so it
+    // must come back by itself: pinned awake, it is never hibernated by
+    // policy and is woken at boot (WI-957).
+    if spec.role == SessionRole::Oversight {
+        session.set_keep_awake(true);
+    }
+    session.set_template(
+        spec.template
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
+    );
+    posture
 }
 
 struct FreshRecordInputs<'a> {
