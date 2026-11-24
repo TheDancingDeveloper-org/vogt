@@ -388,7 +388,7 @@ where
         let outcome = conn.execute(
             "INSERT INTO auth_decisions (id, at, decision, reason_code, operation, scope, actor_id, token_id, identity_ref, transport, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                decision.id, to_iso(decision.at), vocab_text(decision.decision), decision.reason_code,
+                decision.id, decision.at, vocab_text(decision.decision), decision.reason_code,
                 decision.operation, decision.scope, decision.actor_id, decision.token_id,
                 decision.identity_ref, decision.transport, decision.detail,
             ],
@@ -408,11 +408,11 @@ where
         let outcome = match expires_at {
             None => conn.execute(
                 "UPDATE tokens SET last_used_at = ? WHERE id = ?",
-                params![to_iso(at), token_id],
+                params![at, token_id],
             ),
             Some(expires) => conn.execute(
                 "UPDATE tokens SET last_used_at = ?, expires_at = CASE WHEN revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > ? AND expires_at < ? THEN ? ELSE expires_at END WHERE id = ?",
-                params![to_iso(at), to_iso(at), to_iso(expires), to_iso(expires), token_id],
+                params![at, at, expires, expires, token_id],
             ),
         };
         finish_immediate(conn, outcome)
@@ -428,7 +428,7 @@ where
             .map_err(sql_err)?;
         let outcome = conn.execute(
             "DELETE FROM auth_decisions WHERE (decision = 'allow' AND at < ?) OR (decision = 'deny' AND at < ?)",
-            params![to_iso(allow_before), to_iso(deny_before)],
+            params![allow_before, deny_before],
         );
         match outcome {
             Ok(removed) => {
@@ -465,7 +465,7 @@ where
             let rendered = crate::decisions::python_json_dumps(summary, false);
             conn.execute(
                 "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at) VALUES (?, ?, ?, NULL, NULL, ?, ?)",
-                params![kind, entity_kind, entity_id, rendered, to_iso(at)],
+                params![kind, entity_kind, entity_id, rendered, at],
             )?;
             Ok(Event {
                 seq: conn.last_insert_rowid(),
@@ -743,8 +743,8 @@ impl ReadView for SqliteReadView {
             params.push(Box::new(cell.state.clone()));
             if let (Some(after), Some(after_ref)) = (&cell.after_created_at, &cell.after_ref) {
                 clause.push("(w.created_at > ? OR (w.created_at = ? AND w.ref > ?))".to_string());
-                let moment = to_iso(*after);
-                params.push(Box::new(moment.clone()));
+                let moment = *after;
+                params.push(Box::new(moment));
                 params.push(Box::new(moment));
                 params.push(Box::new(after_ref.clone()));
             }
@@ -1987,7 +1987,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     fn insert_project(&mut self, project: &Project) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO projects (id, slug, name, root_path, repo_url, default_branch, lifecycle_state, current_version, contract_version, compliance_status, compliance_checked_at, agent_policy, contract_adopted_at, write_back, link_state, exclusions, trust_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![project.id, project.slug, project.name, project.root_path, project.repo_url, project.default_branch.clone().unwrap_or_default(), project.lifecycle_state, project.current_version, project.contract_version, project.compliance_status, project.compliance_checked_at.map(to_iso), serde_json::to_string(&project.agent_policy).expect("an agent policy is plain data and serialises"), project.contract_adopted_at.map(to_iso), project.write_back, project.link_state, crate::decisions::python_json_dumps(&serde_json::json!(project.exclusions), false), project.trust_state, to_iso(project.created_at), to_iso(project.updated_at)],
+            params![project.id, project.slug, project.name, project.root_path, project.repo_url, project.default_branch.clone().unwrap_or_default(), project.lifecycle_state, project.current_version, project.contract_version, project.compliance_status, project.compliance_checked_at, serde_json::to_string(&project.agent_policy).expect("an agent policy is plain data and serialises"), project.contract_adopted_at, project.write_back, project.link_state, crate::decisions::python_json_dumps(&serde_json::json!(project.exclusions), false), project.trust_state, project.created_at, project.updated_at],
         ).map_err(sql_err)?;
         Ok(())
     }
@@ -2014,11 +2014,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         push("link_state", &update.link_state);
         if let Some(moment) = update.compliance_checked_at {
             set.push("compliance_checked_at = ?".into());
-            values.push(Box::new(to_iso(moment)));
+            values.push(Box::new(moment));
         }
         if let Some(moment) = update.contract_adopted_at {
             set.push("contract_adopted_at = ?".into());
-            values.push(Box::new(to_iso(moment)));
+            values.push(Box::new(moment));
         } else if update.clear_contract_adopted_at {
             set.push("contract_adopted_at = NULL".into());
         }
@@ -2047,7 +2047,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             return Ok(());
         }
         set.push("updated_at = ?".into());
-        values.push(Box::new(to_iso(at)));
+        values.push(Box::new(at));
         values.push(Box::new(project_id.to_string()));
         let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         self.view
@@ -2067,7 +2067,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     fn insert_work_item(&mut self, item: &WorkItem) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO work_items (id, ref, kind, title, body, state, priority, effort, project_id, initiative_id, origin, trust_state, assignee_actor_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![item.id, item.reference, item.kind, item.title, item.body, item.state, item.priority, item.effort, item.project_id, item.initiative_id, item.origin, item.trust_state, item.assignee_actor_id, to_iso(item.created_at), to_iso(item.updated_at)],
+            params![item.id, item.reference, item.kind, item.title, item.body, item.state, item.priority, item.effort, item.project_id, item.initiative_id, item.origin, item.trust_state, item.assignee_actor_id, item.created_at, item.updated_at],
         ).map_err(sql_err)?;
         for name in &item.labels {
             attach_label(&self.view.conn, &item.id, name)?;
@@ -2108,7 +2108,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         }
         if !set.is_empty() {
             set.push("updated_at = ?".into());
-            values.push(Box::new(to_iso(at)));
+            values.push(Box::new(at));
             values.push(Box::new(work_item_id.to_string()));
             let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
             self.view
@@ -2130,7 +2130,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 .conn
                 .execute(
                     "UPDATE work_items SET updated_at = ? WHERE id = ?",
-                    params![to_iso(at), work_item_id],
+                    params![at, work_item_id],
                 )
                 .map_err(sql_err)?;
         }
@@ -2143,7 +2143,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         kind: RelationKind,
         at: Moment,
     ) -> Result<(), VogtError> {
-        self.view.conn.execute("INSERT INTO work_relations (work_item_id, related_id, kind, created_at) VALUES (?, ?, ?, ?)", params![work_item_id, related_id, vocab_of(&kind), to_iso(at)]).map_err(sql_err)?;
+        self.view.conn.execute("INSERT INTO work_relations (work_item_id, related_id, kind, created_at) VALUES (?, ?, ?, ?)", params![work_item_id, related_id, vocab_of(&kind), at]).map_err(sql_err)?;
         Ok(())
     }
     fn delete_relation(
@@ -2167,17 +2167,17 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .conn
             .execute(
                 "INSERT INTO labels (id, name, color, created_at) VALUES (?, ?, ?, ?)",
-                params![label.id, label.name, label.color, to_iso(label.created_at)],
+                params![label.id, label.name, label.color, label.created_at],
             )
             .map_err(sql_err)?;
         Ok(())
     }
     fn insert_initiative(&mut self, initiative: &Initiative) -> Result<(), VogtError> {
-        self.view.conn.execute("INSERT INTO initiatives (id, slug, title, body, state, weight, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![initiative.id, initiative.slug, initiative.title, initiative.body, vocab(&initiative.state), initiative.weight, to_iso(initiative.created_at), to_iso(initiative.updated_at)]).map_err(sql_err)?;
+        self.view.conn.execute("INSERT INTO initiatives (id, slug, title, body, state, weight, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![initiative.id, initiative.slug, initiative.title, initiative.body, vocab(&initiative.state), initiative.weight, initiative.created_at, initiative.updated_at]).map_err(sql_err)?;
         Ok(())
     }
     fn update_initiative(&mut self, initiative: &Initiative) -> Result<(), VogtError> {
-        self.view.conn.execute("UPDATE initiatives SET title = ?, body = ?, state = ?, weight = ?, updated_at = ? WHERE id = ?", params![initiative.title, initiative.body, vocab(&initiative.state), initiative.weight, to_iso(initiative.updated_at), initiative.id]).map_err(sql_err)?;
+        self.view.conn.execute("UPDATE initiatives SET title = ?, body = ?, state = ?, weight = ?, updated_at = ? WHERE id = ?", params![initiative.title, initiative.body, vocab(&initiative.state), initiative.weight, initiative.updated_at, initiative.id]).map_err(sql_err)?;
         Ok(())
     }
     fn insert_comment(&mut self, comment: &Comment) -> Result<(), VogtError> {
@@ -2187,11 +2187,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .or(comment.verdict.as_ref())
             .or(comment.verification.as_ref())
             .map(|value| crate::decisions::python_json_dumps(value, false));
-        self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at), comment.kind, data]).map_err(sql_err)?;
+        self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, comment.created_at, comment.kind, data]).map_err(sql_err)?;
         Ok(())
     }
     fn insert_suppression(&mut self, suppression: &Suppression) -> Result<(), VogtError> {
-        self.view.conn.execute("INSERT INTO suppressions (id, match_kind, subject_key_or_pattern, scope_project_id, actor_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![suppression.id, vocab_of(&suppression.match_kind), suppression.subject_key_or_pattern, suppression.scope_project_id, suppression.actor_id, suppression.reason, to_iso(suppression.created_at)]).map_err(sql_err)?;
+        self.view.conn.execute("INSERT INTO suppressions (id, match_kind, subject_key_or_pattern, scope_project_id, actor_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![suppression.id, vocab_of(&suppression.match_kind), suppression.subject_key_or_pattern, suppression.scope_project_id, suppression.actor_id, suppression.reason, suppression.created_at]).map_err(sql_err)?;
         Ok(())
     }
     fn revoke_suppression(
@@ -2201,13 +2201,13 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         reason: &str,
         at: Moment,
     ) -> Result<bool, VogtError> {
-        Ok(self.view.conn.execute("UPDATE suppressions SET revoked_at = ?, revoked_by_actor_id = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL", params![to_iso(at), actor_id, reason, suppression_id]).map_err(sql_err)? > 0)
+        Ok(self.view.conn.execute("UPDATE suppressions SET revoked_at = ?, revoked_by_actor_id = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL", params![at, actor_id, reason, suppression_id]).map_err(sql_err)? > 0)
     }
     fn insert_contract_exemption(
         &mut self,
         exemption: &ContractExemption,
     ) -> Result<(), VogtError> {
-        self.view.conn.execute("INSERT INTO contract_exemptions (id, project_id, rule, target, reason, declared_by, declared_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, rule, target) DO UPDATE SET reason = excluded.reason, declared_by = excluded.declared_by, declared_at = excluded.declared_at", params![exemption.id, exemption.project_id, exemption.rule, exemption.target, exemption.reason, exemption.declared_by, to_iso(exemption.declared_at)]).map_err(sql_err)?;
+        self.view.conn.execute("INSERT INTO contract_exemptions (id, project_id, rule, target, reason, declared_by, declared_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, rule, target) DO UPDATE SET reason = excluded.reason, declared_by = excluded.declared_by, declared_at = excluded.declared_at", params![exemption.id, exemption.project_id, exemption.rule, exemption.target, exemption.reason, exemption.declared_by, exemption.declared_at]).map_err(sql_err)?;
         Ok(())
     }
     fn delete_contract_exemption(
@@ -2231,7 +2231,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             "INSERT INTO work_links (work_item_id, subject_key, origin_kind, source_url, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             params![
                 link.work_item_id, link.subject_key, link.origin_kind, link.source_url,
-                vocab_text(link.relation), to_iso(link.created_at),
+                vocab_text(link.relation), link.created_at,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2247,7 +2247,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 overlay.subject_key, overlay.project_id, overlay.rank, overlay.workflow_state,
                 overlay.priority.map(vocab_text), overlay.effort.map(vocab_text),
                 overlay.assignee_actor_id, overlay.initiative_id, branches,
-                to_iso(overlay.created_at), to_iso(overlay.updated_at),
+                overlay.created_at, overlay.updated_at,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2256,7 +2256,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         let kind = vocab_text(token.kind);
         self.view.conn.execute(
             "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![token.id, token.actor_id, token.name, token_hash, scopes, kind, to_iso(token.created_at), token.expires_at.map(to_iso)],
+            params![token.id, token.actor_id, token.name, token_hash, scopes, kind, token.created_at, token.expires_at],
         ).map_err(sql_err)?;
         // First-run install mode closes once a person holds a credential, and
         // it closes in the same transaction that gives them one.
@@ -2282,7 +2282,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                     .conn
                     .execute(
                         "UPDATE actors SET disabled = ? WHERE id = ?",
-                        params![i64::from(actor.disabled), existing.id],
+                        params![actor.disabled, existing.id],
                     )
                     .map_err(sql_err)?;
                 continue;
@@ -2339,7 +2339,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 .conn
                 .execute(
                     "UPDATE tokens SET revoked_at = ?, revoked_reason = ? WHERE id = ?",
-                    params![to_iso(at), reason, id],
+                    params![at, reason, id],
                 )
                 .map_err(sql_err)?;
             revoked += 1;
@@ -2470,7 +2470,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     ) -> Result<bool, VogtError> {
         Ok(self.view.conn.execute(
             "UPDATE tokens SET revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL",
-            params![to_iso(at), reason, token_id],
+            params![at, reason, token_id],
         ).map_err(sql_err)? > 0)
     }
     fn reinstate_token(&mut self, token_id: &str) -> Result<bool, VogtError> {
@@ -2487,7 +2487,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         scopes: &[String],
         at: Moment,
     ) -> Result<(), VogtError> {
-        let stamp = to_iso(at);
+        let stamp = at;
         let scopes = crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
         self.view.conn.execute(
             "INSERT INTO password_credentials (actor_id, username, password_hash, scopes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (actor_id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash, scopes = excluded.scopes, updated_at = excluded.updated_at",
@@ -2515,7 +2515,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         encrypted_token: &str,
         at: Moment,
     ) -> Result<(), VogtError> {
-        let stamp = to_iso(at);
+        let stamp = at;
         // Re-linking keeps the original created_at and rotates everything
         // else, including the ciphertext.
         let updated = self.view.conn.execute(
@@ -2545,7 +2545,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         self.view.conn.execute(
             "INSERT INTO writeback_actions (id, at, project_id, work_item_id, actor_id, action, subject_key, policy, outcome, reason, detail, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                record.id, to_iso(record.at), record.project_id, record.work_item_id,
+                record.id, record.at, record.project_id, record.work_item_id,
                 record.actor_id, vocab_text(record.action), record.subject_key, record.policy,
                 vocab_text(record.outcome), record.reason, record.detail, record.source_url,
             ],
@@ -2557,7 +2557,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![
                 session.id, session.engine_session_id, session.project_id, session.work_item_id,
                 session.actor_id, session.cwd, session.template, session.model, session.effort,
-                session.reason, to_iso(session.started_at), session.stopped_at.map(to_iso),
+                session.reason, session.started_at, session.stopped_at,
                 session.purpose, session.started_by_session, session.started_by_kind,
             ],
         ).map(|_| ()).map_err(sql_err)
@@ -2571,7 +2571,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .conn
             .execute(
                 "UPDATE coding_sessions SET stopped_at = ? WHERE id = ?",
-                params![to_iso(stopped_at), session_id],
+                params![stopped_at, session_id],
             )
             .map(|_| ())
             .map_err(sql_err)
@@ -2587,7 +2587,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 report.id, report.actor_id, report.engine_session_id, report.work_item_id,
-                report.kind, report.summary, data, to_iso(report.created_at),
+                report.kind, report.summary, data, report.created_at,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2598,8 +2598,8 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 decision.id, decision.asker_actor_id, decision.asker_session, decision.work_item_id,
                 decision.question, decision_options_json(decision), decision.context,
                 vocab_text(decision.state), decision_answer_json(decision),
-                decision.answered_by_actor_id, to_iso(decision.created_at),
-                decision.answered_at.map(to_iso), to_iso(decision.expires_at), decision.reason,
+                decision.answered_by_actor_id, decision.created_at,
+                decision.answered_at, decision.expires_at, decision.reason,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2608,7 +2608,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             "UPDATE decisions SET state = ?, answer_json = ?, answered_by_actor_id = ?, answered_at = ? WHERE id = ?",
             params![
                 vocab_text(decision.state), decision_answer_json(decision),
-                decision.answered_by_actor_id, decision.answered_at.map(to_iso), decision.id,
+                decision.answered_by_actor_id, decision.answered_at, decision.id,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2618,10 +2618,10 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![
                 grant.id, grant.target_engine_session_id, vocab_text(grant.kind), grant.var,
                 grant.project_id, grant.secret_name, grant.capability, vocab_text(grant.uses),
-                grant.ttl_seconds, grant.reason, grant.requested_by, to_iso(grant.requested_at),
-                vocab_text(grant.state), grant.decided_by, grant.decided_at.map(to_iso),
-                grant.decision_reason, grant.expires_at.map(to_iso), grant.revoked_by,
-                grant.revoked_at.map(to_iso),
+                grant.ttl_seconds, grant.reason, grant.requested_by, grant.requested_at,
+                vocab_text(grant.state), grant.decided_by, grant.decided_at,
+                grant.decision_reason, grant.expires_at, grant.revoked_by,
+                grant.revoked_at,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2629,9 +2629,9 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         self.view.conn.execute(
             "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, decision_reason = ?, expires_at = ?, revoked_by = ?, revoked_at = ? WHERE id = ?",
             params![
-                vocab_text(grant.state), grant.decided_by, grant.decided_at.map(to_iso),
-                grant.decision_reason, grant.expires_at.map(to_iso), grant.revoked_by,
-                grant.revoked_at.map(to_iso), grant.id,
+                vocab_text(grant.state), grant.decided_by, grant.decided_at,
+                grant.decision_reason, grant.expires_at, grant.revoked_by,
+                grant.revoked_at, grant.id,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2658,7 +2658,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .conn
             .execute(
                 "UPDATE coding_sessions SET cold_wake_opt_out = ? WHERE id = ?",
-                params![i64::from(opt_out), session_id],
+                params![opt_out, session_id],
             )
             .map(|_| ())
             .map_err(sql_err)
@@ -2673,7 +2673,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .conn
             .execute(
                 "UPDATE coding_sessions SET stopped_at = ? WHERE id = ? AND stopped_at IS NULL",
-                params![to_iso(stopped_at), session_id],
+                params![stopped_at, session_id],
             )
             .map(|_| ())
             .map_err(sql_err)
@@ -2686,7 +2686,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 proposal.project_id, proposal.summary, proposal.evidence_observation_id,
                 crate::decisions::python_json_dumps(&proposal.evidence_snapshot, false),
                 crate::decisions::python_json_dumps(&proposal.proposed_change, false),
-                vocab_text(proposal.status), to_iso(proposal.opened_at),
+                vocab_text(proposal.status), proposal.opened_at,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2694,8 +2694,8 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         self.view.conn.execute(
             "INSERT INTO inbox_triage (entry_key, state, snooze_until, actor_id, decided_at, occurrence_snapshot) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entry_key) DO UPDATE SET state = excluded.state, snooze_until = excluded.snooze_until, actor_id = excluded.actor_id, decided_at = excluded.decided_at, occurrence_snapshot = excluded.occurrence_snapshot",
             params![
-                triage.entry_key, vocab_text(triage.state), triage.snooze_until.map(to_iso),
-                triage.actor_id, to_iso(triage.decided_at),
+                triage.entry_key, vocab_text(triage.state), triage.snooze_until,
+                triage.actor_id, triage.decided_at,
                 crate::decisions::python_json_dumps(&triage.occurrence_snapshot, true),
             ],
         ).map(|_| ()).map_err(sql_err)
@@ -2704,7 +2704,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         let values = params![
             crate::decisions::python_json_dumps(&preference.value, true),
             preference.version,
-            to_iso(preference.updated_at),
+            preference.updated_at,
             preference.actor_id,
             preference.key,
         ];
@@ -2725,7 +2725,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             "INSERT INTO charters (scope_kind, scope_id, version, body, author_actor_id, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![
                 vocab_text(charter.scope_kind), charter.scope_id, charter.version, charter.body,
-                charter.author_actor_id, to_iso(charter.created_at), charter.reason,
+                charter.author_actor_id, charter.created_at, charter.reason,
             ],
         ).map(|_| ()).map_err(sql_err)
     }
@@ -2735,8 +2735,8 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![
                 watch.id, watch.owner_actor_id, watch.target_session, watch.kind,
                 crate::decisions::python_json_dumps(&watch.trigger, false), watch.note,
-                vocab_text(watch.state), to_iso(watch.created_at), to_iso(watch.expires_at),
-                watch.fired_at.map(to_iso),
+                vocab_text(watch.state), watch.created_at, watch.expires_at,
+                watch.fired_at,
                 watch.outcome.as_ref().map(|value| crate::decisions::python_json_dumps(value, false)),
                 watch.attempts, watch.last_error, watch.reason,
             ],
@@ -2748,8 +2748,8 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![
                 watch.owner_actor_id, watch.target_session, watch.kind,
                 crate::decisions::python_json_dumps(&watch.trigger, false), watch.note,
-                vocab_text(watch.state), to_iso(watch.created_at), to_iso(watch.expires_at),
-                watch.fired_at.map(to_iso),
+                vocab_text(watch.state), watch.created_at, watch.expires_at,
+                watch.fired_at,
                 watch.outcome.as_ref().map(|value| crate::decisions::python_json_dumps(value, false)),
                 watch.attempts, watch.last_error, watch.reason, watch.id,
             ],
@@ -2764,7 +2764,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         // Only open proposals: a resolved one is history.
         Ok(self.view.conn.execute(
             "UPDATE drift_proposals SET superseded_at = ?, superseded_detail = ? WHERE id = ? AND status = 'open'",
-            params![at.map(to_iso), detail, proposal_id],
+            params![at, detail, proposal_id],
         ).map_err(sql_err)? > 0)
     }
     fn resolve_drift(
@@ -2777,7 +2777,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     ) -> Result<bool, VogtError> {
         Ok(self.view.conn.execute(
             "UPDATE drift_proposals SET status = ?, resolved_by_actor_id = ?, resolution_reason = ?, resolved_at = ? WHERE id = ? AND status = 'open'",
-            params![status, actor_id, reason, to_iso(at), proposal_id],
+            params![status, actor_id, reason, at, proposal_id],
         ).map_err(sql_err)? > 0)
     }
     fn upsert_workflow(&mut self, workflow: &Workflow, at: Moment) -> Result<(), VogtError> {
@@ -2787,7 +2787,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .conn
             .execute(
                 "UPDATE workflow_defs SET definition = ?, updated_at = ? WHERE kind = ?",
-                params![definition, to_iso(at), workflow.kind],
+                params![definition, at, workflow.kind],
             )
             .map_err(sql_err)?;
         if updated == 0 {
@@ -2795,7 +2795,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 .conn
                 .execute(
                     "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?, ?, ?)",
-                    params![workflow.kind, definition, to_iso(at)],
+                    params![workflow.kind, definition, at],
                 )
                 .map_err(sql_err)?;
         }
@@ -2851,7 +2851,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         let rendered = crate::decisions::python_json_dumps(summary, false);
         self.view.conn.execute(
             "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![kind, entity_kind, entity_id, actor_id, audit_id, rendered, to_iso(at)],
+            params![kind, entity_kind, entity_id, actor_id, audit_id, rendered, at],
         ).map_err(sql_err)?;
         Ok(Event {
             seq: self.view.conn.last_insert_rowid(),
@@ -2888,7 +2888,7 @@ fn ensure_default_workflows(conn: &mut Connection, now: Moment) -> Result<(), Vo
                 let workflow = default_workflow(kind);
                 conn.execute(
                     "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?, ?, ?)",
-                    params![kind, workflow.to_definition_json(), to_iso(now)],
+                    params![kind, workflow.to_definition_json(), now],
                 )
                 .map_err(sql_err)?;
             }
@@ -2911,11 +2911,11 @@ fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), VogtError> 
     Ok(())
 }
 fn insert_actor(conn: &Connection, actor: &Actor) -> Result<(), VogtError> {
-    conn.execute("INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![actor.id, actor.kind.as_str(), actor.display_name, actor.identity_ref, i64::from(actor.disabled), to_iso(actor.created_at)]).map_err(sql_err)?;
+    conn.execute("INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![actor.id, actor.kind.as_str(), actor.display_name, actor.identity_ref, actor.disabled, actor.created_at]).map_err(sql_err)?;
     Ok(())
 }
 fn insert_audit(conn: &Connection, record: &AuditRecord) -> Result<(), VogtError> {
-    conn.execute("INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind, entity_id, reason, payload_digest, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![record.id, record.txn_id, record.revision, record.actor_id, record.operation, record.entity_kind, record.entity_id, record.reason, record.payload_digest, to_iso(record.at)]).map_err(sql_err)?;
+    conn.execute("INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind, entity_id, reason, payload_digest, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![record.id, record.txn_id, record.revision, record.actor_id, record.operation, record.entity_kind, record.entity_id, record.reason, record.payload_digest, record.at]).map_err(sql_err)?;
     Ok(())
 }
 fn count(conn: &Connection, table: &str) -> Result<i64, VogtError> {
@@ -2943,12 +2943,10 @@ fn many<T>(
     rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
 }
 fn moment(row: &Row<'_>, column: &str) -> rusqlite::Result<Moment> {
-    from_iso(&row.get::<_, String>(column)?).map_err(rusqlite::Error::InvalidColumnName)
+    row.get(column)
 }
 fn opt_moment(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<Moment>> {
-    row.get::<_, Option<String>>(column)?
-        .map(|text| from_iso(&text).map_err(rusqlite::Error::InvalidColumnName))
-        .transpose()
+    row.get(column)
 }
 fn row_actor(row: &Row<'_>) -> rusqlite::Result<Actor> {
     Ok(Actor {
@@ -3058,7 +3056,7 @@ fn vocab_of<T: serde::Serialize>(value: &T) -> String {
 fn latch_install_if_operator(conn: &Connection, at: Moment) -> Result<(), VogtError> {
     conn.execute(
         "INSERT OR IGNORE INTO install_latch (id, closed_at, reason) SELECT 1, ?, 'a person holds a credential' WHERE EXISTS (SELECT 1 FROM tokens t JOIN actors a ON a.id = t.actor_id WHERE a.kind <> 'agent') OR EXISTS (SELECT 1 FROM password_credentials)",
-        [to_iso(at)],
+        [at],
     ).map(|_| ()).map_err(sql_err)
 }
 
@@ -3318,10 +3316,9 @@ fn row_actor_preference(row: &Row<'_>) -> rusqlite::Result<ActorPreference> {
 
 /// One JSON column, parsed. A corrupt value is a conversion failure, not null.
 fn json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<serde_json::Value> {
-    let text: String = row.get(column)?;
-    serde_json::from_str(&text).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-    })
+    Ok(row
+        .get::<_, crate::core::Json<serde_json::Value>>(column)?
+        .0)
 }
 
 const TOKEN_CARRY_COLUMNS: &[&str] = &[
@@ -3618,8 +3615,8 @@ fn with_board_high_water(
     high_water: &(Moment, String),
 ) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), VogtError> {
     let (where_sql, mut params) = work_where(filter);
-    let moment = to_iso(high_water.0);
-    params.push(Box::new(moment.clone()));
+    let moment = high_water.0;
+    params.push(Box::new(moment));
     params.push(Box::new(moment));
     params.push(Box::new(high_water.1.clone()));
     Ok((
@@ -3939,11 +3936,11 @@ fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     }
     if let Some(since) = query.since {
         clauses.push("a.at >= ?".into());
-        params_box.push(Box::new(to_iso(since)));
+        params_box.push(Box::new(since));
     }
     if let Some(until) = query.until {
         clauses.push("a.at < ?".into());
-        params_box.push(Box::new(to_iso(until)));
+        params_box.push(Box::new(until));
     }
     (
         if clauses.is_empty() {
