@@ -440,7 +440,10 @@ where
 /// a hibernate that fails is retried on its own after `HIBERNATE_RETRY_AFTER`
 /// and never starts a second replacement. The audit comes last: its failure
 /// is logged and cannot orphan the replacement.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn rotate_one<C, I>(
     ctx: &AppContext<C, I>,
     row: &EngineSession,

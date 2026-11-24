@@ -4,9 +4,9 @@
 //! behaviour lands in later port chunks.
 
 mod actors;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 mod adapters;
-#[allow(dead_code)] // Consumed by the service layer (P1.10 onward).
+#[expect(dead_code, reason = "Consumed by the service layer (P1.10 onward).")]
 mod application;
 mod auth;
 mod branches;

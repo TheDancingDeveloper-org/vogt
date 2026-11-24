@@ -439,7 +439,10 @@ impl EngineClient {
 
     /// An opencode session's last `n` replies: `(conversation_id, [(text, at)])`,
     /// oldest first. `Ok(None)` on a 404.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the nested type is local and reads clearer inline than behind an alias"
+    )]
     pub fn session_replies(
         &self,
         session_id: &str,
@@ -843,7 +846,10 @@ impl EngineClient {
     /// `mode` is `rebase`, never a merge commit. The engine's refusal (moved
     /// tip, behind in fast-forward mode, forbidden text) arrives as
     /// `InvalidRequest` or `Conflict` carrying its own words.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+    )]
     pub fn land(
         &self,
         repo: &str,

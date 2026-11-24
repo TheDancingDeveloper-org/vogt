@@ -42,7 +42,7 @@ pub mod initiatives;
 pub mod lifecycle;
 pub mod notifications;
 pub mod preferences;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 pub mod sessions;
 pub mod watches;
 

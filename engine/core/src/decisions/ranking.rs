@@ -330,7 +330,13 @@ fn branch_activity_detail(seconds: Option<i64>) -> String {
     }
 }
 
-#[allow(dead_code)] // The backlog sorts with this; the ranking test asserts the order.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "The backlog sorts with this; the ranking test asserts the order."
+    )
+)]
 pub fn rank(mut scores: Vec<Score>) -> Vec<Score> {
     scores.sort_by(|left, right| {
         right
@@ -1076,7 +1082,10 @@ pub struct DriftFinding {
     pub evidence: Option<EvidenceSnapshot>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn finding(
     kind: &str,
     subject_kind: &str,
@@ -1101,7 +1110,6 @@ fn finding(
 
 /// Declared version against the newest release actually seen. A leading `v` is
 /// not a difference.
-#[allow(clippy::too_many_arguments)]
 pub fn version_mismatch(
     project_id: &str,
     project_slug: &str,
@@ -1142,7 +1150,6 @@ fn where_in(manifest: Option<&str>) -> String {
 }
 
 /// A path reference inside the project's own tree that resolves to nothing.
-#[allow(clippy::too_many_arguments)]
 pub fn broken_path_dependency(
     subject_key: &str,
     project_id: &str,
@@ -1172,7 +1179,6 @@ pub fn broken_path_dependency(
 }
 
 /// An internal-looking reference whose target is not a registered project.
-#[allow(clippy::too_many_arguments)]
 pub fn unresolved_dependency(
     subject_key: &str,
     project_id: &str,
@@ -1218,7 +1224,10 @@ fn last_observed_open(
 /// A not-planned close proposes `wont_do`, the same finished state the
 /// upstream mapping gives it, so accepting does not turn a declined item into
 /// a delivered one.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn forge_state_mismatch(
     work_item_id: &str,
     work_ref: &str,
@@ -1262,7 +1271,10 @@ pub fn forge_state_mismatch(
 
 /// A tracking-issue checkbox disagrees with the member's state. One proposal
 /// per member, so two boxes out of step stay two questions.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn initiative_checkbox_drift(
     initiative_id: &str,
     initiative_slug: &str,
@@ -1337,7 +1349,6 @@ pub fn vanished_upstream(
 }
 
 /// CI is red on the default branch while the project claims to be fine.
-#[allow(clippy::too_many_arguments)]
 pub fn ci_red_vs_healthy(
     project_id: &str,
     project_slug: &str,
@@ -1372,7 +1383,10 @@ pub fn ci_red_vs_healthy(
 
 /// A work item and the issue its own text names disagree. It proposes nothing
 /// and applies nothing.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn referenced_issue_state_mismatch(
     work_item_id: &str,
     work_ref: &str,
@@ -1409,7 +1423,6 @@ pub fn referenced_issue_state_mismatch(
 }
 
 /// One of the three automation facts is off, named so the reader knows which.
-#[allow(clippy::too_many_arguments)]
 pub fn update_automation_gap(
     project_id: &str,
     project_slug: &str,

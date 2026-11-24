@@ -89,7 +89,10 @@ pub trait Clock {
     }
 }
 
-#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
+#[expect(
+    dead_code,
+    reason = "Ported domain item; only tests use it until the service layer wires it."
+)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {

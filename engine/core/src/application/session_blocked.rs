@@ -146,7 +146,6 @@ fn escalation_of(params: &Value) -> Result<(&'static str, &'static str), VogtErr
     Ok((needs, boundary))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn set_blocked<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     id: Option<&str>,

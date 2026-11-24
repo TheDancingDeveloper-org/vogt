@@ -136,7 +136,10 @@ impl Plan {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+    )]
     fn record(
         &mut self,
         entity: &str,

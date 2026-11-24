@@ -4,7 +4,6 @@
 //! every difference is a conflict rather than a guess. The policy never
 //! resolves a difference it cannot explain.
 
-#![allow(dead_code)]
 use crate::core::Moment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

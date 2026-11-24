@@ -86,7 +86,10 @@ pub fn require_migratable(project: &Project, pending: &[WorkItem]) -> Result<(),
 /// Publish each pending item upstream and re-key it. The caller passes the
 /// population enumerated before the link, so the policy gate and the migration
 /// agree on what "pending" meant. Returns one entry per migrated item.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn migrate_open_native_items<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     project: &Project,
@@ -166,7 +169,10 @@ fn migrated_body(item: &WorkItem) -> String {
 }
 
 /// One item's local half: overlay in, native row retired, ledger written.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn commit_migration<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     project: &Project,

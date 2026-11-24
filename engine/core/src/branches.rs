@@ -3,7 +3,7 @@
 //! A branch belongs to a work item when its name carries that item's
 //! reference. Nothing here reads git or the store.
 
-#![allow(dead_code)]
+#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::sync::LazyLock;
 
 pub const DEFAULT_BRANCH_PATTERNS: [&str; 2] =

@@ -227,7 +227,10 @@ fn internal_server_error() -> Response {
 /// The one door from an async handler to blocking work (rusqlite, scrypt, the
 /// engine's blocking HTTP). Runs `work` on the blocking pool; a panic or a
 /// cancelled task becomes the plain 500 instead of unwinding the worker.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is returned unboxed so callers match on it directly"
+)]
 pub(crate) async fn blocking<T, F>(work: F) -> Result<T, Response>
 where
     T: Send + 'static,
@@ -567,7 +570,10 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     response
 }
 
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is returned unboxed so callers match on it directly"
+)]
 async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,

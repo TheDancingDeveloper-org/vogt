@@ -214,7 +214,10 @@ pub fn resolve_ids(given: Option<SequentialIds>, path: PathBuf) -> Result<HooksI
 ///
 /// `clock` and `ids` are `Some` only when the caller brought its own. `None`
 /// takes the hook environment and, failing that, the wall clock and fresh ids.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn build_context(
     config: VogtConfig,
     principal: Option<Principal>,
@@ -242,7 +245,10 @@ pub fn build_context(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn assemble(
     config: VogtConfig,
     principal: Option<Principal>,
@@ -303,7 +309,10 @@ fn assemble(
 
 // The signature mirrors `build_context` in context.py; splitting it would
 // hide which argument is which.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn context_with<C, I>(
     config: VogtConfig,
     principal: Option<Principal>,
@@ -351,7 +360,10 @@ where
 
 // The signature mirrors `build_context` in context.py; splitting it would
 // hide which argument is which.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn context_from<C, I>(
     config: VogtConfig,
     principal: Option<Principal>,

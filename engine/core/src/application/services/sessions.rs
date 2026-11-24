@@ -1751,7 +1751,10 @@ where
 ///
 /// Its own operation, so the Inbox and `audit_list` find every override
 /// without reading start payloads; the override text is its reason.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn audit_dispatch_override(
     txn: &mut impl WriteTxn,
     actor: &Actor,
@@ -5950,13 +5953,12 @@ pub(super) fn person_required(kind: ActorKind, action: &str) -> Result<(), VogtE
 }
 
 /// Silence the unused-import warning for the sweep entry type alias path.
-#[allow(dead_code)]
 fn _sweep_entry(entry: &EngineSweepEntry) -> &EngineSession {
     &entry.session
 }
 
 /// A started session's clock read, so a test can pin it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 fn started_at(session: &CodingSession) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(session.started_at.unix_seconds().max(0) as u64)
 }
@@ -6101,7 +6103,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the nested type is local and reads clearer inline than behind an alias"
+    )]
     fn context(
         name: &str,
         principal: Principal,

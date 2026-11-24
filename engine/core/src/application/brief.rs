@@ -237,26 +237,26 @@ struct LandingFields {
     merge_by: String,
     merge_mode: String,
     #[serde(default = "default_linear_history")]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     linear_history: bool,
     #[serde(default = "default_deploy_by")]
     deploy_by: String,
     // The core writes these back on every project write (WI-4417). The brief
     // does not state them, so they are accepted and not rendered.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     initiative_bases: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     long_lived_branches: Vec<String>,
     // The project's source (WI-4213), when it states one; the brief does not
     // render it yet.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     source: Option<serde_json::Value>,
     // The Python-era `graft` key (gh#1461): accepted and ignored.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     graft: Option<serde_json::Value>,
 }
 

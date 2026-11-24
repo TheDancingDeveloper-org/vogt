@@ -4,7 +4,6 @@
 //! A phase is computed from what was observed, never written onto the item, and
 //! it never competes with the workflow state the machine owns.
 
-#![allow(dead_code)]
 /// The derived phase ladder, in order. Shown beside the workflow state, never
 /// as it.
 ///
