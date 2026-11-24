@@ -839,9 +839,11 @@ jobs:
             echo "args=$args" >> "$GITHUB_OUTPUT"
           fi
 
+      # Pull requests into rust-core, rust-2 and wi-1443-main-sync get clippy
+      # and the doctests from rust-core.yml instead, so they run once there (WI-4658).
       - name: cargo clippy
         # Runs after a failed step too, so one round reports every failure.
-        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         working-directory: engine
         run: cargo clippy --locked ${{ steps.scope.outputs.args }} --all-targets -- -D warnings
 
@@ -892,7 +894,7 @@ jobs:
       # vogt-core` errors ("no library targets found") rather than skipping.
       - name: cargo test (doctests)
         # Runs after a failed step too, so one round reports every failure.
-        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         working-directory: engine
         run: |
           set -euo pipefail
