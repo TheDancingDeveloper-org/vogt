@@ -1843,6 +1843,227 @@ def _mutate(value: Any, key: str) -> bool:
 # compared as before. Each adoption is printed.
 #
 # Registry dump: (operation name, path inside that operation).
+# (path inside the operation, the operations that differ there) (WI-4667).
+_RUST_AHEAD: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("result_schema", "properties", "git_sha"),
+        ("engine.status",),
+    ),
+    (
+        ("result_schema", "$defs", "Project", "properties", "mcp_extra"),
+        (
+            "project.register",
+            "project.create",
+            "project.import",
+            "project.get",
+            "project.brief",
+            "project.update",
+            "project.transition",
+            "forge.writeback",
+            "forge.link",
+            "forge.publish",
+            "forge.import",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "ProjectDigest"),
+        ("project.brief",),
+    ),
+    (
+        ("result_schema", "properties", "digest"),
+        ("project.brief",),
+    ),
+    (
+        ("result_schema", "required"),
+        ("project.brief",),
+    ),
+    (
+        ("params_schema", "properties", "mcp_extra"),
+        ("project.update",),
+    ),
+    (
+        ("result_schema", "$defs", "Delivery"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "Landed"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "LaneDeployed"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "SessionBlocked", "properties", "boundary"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+            "session.start",
+            "session.list",
+            "session.stop",
+            "session.sweep",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+            "session.bind_work",
+            "session.screen",
+            "session.digest",
+            "session.wait",
+            "session.wait_any",
+            "session.report_blocked",
+            "session.report_unblocked",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "SessionBlocked", "properties", "key"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+            "session.start",
+            "session.list",
+            "session.stop",
+            "session.sweep",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+            "session.bind_work",
+            "session.screen",
+            "session.digest",
+            "session.wait",
+            "session.wait_any",
+            "session.report_blocked",
+            "session.report_unblocked",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "SessionBlocked", "properties", "needs"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+            "session.start",
+            "session.list",
+            "session.stop",
+            "session.sweep",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+            "session.bind_work",
+            "session.screen",
+            "session.digest",
+            "session.wait",
+            "session.wait_any",
+            "session.report_blocked",
+            "session.report_unblocked",
+        ),
+    ),
+    (
+        ("result_schema", "$defs", "Verified"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+        ),
+    ),
+    (
+        ("result_schema", "properties", "delivery"),
+        (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+        ),
+    ),
+    (
+        ("result_schema", "properties", "escalated_to"),
+        (
+            "session.start",
+            "session.stop",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+        ),
+    ),
+    (
+        ("params_schema", "properties", "starters_only"),
+        ("session.list",),
+    ),
+    (
+        ("result_schema", "$defs", "SessionChange", "properties", "escalation"),
+        ("session.changes", "session.wait_any"),
+    ),
+    (
+        ("result_schema", "$defs", "SessionChangeEscalation"),
+        ("session.changes", "session.wait_any"),
+    ),
+    (
+        ("params_schema", "properties", "boundary"),
+        ("session.report_blocked",),
+    ),
+    (
+        ("params_schema", "properties", "needs"),
+        ("session.report_blocked",),
+    ),
+)
+
+
 _RUST_DIVERGENT_REGISTRY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("project.list", ("params_schema",)),
     ("project.list", ("result_schema",)),
@@ -1894,6 +2115,10 @@ _RUST_DIVERGENT_REGISTRY: tuple[tuple[str, tuple[str, ...]], ...] = (
             "session.bind_work",
         )
     ),
+    # Rust-ahead schema fields (WI-4667): the Python registry stopped at the
+    # Python exit (WI-4608 to WI-4610) while Rust kept gaining fields. Each entry
+    # is a location where Rust has something Python's models lack.
+    *((op, path) for path, ops in _RUST_AHEAD for op in ops),
 )
 
 

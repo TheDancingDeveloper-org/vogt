@@ -409,6 +409,8 @@ def test_bootstrap_reads_existing_claude_registrations_without_the_cli(
             "GITHUB_MCP_TOKEN": "x",
             "GITEA_HOST": "https://f",
             "GITEA_MCP_TOKEN": "y",
+            # crw is out of scope here; empty means "do not register".
+            "VOGT_CRW_MCP_URL": "",
         },
         cwd=tmp_path,
         capture_output=True,
