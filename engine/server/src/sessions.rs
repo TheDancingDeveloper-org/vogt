@@ -656,26 +656,6 @@ const POD_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20
 /// How long a stop waits for the pod agent's salvage before going on.
 const POD_SALVAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// `ENGINE_POD_SALVAGE` (on unless explicitly off), and the retention
-/// bounds. Read per call so an operator can change them without a restart,
-/// as the other pod settings are.
-pub(crate) fn salvage_settings() -> (bool, usize, u64) {
-    use vogt_engine_contract::salvage::{DEFAULT_KEEP_PER_SESSION, DEFAULT_MAX_SESSION_BYTES};
-    let enabled = std::env::var("ENGINE_POD_SALVAGE")
-        .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
-        .unwrap_or(true);
-    let keep = std::env::var("ENGINE_POD_SALVAGE_KEEP")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_KEEP_PER_SESSION);
-    let max = std::env::var("ENGINE_POD_SALVAGE_MAX_BYTES")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_SESSION_BYTES);
-    (enabled, keep, max)
-}
 /// A pod an engine restart is taking back: its rebuilt stream halves and the
 /// uid its listing gave, which its teardown names.
 type AdoptedPod = (
@@ -956,7 +936,7 @@ impl SessionRegistry {
     /// The pod backend's settings: defaults, then `ENGINE_POD_*`, with the
     /// engine's `agent_auth_public_url` as the endpoint unless overridden.
     pub fn pod_config(&self) -> Result<crate::pod_backend::PodConfig> {
-        crate::pod_backend::PodConfig::from_env(self.cfg.agent_auth_public_url.clone())
+        Ok(self.cfg.pod.clone())
     }
 
     /// The MCP endpoints a pod-backed session is given: `engine_endpoint` is
@@ -1297,8 +1277,7 @@ impl SessionRegistry {
         &self,
         id: Uuid,
     ) -> Option<vogt_engine_contract::salvage::SalvageReport> {
-        let (enabled, _, _) = salvage_settings();
-        if !enabled || crate::agent_stream::global().pod(id).is_none() {
+        if !self.cfg.pod_salvage.enabled || crate::agent_stream::global().pod(id).is_none() {
             return None;
         }
         let session = self.sessions.get(&id).map(|s| Arc::clone(s.value()))?;
