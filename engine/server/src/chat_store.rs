@@ -85,7 +85,7 @@ const PREVIEW_CHARS: usize = 160;
 impl ChatStore {
     pub async fn new(state_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(state_dir)
-            .map_err(|e| ApiError::Internal(format!("failed to create chat store dir: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to create chat store dir", e))?;
         let db_path = state_dir.join("chats.db");
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
@@ -94,7 +94,7 @@ impl ChatStore {
             .max_connections(5)
             .connect_with(options)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to open chats db: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to open chats db", e))?;
         let store = Self { pool, db_path };
         store.init_schema().await?;
         Ok(store)
@@ -145,7 +145,7 @@ impl ChatStore {
             sqlx::query(statement)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ApiError::Internal(format!("chats db schema: {e}")))?;
+                .map_err(|e| ApiError::internal_src("chats db schema", e))?;
         }
         Ok(())
     }
@@ -171,7 +171,7 @@ impl ChatStore {
         .bind(&record.preview)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("insert chat: {e}")))?;
+        .map_err(|e| ApiError::internal_src("insert chat", e))?;
         self.index(record.id, &record.title).await
     }
 
@@ -194,7 +194,7 @@ impl ChatStore {
         .bind(record.id.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("update chat: {e}")))?;
+        .map_err(|e| ApiError::internal_src("update chat", e))?;
         Ok(())
     }
 
@@ -203,7 +203,7 @@ impl ChatStore {
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("read chat: {e}")))?;
+            .map_err(|e| ApiError::internal_src("read chat", e))?;
         row.map(|r| record_from_row(&r)).transpose()
     }
 
@@ -241,7 +241,7 @@ impl ChatStore {
                 .await
             }
         }
-        .map_err(|e| ApiError::Internal(format!("list chats: {e}")))?;
+        .map_err(|e| ApiError::internal_src("list chats", e))?;
         rows.iter().map(record_from_row).collect()
     }
 
@@ -252,14 +252,14 @@ impl ChatStore {
             .pool
             .begin()
             .await
-            .map_err(|e| ApiError::Internal(format!("append entry: {e}")))?;
+            .map_err(|e| ApiError::internal_src("append entry", e))?;
         let next: i64 = sqlx::query(
             "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM chat_entries WHERE chat_id = ?",
         )
         .bind(chat.to_string())
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| ApiError::Internal(format!("append entry: {e}")))?
+        .map_err(|e| ApiError::internal_src("append entry", e))?
         .get("next");
         entry.seq = next;
         sqlx::query(
@@ -278,7 +278,7 @@ impl ChatStore {
         .bind(&entry.by)
         .execute(&mut *tx)
         .await
-        .map_err(|e| ApiError::Internal(format!("append entry: {e}")))?;
+        .map_err(|e| ApiError::internal_src("append entry", e))?;
         // What people and the agent said is searchable; tool inputs and
         // results are not, so a file the agent read is not one search away.
         if matches!(entry.kind.as_str(), "user" | "assistant") && !entry.text.trim().is_empty() {
@@ -287,11 +287,11 @@ impl ChatStore {
                 .bind(&entry.text)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| ApiError::Internal(format!("index entry: {e}")))?;
+                .map_err(|e| ApiError::internal_src("index entry", e))?;
         }
         tx.commit()
             .await
-            .map_err(|e| ApiError::Internal(format!("append entry: {e}")))?;
+            .map_err(|e| ApiError::internal_src("append entry", e))?;
         Ok(entry)
     }
 
@@ -311,7 +311,7 @@ impl ChatStore {
         .bind(limit.clamp(1, 10_000) as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("read entries: {e}")))?;
+        .map_err(|e| ApiError::internal_src("read entries", e))?;
         Ok(rows
             .iter()
             .map(|r| ChatEntry {
@@ -335,7 +335,7 @@ impl ChatStore {
                 .bind(chat.to_string())
                 .fetch_one(&self.pool)
                 .await
-                .map_err(|e| ApiError::Internal(format!("read entries: {e}")))?
+                .map_err(|e| ApiError::internal_src("read entries", e))?
                 .get("last");
         self.entries(chat, (last - limit as i64).max(0), limit)
             .await
@@ -347,7 +347,7 @@ impl ChatStore {
             .bind(text)
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("index chat: {e}")))?;
+            .map_err(|e| ApiError::internal_src("index chat", e))?;
         Ok(())
     }
 
@@ -373,7 +373,7 @@ fn record_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<ChatRecord> {
     let id: String = r.get("id");
     let promoted: Option<String> = r.get("promoted_session");
     Ok(ChatRecord {
-        id: Uuid::parse_str(&id).map_err(|e| ApiError::Internal(format!("chat id {id}: {e}")))?,
+        id: Uuid::parse_str(&id).map_err(|e| ApiError::internal_src(format!("chat id {id}"), e))?,
         title: r.get("title"),
         driver: r.get("driver"),
         model: r.get("model"),
