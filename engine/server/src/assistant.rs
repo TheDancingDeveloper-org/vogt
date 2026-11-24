@@ -524,7 +524,7 @@ impl Profile {
         Self {
             name: profile.name.trim().to_string(),
             base_url: profile.base_url.clone(),
-            api_key: profile.api_key.clone(),
+            api_key: profile.api_key.expose().clone(),
             model: profile.model.clone(),
             reasoning_effort: profile.reasoning_effort.clone(),
             refusal: openai_route_refusal(&profile.model, profile.allow_claude_proxy),
@@ -911,7 +911,8 @@ impl AssistantRuntime {
     /// the behaviour it had, and now also a name a request can say.
     fn profiles_from_config(cfg: &Config) -> Vec<Profile> {
         let mut profiles = Vec::new();
-        if let Some(api_key) = cfg.assistant_api_key.clone() {
+        if let Some(api_key) = crate::secret::expose_opt(&cfg.assistant_api_key).map(str::to_string)
+        {
             profiles.push(Profile {
                 name: crate::config::IMPLICIT_PROFILE_NAME.to_string(),
                 base_url: cfg.assistant_base_url.clone(),
@@ -3075,6 +3076,34 @@ mod tests {
     fn test_registry() -> Arc<SessionRegistry> {
         let cfg = Arc::new(test_config_for_profiles());
         Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))
+    }
+
+    #[test]
+    fn config_debug_shows_no_secret_and_profile_wire_is_unchanged() {
+        let mut cfg = test_config_for_profiles();
+        cfg.token = Some("tok-AAAA-secret".into());
+        cfg.vogt_core_token = Some("core-BBBB-secret".into());
+        cfg.assistant_api_key = Some("key-CCCC-secret".into());
+        cfg.assistant_stt_api_key = Some("stt-DDDD-secret".into());
+        cfg.assistant_tts_api_key = Some("tts-EEEE-secret".into());
+        let profile = crate::config::AssistantProfile {
+            name: "p".into(),
+            base_url: "http://x".into(),
+            api_key: "prof-FFFF-secret".into(),
+            model: "m".into(),
+            reasoning_effort: None,
+            allow_claude_proxy: false,
+        };
+        cfg.assistant_profiles = vec![profile.clone()];
+        let shown = format!("{cfg:?}");
+        for secret in ["AAAA", "BBBB", "CCCC", "DDDD", "EEEE", "FFFF"] {
+            assert!(!shown.contains(secret), "{secret} leaked in Config debug");
+        }
+        assert!(shown.contains("[redacted]"));
+        let wire = serde_json::to_value(&profile).unwrap();
+        assert_eq!(wire["api_key"], "prof-FFFF-secret");
+        let back: crate::config::AssistantProfile = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.api_key.expose(), "prof-FFFF-secret");
     }
 
     fn test_config_for_profiles() -> Config {

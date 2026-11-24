@@ -266,7 +266,7 @@ pub async fn authorize(
     candidate: &str,
 ) -> Result<AuthorizedIdentity, AuthRefusal> {
     let cfg = state.config.as_ref();
-    if let Some(primary) = cfg.token.as_deref() {
+    if let Some(primary) = crate::secret::expose_opt(&cfg.token) {
         if bool::from(candidate.as_bytes().ct_eq(primary.as_bytes())) {
             return Ok(AuthorizedIdentity {
                 name: PRIMARY_TOKEN_NAME.to_string(),
@@ -275,7 +275,7 @@ pub async fn authorize(
                 // The break-glass token has no actor of its own at the core;
                 // it borrows the stack secret's, which is the one shared
                 // identity this design keeps, and keeps for exactly this.
-                core_bearer: cfg.vogt_core_token.clone(),
+                core_bearer: crate::secret::expose_opt(&cfg.vogt_core_token).map(str::to_string),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
                 stack_secret: false,
                 break_glass: true,
@@ -283,7 +283,7 @@ pub async fn authorize(
             });
         }
     }
-    if let Some(secret) = cfg.vogt_core_token.as_deref() {
+    if let Some(secret) = crate::secret::expose_opt(&cfg.vogt_core_token) {
         if bool::from(candidate.as_bytes().ct_eq(secret.as_bytes())) {
             return Ok(AuthorizedIdentity {
                 name: STACK_SECRET_NAME.to_string(),

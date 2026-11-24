@@ -118,7 +118,7 @@ fn test_config() -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(TEST_TOKEN.to_string()),
+        token: Some(TEST_TOKEN.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),

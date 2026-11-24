@@ -80,7 +80,7 @@ impl AudioBackend {
     /// Configured iff it has at least one base URL to try.
     fn from_parts(
         base_urls: &[String],
-        api_key: &Option<String>,
+        api_key: Option<&str>,
         model: &str,
         language: &str,
         voice: &str,
@@ -91,7 +91,7 @@ impl AudioBackend {
         }
         Some(Self {
             base_urls: base_urls.to_vec(),
-            api_key: api_key.clone(),
+            api_key: api_key.map(str::to_string),
             model: model.to_string(),
             language: language.to_string(),
             voice: voice.to_string(),
@@ -120,7 +120,7 @@ impl AssistantSpeech {
     pub fn from_config(cfg: &Config) -> Option<Arc<Self>> {
         let stt = AudioBackend::from_parts(
             &cfg.assistant_stt_base_urls,
-            &cfg.assistant_stt_api_key,
+            crate::secret::expose_opt(&cfg.assistant_stt_api_key),
             &cfg.assistant_stt_model,
             &cfg.assistant_stt_language,
             "",
@@ -128,7 +128,7 @@ impl AssistantSpeech {
         );
         let tts = AudioBackend::from_parts(
             &cfg.assistant_tts_base_urls,
-            &cfg.assistant_tts_api_key,
+            crate::secret::expose_opt(&cfg.assistant_tts_api_key),
             &cfg.assistant_tts_model,
             "",
             &cfg.assistant_tts_voice,
