@@ -1,5 +1,6 @@
 //! SQLite storage. Ports `src/vogt/storage/sqlite/`.
 
+pub mod bootstrap_store;
 pub mod connection;
 pub mod embedded;
 pub mod instance_store;
