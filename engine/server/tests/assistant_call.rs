@@ -251,6 +251,8 @@ fn test_config(stub: &str) -> Config {
         assistant_speech_attempt_timeout_ms: 5_000,
         public_url: None,
         agent_auth_public_url: None,
+        pod: Default::default(),
+        pod_salvage: Default::default(),
         cadastre_mcp_url: None,
         vogt_prod_mcp_url: None,
         lane: None,
