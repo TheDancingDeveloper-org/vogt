@@ -121,6 +121,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_mcp_stdio.py | ported | MCP stdio serving in `main.rs` and `adapters/mcp`. |
 | test_metrics.py | ported | `adapters/http/metrics.rs` (WI-1080): the opt-in `VOGT_METRICS_ADDR` listener on its own port, wired into `serve`. Ported: nothing listens without the env, a bare port or a missing host is refused, every series carries `component="core"` under the stock process-exporter names (resident and virtual memory, CPU seconds, open fds, start time, read from `/proc/self`), a scrape is served and logs nothing, and a second start does not rebind. Python's `python_gc_*` series have no Rust counterpart. |
 | test_migration_freeze.py | retired | The pytest copy of the append-only migration freeze. The rule is `shipped_migration_ids_are_an_append_only_prefix` in `storage/sqlite/migrator.rs`. |
+| test_migration_parity.py | ported | `storage/sqlite/migrator.rs`: `the_python_copy_is_byte_identical_when_present` pins the Python migration copy (`src/vogt/storage/sqlite/migrations/`) byte-identical to the canonical `engine/core/migrations/`. Kept until the Python tree is deleted (WI-2505). |
 | test_migrations.py | ported | `storage/sqlite/migrator.rs` (order, checksum, lock, rollback, upgrade-with-data). |
 | test_mobile_identity.py | retired | Capacitor application id and the Android manifest. `mobile/`, not the core. |
 | test_native_migration.py | ported | Retire-by-marker in `storage/sqlite/declared.rs`. |
