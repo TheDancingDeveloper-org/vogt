@@ -17,6 +17,8 @@ use crate::core::py_repr;
 use crate::errors::VogtError;
 use vogt_engine_contract::source::SourceDescriptor;
 
+mod wire;
+
 pub const USER_AGENT: &str = "vogt";
 /// The default request timeout (`DEFAULT_TIMEOUT_SECONDS`).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -196,7 +198,7 @@ impl EngineClient {
                 serde_json::to_value(source).expect("source descriptor serialises"),
             );
         }
-        EngineSession::from_payload(&self.call(
+        wire::session(&self.call(
             "/api/sessions",
             "POST",
             Some(&Value::Object(body)),
@@ -239,7 +241,7 @@ impl EngineClient {
             None => (payload, 0),
         };
         let sessions = rows(&listed)
-            .map(EngineSession::from_payload)
+            .map(wire::session)
             .collect::<Result<Vec<_>, _>>()?;
         Ok((sessions, hidden))
     }
@@ -261,7 +263,7 @@ impl EngineClient {
             Value::Null => None,
             other => Some(
                 rows(other)
-                    .map(EngineSweepEntry::from_payload)
+                    .map(wire::sweep_entry)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
         })
@@ -277,7 +279,7 @@ impl EngineClient {
                     .get("summary")
                     .filter(|value| value.is_object())
                     .unwrap_or(&payload);
-                Some(EngineSession::from_payload(summary)?)
+                Some(wire::session(summary)?)
             }
             _ => None,
         })
@@ -432,9 +434,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineScreen::from_payload(&payload)))
+            .map(|_| wire::screen(&payload))
+            .transpose()
     }
 
     /// An opencode session's last `n` replies: `(conversation_id, [(text, at)])`,
@@ -497,9 +500,10 @@ impl EngineClient {
             true,
             Some(timeout + WAIT_TIMEOUT_MARGIN),
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineWait::from_payload(&payload)))
+            .map(|_| wire::wait(&payload))
+            .transpose()
     }
 
     /// Session deltas published after `since` (0 reads the whole ring). `ids`
@@ -522,9 +526,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineChanges::from_payload(&payload)))
+            .map(|_| wire::changes(&payload))
+            .transpose()
     }
 
     /// Block until one of `ids` publishes a kind in `until`, or `timeout_s`
@@ -546,9 +551,10 @@ impl EngineClient {
                 .map(|rows| {
                     rows.iter()
                         .filter(|row| row.is_object())
-                        .map(EngineWorkspace::from_payload)
-                        .collect()
+                        .map(wire::workspace)
+                        .collect::<Result<Vec<_>, _>>()
                 })
+                .transpose()?
                 .unwrap_or_default(),
         ))
     }
@@ -605,9 +611,10 @@ impl EngineClient {
             true,
             Some(Duration::from_secs(timeout_s) + WAIT_TIMEOUT_MARGIN),
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineWaitAny::from_payload(&payload)))
+            .map(|_| wire::wait_any(&payload))
+            .transpose()
     }
 
     /// Set or clear a session's blocked report. `needs` and `boundary` are the
@@ -637,7 +644,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload))
+            .map(|_| wire::session(&payload))
             .transpose()
     }
 
@@ -735,7 +742,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload.clone()))
+            .map(|_| wire::session(&payload.clone()))
             .transpose()
     }
 
@@ -769,7 +776,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload))
+            .map(|_| wire::session(&payload))
             .transpose()
     }
 
@@ -787,7 +794,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload))
+            .map(|_| wire::session(&payload))
             .transpose()
     }
 
@@ -805,7 +812,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload))
+            .map(|_| wire::session(&payload))
             .transpose()
     }
 
@@ -823,7 +830,7 @@ impl EngineClient {
         )?;
         payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload))
+            .map(|_| wire::session(&payload))
             .transpose()
     }
 
@@ -1423,43 +1430,6 @@ pub struct EngineApproval {
     pub key: String,
 }
 
-impl EngineApproval {
-    fn from_payload(payload: Option<&Value>) -> Option<Self> {
-        let object = payload?.as_object()?;
-        Some(Self {
-            question: string_field(object, "question"),
-            command_excerpt: string_field(object, "command_excerpt"),
-            detected_at: string_field(object, "detected_at"),
-            deadline_seconds: optional_int(object.get("deadline_seconds")),
-            deadline_at: optional_str(object.get("deadline_at")),
-            kind: object
-                .get("kind")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("permission")
-                .to_string(),
-            options: object
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|options| {
-                    options
-                        .iter()
-                        .filter_map(|option| {
-                            let object = option.as_object()?;
-                            Some((
-                                object.get("number").and_then(Value::as_i64).unwrap_or(0),
-                                string_field(object, "label"),
-                                object.get("selected") == Some(&Value::Bool(true)),
-                            ))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            key: string_field(object, "key"),
-        })
-    }
-}
-
 /// An agent's own report that it is blocked on a person. The text is the
 /// agent's: untrusted data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,29 +1445,6 @@ pub struct EngineBlocked {
     /// `session:boundary:hash(reason)`, the content key (WI-996). Absent from
     /// an older engine.
     pub key: Option<String>,
-}
-
-impl EngineBlocked {
-    fn from_payload(payload: Option<&Value>) -> Option<Self> {
-        let object = payload?.as_object()?;
-        Some(Self {
-            reason: string_field(object, "reason"),
-            items: object
-                .get("items")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| item.to_string().trim_matches('"').to_string())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            since: optional_str(object.get("since")),
-            needs: optional_str(object.get("needs")).unwrap_or_else(|| "person".to_string()),
-            boundary: optional_str(object.get("boundary")).unwrap_or_else(|| "other".to_string()),
-            key: optional_str(object.get("key")),
-        })
-    }
 }
 
 /// One terminal, as the engine describes it. Being listed is not being alive:
@@ -1550,75 +1497,6 @@ impl EngineSession {
     pub fn hibernated(&self) -> bool {
         self.activity == "hibernated"
     }
-
-    /// An engine session always has an id; a payload without one is the engine
-    /// answering with something else, so it is an error, not a session named "".
-    fn from_payload(payload: &Value) -> Result<Self, VogtError> {
-        let object = payload.as_object();
-        let get = |name: &str| object.and_then(|object| object.get(name));
-        let exit_code = optional_int(get("exit_code"));
-        let alive = match get("alive") {
-            Some(Value::Bool(alive)) => *alive,
-            _ => exit_code.is_none(),
-        };
-        let conversation = get("conversation").and_then(Value::as_object);
-        let stop = get("stop").and_then(Value::as_object);
-        let id = get("id").map(value_string).unwrap_or_default();
-        if id.is_empty() {
-            return Err(VogtError::EngineUnavailable(
-                "engine session payload has no id".to_string(),
-            ));
-        }
-        let role = match get("role").and_then(Value::as_str) {
-            None | Some("") => "worker".to_string(),
-            Some(role @ ("worker" | "oversight")) => role.to_string(),
-            Some(other) => {
-                tracing::warn!(
-                    role = other,
-                    "engine session has an unknown role; kept as given"
-                );
-                other.to_string()
-            }
-        };
-        Ok(Self {
-            id,
-            name: get("name").map(value_string).unwrap_or_default(),
-            activity: get("activity")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("unknown")
-                .to_string(),
-            cwd: get("cwd").map(value_string).unwrap_or_default(),
-            exit_code,
-            activity_changed_at: optional_str(get("activity_changed_at")),
-            created_at: optional_str(get("created_at")),
-            alive,
-            turn_started_at: optional_str(get("turn_started_at")),
-            last_output_at: optional_str(get("last_output_at")),
-            approval: EngineApproval::from_payload(get("approval")),
-            command: optional_str(get("command")),
-            blocked: EngineBlocked::from_payload(get("blocked")),
-            reported_status: get("reported_status").and_then(Value::as_object).cloned(),
-            conversation_agent: optional_str(conversation.and_then(|c| c.get("agent"))),
-            conversation_id: optional_str(conversation.and_then(|c| c.get("id"))),
-            hibernation: EngineHibernation::from_payload(get("hibernation")),
-            keep_awake: get("keep_awake") == Some(&Value::Bool(true)),
-            autopilot: get("autopilot") == Some(&Value::Bool(true)),
-            autopilot_nudges: optional_int(get("autopilot_nudges")).unwrap_or(0),
-            role,
-            work_item: optional_str(get("work_item")),
-            resources: EngineResources::from_payload(get("resources")),
-            template: optional_str(get("template")),
-            permission_mode: optional_str(get("permission_mode")),
-            posture_lost_on_resume: get("posture_lost_on_resume") == Some(&Value::Bool(true)),
-            stopped_by: optional_str(stop.and_then(|stop| stop.get("by"))),
-            stop_reason: optional_str(stop.and_then(|stop| stop.get("reason"))),
-            account: optional_str(get("account")),
-            done_at: optional_str(get("done_at")),
-            economics: get("economics").and_then(Value::as_object).cloned(),
-            budget: get("budget").and_then(Value::as_object).cloned(),
-        })
-    }
 }
 
 /// What a session's process tree held at the engine's last sample.
@@ -1629,19 +1507,6 @@ pub struct EngineResources {
     pub processes: i64,
     pub sampled_at: String,
     pub over_threshold: bool,
-}
-
-impl EngineResources {
-    fn from_payload(payload: Option<&Value>) -> Option<Self> {
-        let object = payload?.as_object()?;
-        Some(Self {
-            rss_bytes: object.get("rss_bytes").and_then(Value::as_i64)?,
-            cpu_pct: object.get("cpu_pct").and_then(Value::as_f64).unwrap_or(0.0),
-            processes: object.get("processes").and_then(Value::as_i64).unwrap_or(0),
-            sampled_at: string_field(object, "sampled_at"),
-            over_threshold: object.get("over_threshold") == Some(&Value::Bool(true)),
-        })
-    }
 }
 
 /// When and why the engine hibernated a session.
@@ -1655,41 +1520,12 @@ pub struct EngineHibernation {
     pub superseded_by: Option<String>,
 }
 
-impl EngineHibernation {
-    fn from_payload(payload: Option<&Value>) -> Option<Self> {
-        let object = payload?.as_object()?;
-        Some(Self {
-            at: string_field(object, "at"),
-            trigger: string_field(object, "trigger"),
-            resumable: object.get("resumable") != Some(&Value::Bool(false)),
-            reason: optional_str(object.get("reason")),
-            superseded_by: optional_str(object.get("superseded_by")),
-        })
-    }
-}
-
 /// One row of `GET /api/sessions/sweep`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineSweepEntry {
     pub session: EngineSession,
     pub screen_tail: Vec<String>,
     pub ready: bool,
-}
-
-impl EngineSweepEntry {
-    fn from_payload(payload: &Value) -> Result<Self, VogtError> {
-        let summary = payload
-            .get("summary")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or(Value::Null);
-        let tail = payload.get("screen_tail").and_then(Value::as_array);
-        Ok(Self {
-            session: EngineSession::from_payload(&summary)?,
-            screen_tail: tail.map(|values| string_list(values)).unwrap_or_default(),
-            ready: payload.get("ready") == Some(&Value::Bool(true)),
-        })
-    }
 }
 
 /// One terminal that has ended, as the engine's history records it.
@@ -1796,37 +1632,6 @@ pub struct EngineScreen {
     pub blocked: Option<EngineBlocked>,
 }
 
-impl EngineScreen {
-    fn from_payload(payload: &Value) -> Self {
-        let cursor = payload.get("cursor").and_then(Value::as_object);
-        Self {
-            id: field_string(payload, "id"),
-            cols: optional_int(payload.get("cols")).unwrap_or(0),
-            rows: optional_int(payload.get("rows")).unwrap_or(0),
-            lines: payload
-                .get("lines")
-                .and_then(Value::as_array)
-                .map(|values| string_list(values))
-                .unwrap_or_default(),
-            cursor_row: optional_int(cursor.and_then(|cursor| cursor.get("row"))),
-            cursor_col: optional_int(cursor.and_then(|cursor| cursor.get("col"))),
-            title: optional_str(payload.get("title")),
-            activity: optional_str(payload.get("activity")),
-            alive: optional_bool(payload.get("alive")),
-            ready: optional_bool(payload.get("ready")),
-            scrollback: payload
-                .get("scrollback")
-                .and_then(Value::as_array)
-                .map(|values| string_list(values))
-                .unwrap_or_default(),
-            turn_started_at: optional_str(payload.get("turn_started_at")),
-            last_output_at: optional_str(payload.get("last_output_at")),
-            approval: EngineApproval::from_payload(payload.get("approval")),
-            blocked: EngineBlocked::from_payload(payload.get("blocked")),
-        }
-    }
-}
-
 /// Why `GET /api/sessions/{id}/wait` returned, and the screen then.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineWait {
@@ -1834,25 +1639,6 @@ pub struct EngineWait {
     pub matched: bool,
     pub waited_ms: i64,
     pub screen: EngineScreen,
-}
-
-impl EngineWait {
-    fn from_payload(payload: &Value) -> Self {
-        let screen = payload
-            .get("screen")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or(Value::Null);
-        Self {
-            outcome: field_string(payload, "outcome"),
-            matched: payload
-                .get("matched")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            waited_ms: optional_int(payload.get("waited_ms")).unwrap_or(0),
-            screen: EngineScreen::from_payload(&screen),
-        }
-    }
 }
 
 /// One session delta from `GET /api/sessions/changes`.
@@ -1866,19 +1652,6 @@ pub struct EngineChange {
     /// The escalation an ask that someone else must resolve carries (WI-996
     /// E1). Absent from an older engine, and from a change that asks nothing.
     pub escalation: Option<EngineEscalation>,
-}
-
-impl EngineChange {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            seq: optional_int(payload.get("seq")).unwrap_or(0),
-            at: optional_str(payload.get("at")).unwrap_or_default(),
-            session: python_str(payload, "session", ""),
-            kind: python_str(payload, "kind", ""),
-            summary: python_str(payload, "summary", ""),
-            escalation: EngineEscalation::from_payload(payload.get("escalation")),
-        }
-    }
 }
 
 /// The escalation a session change carries (WI-996 E1): who can resolve it,
@@ -1899,51 +1672,12 @@ pub struct EngineEscalation {
     pub resolve: Vec<String>,
 }
 
-impl EngineEscalation {
-    fn from_payload(payload: Option<&Value>) -> Option<Self> {
-        let object = payload?.as_object()?;
-        Some(Self {
-            needs: optional_str(object.get("needs")).unwrap_or_else(|| "person".to_string()),
-            boundary: optional_str(object.get("boundary")).unwrap_or_else(|| "other".to_string()),
-            ask: string_field(object, "ask"),
-            key: string_field(object, "key"),
-            resolve: object
-                .get("resolve")
-                .and_then(Value::as_array)
-                .map(|values| string_list(values))
-                .unwrap_or_default(),
-        })
-    }
-}
-
 /// A page of session deltas since a cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineChanges {
     pub changes: Vec<EngineChange>,
     pub next_cursor: i64,
     pub truncated: bool,
-}
-
-impl EngineChanges {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            changes: payload
-                .get("changes")
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|row| row.is_object())
-                        .map(EngineChange::from_payload)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            next_cursor: optional_int(payload.get("next_cursor")).unwrap_or(0),
-            truncated: payload
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }
-    }
 }
 
 /// One session's workspace block from `GET /api/workspaces` (WI-1340).
@@ -1959,27 +1693,6 @@ pub struct EngineWorkspace {
     pub base_sha: Option<String>,
     pub base_ref: Option<String>,
     pub cleaned_at: Option<String>,
-}
-
-impl EngineWorkspace {
-    fn from_payload(payload: &Value) -> Self {
-        let text = |name: &str| match payload.get(name) {
-            Some(Value::String(text)) => Some(text.clone()),
-            _ => None,
-        };
-        Self {
-            session_id: python_str(payload, "session_id", ""),
-            alive: payload.get("alive").is_some_and(python_truthy),
-            size_bytes: optional_int(payload.get("size_bytes")),
-            kind: python_str(payload, "kind", ""),
-            path: python_str(payload, "path", ""),
-            repo_root: python_str(payload, "repo_root", ""),
-            branch: python_str(payload, "branch", ""),
-            base_sha: text("base_sha"),
-            base_ref: text("base_ref"),
-            cleaned_at: text("cleaned_at"),
-        }
-    }
 }
 
 /// Python's `bool(value)` for a decoded JSON value.
@@ -2000,19 +1713,6 @@ pub struct EngineWaitAny {
     pub outcome: String,
     pub change: Option<EngineChange>,
     pub next_cursor: i64,
-}
-
-impl EngineWaitAny {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            outcome: python_str(payload, "outcome", ""),
-            change: payload
-                .get("change")
-                .filter(|value| value.is_object())
-                .map(EngineChange::from_payload),
-            next_cursor: optional_int(payload.get("next_cursor")).unwrap_or(0),
-        }
-    }
 }
 
 /// Something a bound agent-task run reported about itself.
@@ -2804,7 +2504,7 @@ mod tests {
 
     #[test]
     fn a_sessions_osc7501_reported_status_is_kept_for_the_summary() {
-        let with = EngineSession::from_payload(&serde_json::json!({
+        let with = wire::session(&serde_json::json!({
             "id": "s1",
             "reported_status": {"state": "working", "msg": "building"},
         }))
@@ -2812,16 +2512,24 @@ mod tests {
         let status = with.reported_status.expect("reported_status dropped");
         assert_eq!(status["state"], "working");
         assert_eq!(status["msg"], "building");
-        let without = EngineSession::from_payload(&serde_json::json!({"id": "s2"})).unwrap();
+        let without = wire::session(&serde_json::json!({"id": "s2"})).unwrap();
         assert!(without.reported_status.is_none());
     }
 
     #[test]
+    fn a_field_that_breaks_the_contract_is_an_error_not_a_default() {
+        // Strict decode through the contract types: a wrong type or an
+        // unknown activity fails the read instead of defaulting.
+        assert!(wire::session(&serde_json::json!({"id": "s", "exit_code": "x"})).is_err());
+        assert!(wire::session(&serde_json::json!({"id": "s", "activity": "napping"})).is_err());
+        assert!(wire::changes(&serde_json::json!({"changes": [7]})).is_err());
+    }
+
+    #[test]
     fn a_session_payload_with_no_id_is_an_error() {
-        assert!(EngineSession::from_payload(&serde_json::json!({"name": "x"})).is_err());
-        assert!(EngineSession::from_payload(&serde_json::json!({"id": ""})).is_err());
-        let odd =
-            EngineSession::from_payload(&serde_json::json!({"id": "s", "role": "boss"})).unwrap();
+        assert!(wire::session(&serde_json::json!({"name": "x"})).is_err());
+        assert!(wire::session(&serde_json::json!({"id": ""})).is_err());
+        let odd = wire::session(&serde_json::json!({"id": "s", "role": "boss"})).unwrap();
         assert_eq!(odd.role, "boss");
     }
 
@@ -3161,7 +2869,7 @@ mod tests {
     fn a_changes_read_names_its_cursor_ids_and_limit() {
         let (seen, transport) = scripted(
             200,
-            r#"{"changes":[{"seq":3,"at":"2026-01-01T00:00:00Z","session":"u1","kind":"ready","summary":"ready"},7],"next_cursor":3,"truncated":true}"#,
+            r#"{"changes":[{"seq":3,"at":"2026-01-01T00:00:00Z","session":"u1","kind":"ready","summary":"ready"}],"next_cursor":3,"truncated":true}"#,
         );
         let ids = vec!["u1".to_string(), "u2".to_string()];
         let page = client(transport)
