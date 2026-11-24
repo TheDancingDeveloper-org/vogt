@@ -637,7 +637,9 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
     };
     let found = state.registry.operations_for(Transport::Http);
     let matched = found.iter().find(|operation| {
-        operation.http_route().method == wanted && operation.http_route().path == operation_path
+        operation
+            .http_route()
+            .is_some_and(|route| route.method == wanted && route.path == operation_path)
     });
     if matched.is_none() {
         // Starlette's `redirect_slashes` (FastAPI's default), and only when the
@@ -655,9 +657,11 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
         if bare.len() != operation_path.len()
             && !bare.is_empty()
             && (hand_owned
-                || found
-                    .iter()
-                    .any(|operation| operation.http_route().path == bare))
+                || found.iter().any(|operation| {
+                    operation
+                        .http_route()
+                        .is_some_and(|route| route.path == bare)
+                }))
         {
             let mut target = format!("{scheme}://{host}{API_PREFIX}{bare}");
             if let Some(query) = query.as_deref() {
@@ -672,17 +676,20 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
         }
         // The path is real but the verb is not: Starlette answers 405 and names
         // the verbs the path does accept. An unknown path stays 404.
-        if found
-            .iter()
-            .any(|operation| operation.http_route().path == operation_path)
-        {
+        if found.iter().any(|operation| {
+            operation
+                .http_route()
+                .is_some_and(|route| route.path == operation_path)
+        }) {
             return method_not_allowed(&state.registry, operation_path);
         }
         return not_found();
     }
     let operation = matched.expect("just checked").clone();
     if let Some(slot) = &route_slot {
-        let _ = slot.0.set(operation.http_route().path);
+        if let Some(route) = operation.http_route() {
+            let _ = slot.0.set(route.path);
+        }
     }
     if method == Method::HEAD {
         return method_not_allowed(&state.registry, operation_path);
@@ -693,7 +700,10 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
     // A read takes its arguments from the query string and a write from the body,
     // and FastAPI prefixes `loc` with that source: `["query", "sources", "1"]`,
     // `["body", "bogus"]`.
-    let source = if operation.http_route().method == HttpMethod::Get {
+    let source = if operation
+        .http_route()
+        .is_some_and(|route| route.method == HttpMethod::Get)
+    {
         "query"
     } else {
         "body"
@@ -838,7 +848,10 @@ fn parse_params(
     content_type: &Option<axum::http::HeaderValue>,
     body: &[u8],
 ) -> Result<serde_json::Value, VogtError> {
-    if operation.http_route().method == HttpMethod::Get {
+    if operation
+        .http_route()
+        .is_some_and(|route| route.method == HttpMethod::Get)
+    {
         return Ok(query_object(operation.name, query));
     }
     // A write with no body is the empty object the validator fills defaults into.
@@ -1711,8 +1724,13 @@ fn method_not_allowed(registry: &OperationRegistry, operation_path: &str) -> Res
         _ => registry
             .for_transport(Transport::Http)
             .into_iter()
-            .find(|operation| operation.http_route().path == operation_path)
-            .map(|operation| match operation.http_route().method {
+            .find(|operation| {
+                operation
+                    .http_route()
+                    .is_some_and(|route| route.path == operation_path)
+            })
+            .and_then(|operation| operation.http_route())
+            .map(|route| match route.method {
                 HttpMethod::Get => "GET",
                 HttpMethod::Post => "POST",
                 HttpMethod::Patch => "PATCH",

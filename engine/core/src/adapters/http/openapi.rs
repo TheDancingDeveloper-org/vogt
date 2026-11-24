@@ -41,10 +41,12 @@ pub fn openapi() -> Value {
     let mut paths = Map::new();
     let mut components = Map::new();
     for operation in registry.for_transport(Transport::Http) {
-        let path = format!("/api{}", operation.http_route().path);
+        let Some(route) = operation.http_route() else {
+            continue;
+        };
+        let path = format!("/api{}", route.path);
         let entry = paths.entry(path).or_insert_with(|| json!({}));
-        entry[method_name(operation.http_route().method)] =
-            operation_object(operation, &mut components);
+        entry[method_name(route.method)] = operation_object(operation, &mut components);
     }
     let hand: Value = serde_json::from_str(HAND_ROUTES).expect("openapi_hand.json is JSON");
     for (path, item) in hand["paths"].as_object().into_iter().flatten() {
@@ -88,7 +90,10 @@ fn operation_object(operation: &Operation, components: &mut Map<String, Value>) 
         "description": operation.summary,
     });
     let takes_arguments;
-    if operation.http_route().method == HttpMethod::Get {
+    if operation
+        .http_route()
+        .is_some_and(|route| route.method == HttpMethod::Get)
+    {
         let parameters = query_parameters(&params);
         takes_arguments = !parameters.is_empty();
         if takes_arguments {

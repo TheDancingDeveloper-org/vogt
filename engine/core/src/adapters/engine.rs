@@ -195,13 +195,13 @@ impl EngineClient {
                 serde_json::to_value(source).expect("source descriptor serialises"),
             );
         }
-        Ok(EngineSession::from_payload(&self.call(
+        EngineSession::from_payload(&self.call(
             "/api/sessions",
             "POST",
             Some(&Value::Object(body)),
             false,
             None,
-        )?))
+        )?)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<EngineSession>, VogtError> {
@@ -237,7 +237,9 @@ impl EngineClient {
             ),
             None => (payload, 0),
         };
-        let sessions = rows(&listed).map(EngineSession::from_payload).collect();
+        let sessions = rows(&listed)
+            .map(EngineSession::from_payload)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok((sessions, hidden))
     }
 
@@ -256,7 +258,11 @@ impl EngineClient {
         )?;
         Ok(match &payload {
             Value::Null => None,
-            other => Some(rows(other).map(EngineSweepEntry::from_payload).collect()),
+            other => Some(
+                rows(other)
+                    .map(EngineSweepEntry::from_payload)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 
@@ -270,7 +276,7 @@ impl EngineClient {
                     .get("summary")
                     .filter(|value| value.is_object())
                     .unwrap_or(&payload);
-                Some(EngineSession::from_payload(summary))
+                Some(EngineSession::from_payload(summary)?)
             }
             _ => None,
         })
@@ -629,9 +635,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload)))
+            .map(|_| EngineSession::from_payload(&payload))
+            .transpose()
     }
 
     /// Rename a session, live or hibernated. `false` when the engine no longer
@@ -726,9 +733,10 @@ impl EngineClient {
             true,
             Some(self.timeout + HIBERNATE_TIMEOUT_MARGIN),
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload.clone())))
+            .map(|_| EngineSession::from_payload(&payload.clone()))
+            .transpose()
     }
 
     pub fn wake_session(
@@ -759,9 +767,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload)))
+            .map(|_| EngineSession::from_payload(&payload))
+            .transpose()
     }
 
     pub fn keep_awake(
@@ -776,9 +785,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload)))
+            .map(|_| EngineSession::from_payload(&payload))
+            .transpose()
     }
 
     pub fn set_role(
@@ -793,9 +803,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload)))
+            .map(|_| EngineSession::from_payload(&payload))
+            .transpose()
     }
 
     pub fn set_work_item(
@@ -810,9 +821,10 @@ impl EngineClient {
             true,
             None,
         )?;
-        Ok(payload
+        payload
             .as_object()
-            .map(|_| EngineSession::from_payload(&payload)))
+            .map(|_| EngineSession::from_payload(&payload))
+            .transpose()
     }
 
     /// Commit on a session's behalf (C14): `POST /api/git/op` with `op:
@@ -1536,7 +1548,9 @@ impl EngineSession {
         self.activity == "hibernated"
     }
 
-    fn from_payload(payload: &Value) -> Self {
+    /// An engine session always has an id; a payload without one is the engine
+    /// answering with something else, so it is an error, not a session named "".
+    fn from_payload(payload: &Value) -> Result<Self, VogtError> {
         let object = payload.as_object();
         let get = |name: &str| object.and_then(|object| object.get(name));
         let exit_code = optional_int(get("exit_code"));
@@ -1546,8 +1560,25 @@ impl EngineSession {
         };
         let conversation = get("conversation").and_then(Value::as_object);
         let stop = get("stop").and_then(Value::as_object);
-        Self {
-            id: get("id").map(value_string).unwrap_or_default(),
+        let id = get("id").map(value_string).unwrap_or_default();
+        if id.is_empty() {
+            return Err(VogtError::EngineUnavailable(
+                "engine session payload has no id".to_string(),
+            ));
+        }
+        let role = match get("role").and_then(Value::as_str) {
+            None | Some("") => "worker".to_string(),
+            Some(role @ ("worker" | "oversight")) => role.to_string(),
+            Some(other) => {
+                tracing::warn!(
+                    role = other,
+                    "engine session has an unknown role; kept as given"
+                );
+                other.to_string()
+            }
+        };
+        Ok(Self {
+            id,
             name: get("name").map(value_string).unwrap_or_default(),
             activity: get("activity")
                 .and_then(Value::as_str)
@@ -1571,11 +1602,7 @@ impl EngineSession {
             keep_awake: get("keep_awake") == Some(&Value::Bool(true)),
             autopilot: get("autopilot") == Some(&Value::Bool(true)),
             autopilot_nudges: optional_int(get("autopilot_nudges")).unwrap_or(0),
-            role: if get("role").and_then(Value::as_str) == Some("oversight") {
-                "oversight".to_string()
-            } else {
-                "worker".to_string()
-            },
+            role,
             work_item: optional_str(get("work_item")),
             resources: EngineResources::from_payload(get("resources")),
             template: optional_str(get("template")),
@@ -1587,7 +1614,7 @@ impl EngineSession {
             done_at: optional_str(get("done_at")),
             economics: get("economics").and_then(Value::as_object).cloned(),
             budget: get("budget").and_then(Value::as_object).cloned(),
-        }
+        })
     }
 }
 
@@ -1647,18 +1674,18 @@ pub struct EngineSweepEntry {
 }
 
 impl EngineSweepEntry {
-    fn from_payload(payload: &Value) -> Self {
+    fn from_payload(payload: &Value) -> Result<Self, VogtError> {
         let summary = payload
             .get("summary")
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or(Value::Null);
         let tail = payload.get("screen_tail").and_then(Value::as_array);
-        Self {
-            session: EngineSession::from_payload(&summary),
+        Ok(Self {
+            session: EngineSession::from_payload(&summary)?,
             screen_tail: tail.map(|values| string_list(values)).unwrap_or_default(),
             ready: payload.get("ready") == Some(&Value::Bool(true)),
-        }
+        })
     }
 }
 
@@ -2731,12 +2758,22 @@ mod tests {
         let with = EngineSession::from_payload(&serde_json::json!({
             "id": "s1",
             "reported_status": {"state": "working", "msg": "building"},
-        }));
+        }))
+        .unwrap();
         let status = with.reported_status.expect("reported_status dropped");
         assert_eq!(status["state"], "working");
         assert_eq!(status["msg"], "building");
-        let without = EngineSession::from_payload(&serde_json::json!({"id": "s2"}));
+        let without = EngineSession::from_payload(&serde_json::json!({"id": "s2"})).unwrap();
         assert!(without.reported_status.is_none());
+    }
+
+    #[test]
+    fn a_session_payload_with_no_id_is_an_error() {
+        assert!(EngineSession::from_payload(&serde_json::json!({"name": "x"})).is_err());
+        assert!(EngineSession::from_payload(&serde_json::json!({"id": ""})).is_err());
+        let odd =
+            EngineSession::from_payload(&serde_json::json!({"id": "s", "role": "boss"})).unwrap();
+        assert_eq!(odd.role, "boss");
     }
 
     #[test]
