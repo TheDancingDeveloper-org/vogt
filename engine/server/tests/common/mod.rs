@@ -19,6 +19,19 @@ pub use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate
 mod more;
 pub use more::*;
 
+/// Poll `cond` every 20 ms until it holds, failing with `what` after
+/// `timeout`. Use it instead of a fixed `sleep` that waits for a condition.
+pub async fn wait_until<F: FnMut() -> bool>(timeout: Duration, what: &str, mut cond: F) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !cond() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after {timeout:?} waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 pub const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 
 pub fn test_config() -> Config {

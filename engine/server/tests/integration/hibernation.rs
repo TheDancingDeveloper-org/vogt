@@ -305,7 +305,10 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     assert_eq!(hibernated["hibernation"]["resumable"], true);
     assert_eq!(hibernated["blocked"]["reason"], "needs the bot token");
     assert_eq!(hibernated["blocked"]["items"], json!(["create the bot"]));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_until(Duration::from_secs(10), "the agent's child to exit", || {
+        !pid_alive(helper)
+    })
+    .await;
     assert!(!pid_alive(helper), "the agent's child should be gone");
 
     let listed: Value = client
@@ -982,7 +985,8 @@ async fn an_idle_cap_changed_live_hibernates_workers_and_spares_oversight() {
         live_output_containing(&client, &base, id, &["helper=["]).await;
     }
     let (overseer, worker) = (ids[0].clone(), ids[1].clone());
-    // Quiet for longer than the threshold the test is about to set.
+    // Deliberate: the sessions must stay quiet for longer than the threshold
+    // the test is about to set; there is no event for "time passed".
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // The boot policy is off: a sweep hibernates nothing.
@@ -1509,7 +1513,14 @@ async fn a_shutdown_hibernates_an_oversight_shell_and_boot_leaves_it_hibernated(
     drop(guard);
 
     let (base, _h) = boot_with_config(cfg).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while session_row(&client, &base, &id).await["activity"] != "hibernated" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session never showed as hibernated"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let row = session_row(&client, &base, &id).await;
     assert_eq!(row["activity"], "hibernated", "{row}");
     assert_eq!(row["hibernation"]["trigger"], "shutdown");
@@ -2644,7 +2655,7 @@ async fn an_overseer_over_its_context_limit_is_not_hibernated() {
         assert!(tokio::time::Instant::now() < deadline, "no turns ran");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // Several watcher ticks past the limit.
+    // Deliberate: a negative check, several watcher ticks past the limit.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let row = session_row(&client, &base, &id).await;
     assert!(
@@ -2786,6 +2797,7 @@ async fn hibernation_keeps_build_output_and_removal_cleans_it() {
         .await
         .unwrap();
     assert_eq!(hibernated.status(), StatusCode::OK);
+    // Deliberate: negative check that nothing cleans the output over time.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(
         target.join("out").exists(),
