@@ -20,6 +20,7 @@ use crate::storage::observed_types::{
 };
 use crate::storage::sqlite::connection::{ConnPool, Lease};
 use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
+use crate::storage::sqlite::query::{select_filtered, select_many, Filter, FromRow};
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_CREATED_AT: &str = "created_at";
@@ -467,18 +468,14 @@ where
         // Python's `if collector` treats "" as absent.
         let conn = self.reader()?;
         match collector.filter(|name| !name.is_empty()) {
-            Some(name) => many(
+            Some(name) => select_many::<Sweep>(
                 &conn,
-                "SELECT * FROM sweeps WHERE collector = ? ORDER BY started_at DESC, id DESC LIMIT ?",
+                "WHERE collector = ? ORDER BY started_at DESC, id DESC LIMIT ?",
                 params![name, limit],
-                row_sweep,
             ),
-            None => many(
-                &conn,
-                "SELECT * FROM sweeps ORDER BY started_at DESC, id DESC LIMIT ?",
-                [limit],
-                row_sweep,
-            ),
+            None => {
+                select_many::<Sweep>(&conn, "ORDER BY started_at DESC, id DESC LIMIT ?", [limit])
+            }
         }
     }
 
@@ -596,29 +593,16 @@ where
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Observation>, VogtError> {
-        let mut clauses = Vec::new();
-        let mut values: Vec<String> = Vec::new();
-        for (column, value) in [
-            ("kind", kind),
-            ("project_id", project_id),
-            ("subject_key", subject_key),
-        ] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                values.push(value.to_string());
-            }
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
+        let mut filter = Filter::new();
+        filter.and_some("kind = ?", kind.map(str::to_string));
+        filter.and_some("project_id = ?", project_id.map(str::to_string));
+        filter.and_some("subject_key = ?", subject_key.map(str::to_string));
         let conn = self.reader()?;
-        many(
+        select_filtered::<Observation>(
             &conn,
-            &format!("SELECT * FROM observations {where_sql} ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?"),
-            params_from_iter(values.into_iter().chain([limit.to_string(), offset.to_string()])),
-            row_observation,
+            filter,
+            "ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?",
+            vec![Box::new(limit), Box::new(offset)],
         )
     }
 
@@ -791,28 +775,11 @@ where
         from_project_id: Option<&str>,
         to_project_id: Option<&str>,
     ) -> Result<Vec<DepRef>, VogtError> {
-        let mut clauses = Vec::new();
-        let mut values: Vec<String> = Vec::new();
-        if let Some(from) = from_project_id {
-            clauses.push("from_project_id = ?".to_string());
-            values.push(from.to_string());
-        }
-        if let Some(to) = to_project_id {
-            clauses.push("to_project_id = ?".to_string());
-            values.push(to.to_string());
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
+        let mut filter = Filter::new();
+        filter.and_some("from_project_id = ?", from_project_id.map(str::to_string));
+        filter.and_some("to_project_id = ?", to_project_id.map(str::to_string));
         let conn = self.reader()?;
-        many(
-            &conn,
-            &format!("SELECT * FROM latest_dep_refs {where_sql} ORDER BY subject_key"),
-            params_from_iter(values),
-            row_dep_ref,
-        )
+        select_filtered::<DepRef>(&conn, filter, "ORDER BY subject_key", Vec::new())
     }
 
     fn counts(&self) -> Result<BTreeMap<String, i64>, VogtError> {
@@ -935,7 +902,7 @@ where
 
     fn activity_cursors(&self) -> Result<BTreeMap<String, TranscriptCursor>, VogtError> {
         let conn = self.reader()?;
-        let rows = many(&conn, "SELECT * FROM agent_activity_files", [], |row| {
+        let rows = many(&conn, "SELECT path, agent, byte_offset, size, agent_session_id, cwd FROM agent_activity_files", [], |row| {
             Ok((
                 row.get::<_, String>("path")?,
                 TranscriptCursor {
@@ -1268,6 +1235,32 @@ fn scope_project_ids(scope: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+impl FromRow for Sweep {
+    const TABLE: &'static str = "sweeps";
+    const COLUMNS: &'static str =
+        "id, collector, scope, started_at, finished_at, outcome, stats, detail";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_sweep(row)
+    }
+}
+
+impl FromRow for Observation {
+    const TABLE: &'static str = "observations";
+    const COLUMNS: &'static str = "id, sweep_id, collector, kind, project_id, subject_key, payload, content_digest, source_url, promoted, observed_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_observation(row)
+    }
+}
+
+impl FromRow for DepRef {
+    const TABLE: &'static str = "latest_dep_refs";
+    const COLUMNS: &'static str =
+        "subject_key, from_project_id, ref_kind, raw_target, manifest, to_project_id, observed_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_dep_ref(row)
+    }
 }
 
 fn row_sweep(row: &Row<'_>) -> rusqlite::Result<Sweep> {
