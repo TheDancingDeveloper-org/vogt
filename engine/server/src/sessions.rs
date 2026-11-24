@@ -1330,7 +1330,9 @@ impl SessionRegistry {
                 record.salvage = Some(report.clone());
                 let copy = record.clone();
                 drop(record);
-                if let Err(e) = hibernation::write(&self.cfg.state_dir, &copy) {
+                if let Err(e) =
+                    hibernation::off_worker(|| hibernation::write(&self.cfg.state_dir, &copy))
+                {
                     tracing::warn!(session = %id, error = %e,
                         "could not keep the salvage report in the session record");
                 }
@@ -2582,7 +2584,9 @@ impl SessionRegistry {
             .map(str::trim)
             .filter(|t| !t.is_empty())
         {
-            prompt_files::write_session_guide(&self.cfg.state_dir, id, text)?;
+            hibernation::off_worker(|| {
+                prompt_files::write_session_guide(&self.cfg.state_dir, id, text)
+            })?;
         }
 
         // Before the prompt file is written and before anything is spawned:
@@ -2959,11 +2963,9 @@ impl SessionRegistry {
             )
         });
         let prompt_file = match brief_text.as_deref() {
-            Some(text) => Some(prompt_files::write_session_prompt(
-                &self.cfg.state_dir,
-                id,
-                text,
-            )?),
+            Some(text) => Some(hibernation::off_worker(|| {
+                prompt_files::write_session_prompt(&self.cfg.state_dir, id, text)
+            })?),
             // A woken session is pointed at the brief it was first started
             // with, if that file is still there, but not told to read it
             // again: the conversation it resumes already has.
@@ -3181,7 +3183,9 @@ impl SessionRegistry {
             )),
         };
         if let Some(record) = record {
-            if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+            if let Err(e) =
+                hibernation::off_worker(|| hibernation::write(&self.cfg.state_dir, &record))
+            {
                 tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
             }
             self.records.insert(id, record);
@@ -3759,9 +3763,11 @@ impl SessionRegistry {
             resumable: record.conversation.is_some(),
             superseded_by: record.superseded_by.clone(),
         });
-        hibernation::write_screen(&self.cfg.state_dir, id, &screen)
-            .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
-            .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        hibernation::off_worker(|| {
+            hibernation::write_screen(&self.cfg.state_dir, id, &screen)
+                .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
+        })
+        .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
         // Not observed here. A hibernation is not the end: a wake resumes the
         // session, and counting it now would count it again at every later
         // hibernation. The exit waiter skips a hibernating session, and the
