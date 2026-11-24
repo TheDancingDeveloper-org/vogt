@@ -319,6 +319,42 @@ pub fn utc_now() -> Moment {
     Moment::from_unix(duration.as_secs() as i64, duration.subsec_nanos())
 }
 
+/// A moment is stored as the ISO text `to_iso` renders, so a parameter and a
+/// column read use the same encoding the hand conversions did.
+impl rusqlite::types::ToSql for Moment {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_iso().into())
+    }
+}
+
+impl rusqlite::types::FromSql for Moment {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        from_iso(value.as_str()?).map_err(|err| rusqlite::types::FromSqlError::Other(err.into()))
+    }
+}
+
+/// A JSON document kept in a text column. Reads parse the text; a bad cell is
+/// a conversion error. Writes use `serde_json`'s compact rendering, exactly as
+/// the hand conversions did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Json<T>(pub T);
+
+impl<T: serde::Serialize> rusqlite::types::ToSql for Json<T> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        serde_json::to_string(&self.0)
+            .map(Into::into)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+    }
+}
+
+impl<T: serde::de::DeserializeOwned> rusqlite::types::FromSql for Json<T> {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        serde_json::from_str(value.as_str()?)
+            .map(Json)
+            .map_err(|err| rusqlite::types::FromSqlError::Other(Box::new(err)))
+    }
+}
+
 pub fn to_iso(moment: Moment) -> String {
     moment.to_iso()
 }
@@ -650,6 +686,70 @@ impl<'de> serde::Deserialize<'de> for Moment {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sql_round_trip_keeps_stored_text_and_old_rows() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE t (at TEXT, opt TEXT, doc TEXT, flag INTEGER)",
+            [],
+        )
+        .unwrap();
+        let at = Moment::from_unix(1_700_000_000, 123_456_000);
+        conn.execute(
+            "INSERT INTO t VALUES (?, ?, ?, ?)",
+            rusqlite::params![
+                at,
+                Option::<Moment>::None,
+                Json(serde_json::json!({"a": [1, 2]})),
+                true
+            ],
+        )
+        .unwrap();
+        let (text, flag): (String, i64) = conn
+            .query_row("SELECT at, flag FROM t", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(text, to_iso(at));
+        assert_eq!(text, "2023-11-14T22:13:20.123456+00:00");
+        assert_eq!(flag, 1);
+        let doc: String = conn
+            .query_row("SELECT doc FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(doc, serde_json::json!({"a": [1, 2]}).to_string());
+        // An old row, written by the earlier hand conversions, reads back.
+        conn.execute(
+            "UPDATE t SET at = '2023-11-14T22:13:20+00:00', flag = 0",
+            [],
+        )
+        .unwrap();
+        let (back, opt, doc, flag): (Moment, Option<Moment>, Json<serde_json::Value>, bool) = conn
+            .query_row("SELECT at, opt, doc, flag FROM t", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(back, Moment::from_unix(1_700_000_000, 0));
+        assert_eq!(opt, None);
+        assert_eq!(doc.0, serde_json::json!({"a": [1, 2]}));
+        assert!(!flag);
+    }
+
+    #[test]
+    fn sql_bad_cells_are_conversion_errors() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        let bad: Result<Moment, _> = conn.query_row("SELECT 'nope'", [], |r| r.get(0));
+        assert!(matches!(
+            bad,
+            Err(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+        let bad: Result<Json<serde_json::Value>, _> =
+            conn.query_row("SELECT '{'", [], |r| r.get(0));
+        assert!(matches!(
+            bad,
+            Err(rusqlite::Error::FromSqlConversionFailure(..))
+        ));
+    }
+
     use super::*;
 
     #[test]
