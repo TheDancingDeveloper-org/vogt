@@ -37,3 +37,14 @@ pub fn release_url() -> Option<String> {
         None
     }
 }
+
+/// The compiler that built this binary (`rustc -V`), captured by `build.rs`.
+pub const RUSTC_VERSION: &str = env!("VOGT_RUSTC_VERSION");
+
+#[cfg(test)]
+mod rustc_tests {
+    #[test]
+    fn the_build_compiler_is_reported() {
+        assert!(super::RUSTC_VERSION.contains("rustc"));
+    }
+}
