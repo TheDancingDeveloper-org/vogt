@@ -122,8 +122,9 @@ On the dev deployment, 2026-11-06 (WI-3169, WI-3163):
 - **Every pod clones the same repository**, whatever project the session is
   for (WI-3369).
 - **Pod sessions get no workspace-level rules, skills or tools** (WI-3374).
-- **No pipeline builds `rust-2`.** The dev images are built from a clone by
-  hand (WI-3386).
+- **`rust-2` builds only through the batch pull request.** `rust2-images.yml`
+  builds the dev images from the `graft/batch-*` head, not from `rust-2`
+  itself (WI-3386, WI-3947).
 - **`rust-2` has no route to `main` yet.** Nothing owned that step until
   WI-3387.
 
@@ -259,7 +260,8 @@ built on this interface, not as separate cases.
 The port replaces the Python core with a Rust one behind the same loopback
 HTTP contract. It does not join the core and the engine. After the swap they
 are two Rust programs in one Cargo workspace that share no types: on `rust-2`
-today the core does not depend on the `contract` crate.
+today the core depends on the `contract` crate only for the source descriptor
+types (`engine/core/src/adapters/engine.rs`).
 
 That split is why knowledge goes missing between them. The core knows a
 session's project; the engine does the clone; nothing carried one to the

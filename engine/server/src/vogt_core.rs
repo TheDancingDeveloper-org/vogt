@@ -1,7 +1,7 @@
 //! The front door's view of vogt-core.
 //!
 //! The merged product publishes one port, and this engine is what listens on
-//! it. Vogt's Python core runs beside it on loopback and is never published;
+//! it. Vogt's core runs beside it on loopback and is never published;
 //! everything a client asks of the core arrives here first:
 //!
 //! | Front door | vogt-core | Auth |
@@ -78,7 +78,7 @@ pub const API_PREFIX: &str = "/api/vogt";
 pub const PROXIED_READS_IN_FLIGHT: usize = HEAVY_READS_IN_FLIGHT + LIGHT_READS_IN_FLIGHT;
 
 /// Slots for the aggregate reads named in [`HEAVY_READ_PATHS`]. Small: the
-/// core serves them one at a time anyway (a single Python process), so a
+/// core serves them one at a time anyway (a single process), so a
 /// fifth concurrent copy only waits behind the first four, and the core
 /// shares one computation between concurrent badge reads.
 pub const HEAVY_READS_IN_FLIGHT: usize = 4;

@@ -43,9 +43,10 @@ is not on the list: the collector schedule reads it (A1).
   `evaluate_watches` cannot deliver.
 - `forge_posture_interval_seconds` (WI-2021). Python runs forge-posture on its
   own cadence. Rust runs it inside `sweep` when a forge is configured.
-- `github_rate_limit_floor` and `github_app_installation_id` (WI-2021). The
-  Rust forge client reports a 403 and does not keep a rate budget or GitHub
-  App installation auth. Calls use the configured token.
+- `github_app_installation_id` (WI-2021). The Rust forge client does not do
+  GitHub App installation auth. Calls use the configured token.
+  `github_rate_limit_floor` is read: `collect` passes it to
+  `configure_rate_limit_floor` (`adapters/github.rs:668`).
 - `usage_accounts`, `usage_litellm_url`, `usage_litellm_keys`,
   `usage_daily_spend_alert_usd` (WI-2666). `usage.board` is registered and
   not ported. These keys are its only inputs.
