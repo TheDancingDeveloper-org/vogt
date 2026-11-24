@@ -145,8 +145,19 @@ fn request<C: Clock + 'static, I: IdFactory + 'static>(
     check_requester(ctx, &target_engine_id)?;
     // Refuse now what the engine would refuse at approval, so the agent learns
     // at once and no person is shown a request nobody can approve (WI-4523).
-    if let Some(refusal) = engine.grant_refusal(&target_engine_id, &project)? {
-        return Err(VogtError::GrantRefused(refusal));
+    // The requester gets only the short reason: the engine id, grantable
+    // count and manifest-file error stay on the inbox, for a person (WI-4543).
+    // An engine that cannot answer is no refusal, as on the inbox path; the
+    // apply stays the gate.
+    if engine
+        .grant_refusal(&target_engine_id, &project)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Err(VogtError::GrantRefused(format!(
+            "project {project} is not open to grants"
+        )));
     }
 
     let reason = asked.reason.to_string();
@@ -964,6 +975,10 @@ mod tests {
         closed_projects: std::collections::BTreeSet<String>,
         /// An engine built before the grant check (WI-4523): it 404s.
         no_grant_check: bool,
+        /// An engine that errors on the grant check (down, or a bad reply).
+        grant_check_fails: bool,
+        /// How many grant checks the engine has answered.
+        grant_checks: usize,
         applied: Vec<(String, Value)>,
         revoked: Vec<(String, String)>,
     }
@@ -1027,6 +1042,10 @@ mod tests {
                     ("GET", ["sessions", _, check]) if check.starts_with("grant-check?") => {
                         if state.no_grant_check {
                             return (404, Vec::new());
+                        }
+                        state.grant_checks += 1;
+                        if state.grant_check_fails {
+                            return (500, Vec::new());
                         }
                         let project = check.split("project_id=").nth(1).unwrap_or("");
                         let refusal = state.closed_projects.contains(project).then(|| {
@@ -1474,7 +1493,7 @@ mod tests {
             .insert("infra".to_string());
         let refused = try_ask(&overseer_of(&dir, &shared), "eng-worker", json!({})).unwrap_err();
         assert!(
-            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("project infra is not open to grants")),
+            matches!(refused, VogtError::GrantRefused(ref message) if message == "project infra is not open to grants"),
             "{refused:?}"
         );
         // Nothing waits for a person, and another project is still asked.
@@ -1484,6 +1503,10 @@ mod tests {
             "eng-worker",
             json!({"project_id": "open"}),
         );
+        // An engine that cannot answer the check is no refusal (WI-4543).
+        shared.lock().unwrap().grant_check_fails = true;
+        ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        shared.lock().unwrap().grant_check_fails = false;
         // An engine without the check leaves the apply as the gate.
         shared.lock().unwrap().no_grant_check = true;
         ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
@@ -1534,5 +1557,31 @@ mod tests {
         assert!(summary.contains("ENGINE_AGENT_GRANT_PROJECTS"), "{summary}");
         // Deny still clears it.
         decide(&built, &id, "deny").unwrap();
+    }
+
+    #[test]
+    fn the_inbox_asks_the_engine_once_per_project_not_per_grant() {
+        let (dir, shared, built) = estate("inbox-memo");
+        for var in ["ONE", "TWO", "THREE"] {
+            ask(
+                &overseer_of(&dir, &shared),
+                "eng-worker",
+                json!({"var": var}),
+            );
+        }
+        shared.lock().unwrap().grant_checks = 0;
+        let entries = crate::registry::default_registry()
+            .get("inbox.list")
+            .expect("inbox.list is registered")
+            .run(Some(&built), json!({}))
+            .unwrap();
+        let grants = entries["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["action"]["kind"] == "grant")
+            .count();
+        assert_eq!(grants, 3);
+        assert_eq!(shared.lock().unwrap().grant_checks, 1);
     }
 }

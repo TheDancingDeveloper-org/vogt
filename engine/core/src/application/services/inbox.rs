@@ -1006,6 +1006,8 @@ where
         .collect();
 
     let grants = view.list_session_grants(Some("pending"), None, MAX_SCAN)?;
+    // One engine answer per project, not per pending grant (WI-4543).
+    let mut refusal_memo: BTreeMap<String, Option<String>> = BTreeMap::new();
     for grant in grants {
         // Python's grant view calls `effective_state(ctx.clock())` per row, so the
         // clock advances once here even though a stored `pending` never expires.
@@ -1014,10 +1016,15 @@ where
             // Ask the engine whether it could hold this grant at all
             // (WI-4523); an engine that cannot say leaves the entry as it was.
             let refusal = match (&ctx.engine, grant.project_id.as_deref()) {
-                (Some(engine), Some(project)) if probe.0 == "available" => engine
-                    .grant_refusal(&grant.target_engine_session_id, project)
-                    .ok()
-                    .flatten(),
+                (Some(engine), Some(project)) if probe.0 == "available" => refusal_memo
+                    .entry(project.to_string())
+                    .or_insert_with(|| {
+                        engine
+                            .grant_refusal(&grant.target_engine_session_id, project)
+                            .ok()
+                            .flatten()
+                    })
+                    .clone(),
                 _ => None,
             };
             entries.push(grant_entry(
