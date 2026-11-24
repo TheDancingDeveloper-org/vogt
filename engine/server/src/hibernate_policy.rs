@@ -511,7 +511,7 @@ pub async fn put_policy(
 /// trigger on is a tick that does nothing, so a cap set later takes effect
 /// with no restart (WI-4457).
 pub fn spawn_watcher(state: Arc<AppState>) {
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("hibernate-watcher", async move {
         let mut ticker = tokio::time::interval(TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -639,7 +639,7 @@ pub fn spawn_boot_wake(state: Arc<AppState>) {
     if pinned.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("boot-wake", async move {
         let mut waiting = pinned;
         for pass in 1..=BOOT_WAKE_PASSES {
             let mut full = Vec::new();

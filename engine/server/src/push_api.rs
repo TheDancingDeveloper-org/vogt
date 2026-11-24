@@ -207,7 +207,7 @@ pub async fn flush_digests(State(state): State<Arc<AppState>>) -> Json<DispatchC
 /// the body, so the person can answer before the deadline.
 pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("push-activity", async move {
         loop {
             // A lag used to end this loop — `while let Ok(..)` — and with it
             // every push for the life of the process, silently (WI-920). A
@@ -469,7 +469,7 @@ pub fn spawn_vogt_drift_watcher(state: Arc<AppState>) {
     use tokio::sync::broadcast::error::RecvError;
 
     let mut rx = state.bus.subscribe();
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("push-drift", async move {
         loop {
             // Block until there is drift at all. Everything else on this bus
             // — every activity change, every session lifecycle event — falls
@@ -552,7 +552,7 @@ pub fn spawn_idle_stall_watcher(state: Arc<AppState>) {
     use std::collections::HashSet;
     use uuid::Uuid;
 
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("push-idle-stall", async move {
         let mut notified: HashSet<Uuid> = HashSet::new();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -594,7 +594,7 @@ pub fn spawn_idle_stall_watcher(state: Arc<AppState>) {
 }
 
 pub fn spawn_digest_flusher(state: Arc<AppState>) {
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("push-digest", async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             let counts = state.push.flush_ready_digests().await;

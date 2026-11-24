@@ -744,7 +744,7 @@ pub fn spawn_watcher(state: Arc<AppState>) {
     if !policy.enabled {
         return;
     }
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("budget", async move {
         let mut ticker = tokio::time::interval(policy.tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

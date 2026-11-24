@@ -15,6 +15,7 @@ pub mod assistant_speech;
 pub mod assistant_stream;
 pub mod auth;
 pub mod autopilot;
+pub mod boot_tasks;
 pub mod budget;
 pub mod call;
 pub mod changes;
