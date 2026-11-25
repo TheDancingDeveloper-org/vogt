@@ -446,18 +446,26 @@ impl SourceProvider for GraftProvider {
                 .and_then(|n| n.to_str())
                 .and_then(|n| Uuid::parse_str(n).ok())
                 .ok_or_else(|| SourceError::InvalidSource("not a graft credential".into()))?;
+            // Without a mint config (the mint token file was removed, say by
+            // an engine restart with changed settings) the token cannot be
+            // revoked. Keep the file so a later teardown that has a minter
+            // revokes it, instead of deleting the only copy; the TTL is the
+            // backstop.
+            let Some(minter) = &self.minter else {
+                return Ok(());
+            };
             let token = std::fs::read_to_string(&credential.path)
                 .ok()
                 .map(|t| GraftToken::new(t.trim()));
             // The file goes whether or not revocation succeeds; the TTL is the
             // backstop, as at session stop today.
             let _ = std::fs::remove_file(&credential.path);
-            match (&self.minter, token) {
-                (Some(m), Some(t)) => m
+            match token {
+                Some(t) => minter
                     .revoke(id, &t)
                     .await
                     .map_err(|e| SourceError::Unavailable(e.to_string())),
-                _ => Ok(()),
+                None => Ok(()),
             }
         })
     }
@@ -769,6 +777,36 @@ mod tests {
             .any(|s| s.starts_with("mirror:")));
 
         p.revoke_credential(&h).await.unwrap();
+        assert!(!h.path.exists());
+        assert_eq!(
+            *minter.revoked.lock().unwrap(),
+            vec![(id, "minted".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_without_a_minter_keeps_the_token_for_a_later_revoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        let creds = tmp.path().join("creds");
+        let minter = Arc::new(FakeMinter::default());
+        let id = Uuid::new_v4();
+        let h = GraftProvider::new(&creds, Some(minter.clone()))
+            .mint_credential(&source(), &CredentialRequest::for_session(id))
+            .await
+            .unwrap();
+        // The engine came back without a mint config.
+        let bare = GraftProvider::new(&creds, None);
+        bare.revoke_credential(&h).await.unwrap();
+        assert!(h.path.exists(), "the kept token must survive");
+        assert!(minter.revoked.lock().unwrap().is_empty());
+        // A later run with a mint config revokes it and withdraws the file.
+        let held = GraftProvider::new(&creds, Some(minter.clone()))
+            .held_credential(id)
+            .unwrap();
+        GraftProvider::new(&creds, Some(minter.clone()))
+            .revoke_credential(&held)
+            .await
+            .unwrap();
         assert!(!h.path.exists());
         assert_eq!(
             *minter.revoked.lock().unwrap(),
