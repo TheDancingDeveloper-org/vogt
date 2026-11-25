@@ -4154,6 +4154,11 @@ engine could not be asked (absent, or it errored), its `live_sessions` is
 `null`: unknown, not "none live". Count 0 means the engine answered. The
 grouped read is one query per 500 ids, so a page of any size works (WI-4753).
 
+`board.list` and `backlog` take the same `with_sessions` (default off, no key)
+and add `live_sessions` (or `null` when unknown) to each card or ranked row of
+declared work, from one grouped read for the whole response, however many cells
+it holds; an observed subject with no work item reports count 0 (WI-4758).
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —

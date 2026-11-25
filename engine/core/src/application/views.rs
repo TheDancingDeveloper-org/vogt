@@ -942,13 +942,35 @@ fn backlog<C: Clock, I: IdFactory>(
         crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     let total = gathered.ranked.len() as i64;
     let start = offset.max(0) as usize;
-    let page: Vec<serde_json::Value> = gathered
+    let window: Vec<&serde_json::Value> = gathered
         .ranked
         .iter()
         .skip(start)
         .take(limit.max(0) as usize)
-        .map(|row| projected(&row.value, mode))
+        .map(|row| &row.value)
         .collect();
+    let mut page: Vec<serde_json::Value> = window.iter().map(|row| projected(row, mode)).collect();
+    if params
+        .get("with_sessions")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        // The ids come from the unprojected rows (`summary` nulls `item`);
+        // ONE grouped read for the page (WI-4758). An observed subject has no
+        // work item, hence no sessions.
+        let item_id = |row: &serde_json::Value| -> String {
+            row.pointer("/item/id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let ids: Vec<String> = window.iter().map(|row| item_id(row)).collect();
+        let view = ctx.declared.read()?;
+        let sessions = crate::application::services::work::live_sessions_for_ids(ctx, &view, &ids)?;
+        for (row, id) in page.iter_mut().zip(&ids) {
+            crate::application::services::work::attach_live_sessions(row, &sessions, id);
+        }
+    }
     let following = offset + page.len() as i64;
     Ok(serde_json::json!({
         "items": page,

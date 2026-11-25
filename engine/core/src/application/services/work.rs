@@ -717,6 +717,8 @@ struct BoardParams {
     assignee: Option<String>,
     initiative: Option<String>,
     label: Option<String>,
+    /// Add `live_sessions` to every card (WI-4758). Off by default.
+    with_sessions: bool,
     /// A snapshot was sent (not `null`), whatever its type.
     has_snapshot: bool,
     snapshot: Option<String>,
@@ -763,6 +765,7 @@ impl<'de> serde::Deserialize<'de> for BoardParams {
             assignee: text_strict(&raw.assignee),
             initiative: text_strict(&raw.initiative),
             label: text_strict(&raw.label),
+            with_sessions: flag(&raw.with_sessions),
             has_snapshot: raw.snapshot.as_ref().is_some_and(|value| !value.is_null()),
             snapshot: text_strict(&raw.snapshot),
             fingerprint: crate::decisions::digest_of(&Value::Object(body)),
@@ -1882,7 +1885,7 @@ fn list_work<C: Clock, I: IdFactory>(
 }
 
 /// Per work-item id, the `live_sessions` object of one `work.list` row.
-type LiveSessionsByItem = std::collections::HashMap<String, Value>;
+pub(crate) type LiveSessionsByItem = std::collections::HashMap<String, Value>;
 
 /// `live_sessions` {count, worst, ids} for every item of one page (WI-4751).
 ///
@@ -1905,11 +1908,30 @@ where
     C: Clock,
     I: IdFactory,
 {
+    let item_ids: Vec<String> = page.iter().map(|item| item.id.clone()).collect();
+    live_sessions_for_ids(ctx, view, &item_ids)
+}
+
+/// `live_sessions_by_item` over bare item ids, for a response that gathers
+/// the ids of several cells or pages and asks once (`board.list`, `backlog`;
+/// WI-4758). Empty ids (upstream truth, no declared item) and repeats are
+/// dropped; the definition of "live", the attention ordering and the
+/// "unknown" semantics are the ones above, not a copy.
+pub(crate) fn live_sessions_for_ids<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    ids: &[String],
+) -> Result<LiveSessionsByItem, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
     use crate::decisions::{classify, Attention};
-    let item_ids: Vec<String> = page
+    let mut seen = std::collections::HashSet::new();
+    let item_ids: Vec<String> = ids
         .iter()
-        .filter(|item| !item.id.is_empty())
-        .map(|item| item.id.clone())
+        .filter(|id| !id.is_empty() && seen.insert(id.as_str()))
+        .cloned()
         .collect();
     let recorded = view.unstopped_sessions_for_items(&item_ids)?;
     // Only an item with a recorded session needs the engine to be asked.
@@ -1973,19 +1995,19 @@ where
         ));
     }
     let mut out = LiveSessionsByItem::new();
-    for item in page {
-        if unknown_items.contains(item.id.as_str()) {
-            out.insert(item.id.clone(), Value::Null);
+    for id in &item_ids {
+        if unknown_items.contains(id.as_str()) {
+            out.insert(id.clone(), Value::Null);
             continue;
         }
-        let rows = grouped.remove(&item.id).unwrap_or_default();
+        let rows = grouped.remove(id).unwrap_or_default();
         let worst = rows
             .iter()
             .min_by_key(|(order, _, _)| *order)
             .map(|(_, name, _)| Value::String(name.clone()))
             .unwrap_or(Value::Null);
         out.insert(
-            item.id.clone(),
+            id.clone(),
             json!({
                 "count": rows.len(),
                 "worst": worst,
@@ -1994,6 +2016,18 @@ where
         );
     }
     Ok(out)
+}
+
+/// Add `live_sessions` to one row. An item with no declared id (upstream
+/// truth) has no sessions: a true 0.
+pub(crate) fn attach_live_sessions(row: &mut Value, sessions: &LiveSessionsByItem, item_id: &str) {
+    if let Some(row) = row.as_object_mut() {
+        let live = sessions
+            .get(item_id)
+            .cloned()
+            .unwrap_or_else(|| json!({"count": 0, "worst": null, "ids": []}));
+        row.insert("live_sessions".to_string(), live);
+    }
 }
 
 fn work_page(
@@ -2014,13 +2048,8 @@ fn work_page(
             } else {
                 summary_row(item)
             };
-            if let (Some(sessions), Some(row)) = (sessions, row.as_object_mut()) {
-                // An item with no declared id (upstream truth) has no sessions.
-                let live = sessions
-                    .get(&item.id)
-                    .cloned()
-                    .unwrap_or_else(|| json!({"count": 0, "worst": null, "ids": []}));
-                row.insert("live_sessions".to_string(), live);
+            if let Some(sessions) = sessions {
+                attach_live_sessions(&mut row, sessions, &item.id);
             }
             row
         })
@@ -3916,6 +3945,7 @@ fn list_board<C: Clock, I: IdFactory>(
         assignee,
         initiative,
         label,
+        with_sessions,
         has_snapshot,
         snapshot: snapshot_token,
         fingerprint,
@@ -4120,15 +4150,19 @@ fn list_board<C: Clock, I: IdFactory>(
         *lane_total = json!(lane_total.as_i64().unwrap_or(0) + count);
     }
     let limit = (page_size + 1).max(0) as usize;
-    let rendered: Vec<Value> = queries
+    let drawn: Vec<(
+        &crate::storage::interface::BoardCellQuery,
+        Vec<WorkItem>,
+        Value,
+    )> = queries
         .iter()
         .map(|query| {
             let key = (query.lane_key.clone(), query.state.clone());
             let declared = pages.get(&key).cloned().unwrap_or_default();
             let fetched = board_merge_cell(declared, &upstream_entries, query, limit);
-            let shown: Vec<&WorkItem> = fetched.iter().take(page_size.max(0) as usize).collect();
-            let next_cursor = match shown.last() {
-                Some(last) if fetched.len() > shown.len() => Value::String(board_token(&json!({
+            let keep = page_size.max(0) as usize;
+            let next_cursor = match fetched.get(..keep.min(fetched.len())).and_then(<[_]>::last) {
+                Some(last) if fetched.len() > keep => Value::String(board_token(&json!({
                     "kind": "cell",
                     "fingerprint": fingerprint,
                     "revision": revision,
@@ -4140,10 +4174,38 @@ fn list_board<C: Clock, I: IdFactory>(
                 }))),
                 _ => Value::Null,
             };
+            let shown: Vec<WorkItem> = fetched.into_iter().take(keep).collect();
+            (query, shown, next_cursor)
+        })
+        .collect();
+    // ONE grouped read for every card of the whole response, not one per cell.
+    let sessions = with_sessions
+        .then(|| {
+            let ids: Vec<String> = drawn
+                .iter()
+                .flat_map(|(_, shown, _)| shown.iter().map(|item| item.id.clone()))
+                .collect();
+            live_sessions_for_ids(ctx, &view, &ids)
+        })
+        .transpose()?;
+    let rendered: Vec<Value> = drawn
+        .iter()
+        .map(|(query, shown, next_cursor)| {
+            let key = (query.lane_key.clone(), query.state.clone());
+            let items: Vec<Value> = shown
+                .iter()
+                .map(|item| {
+                    let mut row = serde_json::to_value(item).unwrap_or(Value::Null);
+                    if let Some(sessions) = sessions.as_ref() {
+                        attach_live_sessions(&mut row, sessions, &item.id);
+                    }
+                    row
+                })
+                .collect();
             json!({
                 "lane_key": query.lane_key,
                 "state": query.state,
-                "items": shown,
+                "items": items,
                 "total": counts.get(&key).copied().unwrap_or(0),
                 "next_cursor": next_cursor,
             })
@@ -5251,6 +5313,177 @@ mod tests {
             .iter()
             .find(|row| row["ref"] == reference)
             .unwrap_or_else(|| panic!("no {reference} in {page}"))
+    }
+
+    /// Three project-less items (the Board keeps them): WI-1 and WI-2 open,
+    /// WI-3 in progress. WI-1 has a recorded session, WI-3 none.
+    fn board_fixture(engine: Option<(u16, &'static str)>) -> Built {
+        let built = built_with(engine);
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        // Only the session record needs a project; the items have none.
+        insert_project(&built, "alpha", false, WriteBack::Disabled);
+        for title in ["One", "Two", "Three"] {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": title, "reason": "t"}),
+            )
+            .unwrap();
+        }
+        transition_work(
+            ctx,
+            json!({"ref": "WI-3", "to_state": "in_progress", "reason": "t"}),
+        )
+        .unwrap();
+        bind_session(&built, "WI-1", "ses_run", "eng-run", false);
+        built
+    }
+
+    fn board_two_cells(built: &Built, extra: Value) -> Value {
+        let mut params = json!({
+            "lane_mode": "none",
+            "cells": [
+                {"lane_key": "", "state": "open"},
+                {"lane_key": "", "state": "in_progress"},
+            ],
+            "page_size": 10,
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::application::services::work::board_list_op(built, params).unwrap()
+    }
+
+    fn card<'a>(board: &'a Value, reference: &str) -> &'a Value {
+        board["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|cell| cell["items"].as_array().unwrap())
+            .find(|item| item["ref"] == reference)
+            .unwrap_or_else(|| panic!("no {reference} in {board}"))
+    }
+
+    #[test]
+    fn board_with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for extra in [json!({}), json!({"with_sessions": false})] {
+            let board = board_two_cells(&built, extra);
+            for reference in ["WI-1", "WI-2", "WI-3"] {
+                assert!(card(&board, reference).get("live_sessions").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn board_with_sessions_adds_live_sessions_to_cards_of_every_cell_in_one_read() {
+        use crate::storage::sqlite::declared::READS;
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        board_two_cells(&built, json!({}));
+        let without = READS.with(|r| *r.borrow());
+        assert_eq!((without.grouped, without.per_item), (0, 0));
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        let board = board_two_cells(&built, json!({"with_sessions": true}));
+        let with = READS.with(|r| *r.borrow());
+        // Two cells, one grouped read for the whole response.
+        assert_eq!((with.grouped, with.per_item), (1, 0), "{board}");
+        assert_eq!(card(&board, "WI-1")["live_sessions"]["count"], 1, "{board}");
+        assert_eq!(
+            card(&board, "WI-1")["live_sessions"]["ids"],
+            json!(["ses_run"])
+        );
+        let none = json!({"count": 0, "worst": null, "ids": []});
+        assert_eq!(card(&board, "WI-2")["live_sessions"], none);
+        assert_eq!(card(&board, "WI-3")["live_sessions"], none);
+    }
+
+    #[test]
+    fn board_with_sessions_is_unknown_when_the_engine_cannot_be_asked() {
+        for engine in [None, Some((500, "boom"))] {
+            let built = board_fixture(engine);
+            let board = board_two_cells(&built, json!({"with_sessions": true}));
+            assert_eq!(
+                card(&board, "WI-1")["live_sessions"],
+                Value::Null,
+                "{board}"
+            );
+            assert_eq!(
+                card(&board, "WI-2")["live_sessions"],
+                json!({"count": 0, "worst": null, "ids": []}),
+                "{board}"
+            );
+        }
+    }
+
+    fn backlog_with(built: &Built, extra: Value) -> Value {
+        let mut params = json!({"include_prs": false});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::application::views::backlog_op(built, params).unwrap()
+    }
+
+    #[test]
+    fn backlog_with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for extra in [json!({}), json!({"with_sessions": false})] {
+            let page = backlog_with(&built, extra);
+            assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
+            for item in page["items"].as_array().unwrap() {
+                assert!(item.get("live_sessions").is_none(), "{item}");
+            }
+        }
+    }
+
+    #[test]
+    fn backlog_with_sessions_adds_live_sessions_in_one_read_in_both_modes() {
+        use crate::storage::sqlite::declared::READS;
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for mode in ["summary", "full"] {
+            READS.with(|r| *r.borrow_mut() = Default::default());
+            let page = backlog_with(&built, json!({"with_sessions": true, "mode": mode}));
+            let with = READS.with(|r| *r.borrow());
+            assert_eq!((with.grouped, with.per_item), (1, 0), "{page}");
+            assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
+            for item in page["items"].as_array().unwrap() {
+                let expected = if item["ref"] == "WI-1" {
+                    json!({"count": 1, "worst": "running", "ids": ["ses_run"]})
+                } else {
+                    json!({"count": 0, "worst": null, "ids": []})
+                };
+                assert_eq!(item["live_sessions"], expected, "{mode}: {item}");
+            }
+        }
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        backlog_with(&built, json!({}));
+        assert_eq!(READS.with(|r| r.borrow().grouped), 0);
+    }
+
+    #[test]
+    fn backlog_with_sessions_is_unknown_when_the_engine_cannot_be_asked() {
+        for engine in [None, Some((500, "boom"))] {
+            let built = board_fixture(engine);
+            let page = backlog_with(&built, json!({"with_sessions": true}));
+            let by_ref = |reference: &str| {
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["ref"] == reference)
+                    .unwrap_or_else(|| panic!("no {reference} in {page}"))
+                    .clone()
+            };
+            assert_eq!(by_ref("WI-1")["live_sessions"], Value::Null, "{page}");
+            assert_eq!(
+                by_ref("WI-2")["live_sessions"],
+                json!({"count": 0, "worst": null, "ids": []}),
+                "{page}"
+            );
+        }
     }
 
     #[test]
