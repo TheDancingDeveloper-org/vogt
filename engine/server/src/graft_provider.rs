@@ -596,21 +596,45 @@ mod tests {
     }
 
     /// A fake `graft` that logs its argv and prints a canned JSON reply.
+    ///
+    /// Every call writes to a fresh path (never rewriting an executable in
+    /// place), and the file is written, synced, closed and chmod'ed before it
+    /// is returned, and it is probed until `exec` works (see below).
     fn fake(dir: &Path, reply: &str, code: i32) -> PathBuf {
-        let bin = dir.join("graft");
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let bin = dir.join(format!("graft-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
         let log = dir.join("argv");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> '{}'\ncat <<'EOF'\n{reply}\nEOF\nexit {code}\n",
-                log.display()
-            ),
-        )
-        .unwrap();
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = __probe ] && exit 0\necho \"$@\" >> '{}'\ncat <<'EOF'\n{reply}\nEOF\nexit {code}\n",
+            log.display()
+        );
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o755);
+        }
+        let mut f = opts.open(&bin).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        // Another test thread may have forked while `f` was open and its child
+        // can still hold a copy of the write fd until it execs. Until then
+        // `exec` of this file fails with ETXTBSY (errno 26), so probe until it
+        // runs. The probe exits before logging, so `argv` is untouched.
+        let mut tries = 0;
+        loop {
+            match std::process::Command::new(&bin).arg("__probe").status() {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(26) && tries < 2000 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake graft cannot run: {e}"),
+            }
         }
         bin
     }
