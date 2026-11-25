@@ -1507,6 +1507,12 @@ pub struct EngineResources {
     pub processes: i64,
     pub sampled_at: String,
     pub over_threshold: bool,
+    pub memory_current: Option<i64>,
+    pub memory_max: Option<i64>,
+    pub memory_peak: Option<i64>,
+    pub oom_kill: Option<i64>,
+    pub observed_at: Option<String>,
+    pub memory_warning: bool,
 }
 
 /// When and why the engine hibernated a session.

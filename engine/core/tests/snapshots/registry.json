@@ -8252,6 +8252,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -10867,6 +10932,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -14887,6 +15017,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -17479,6 +17674,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -20066,6 +20326,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -22651,6 +22976,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -25233,6 +25623,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -35415,6 +35870,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -37017,6 +37537,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -38644,6 +39229,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -40914,6 +41564,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -42755,6 +43470,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -44310,6 +45090,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -45854,6 +46699,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -47526,6 +48436,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -49064,6 +50039,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
@@ -50614,6 +51654,71 @@
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
                 "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
+                "type": "boolean"
               }
             },
             "required": [
@@ -51878,6 +52983,71 @@
                 "default": false,
                 "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
                 "title": "Over Threshold",
+                "type": "boolean"
+              },
+              "memory_current": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+                "title": "Memory Current"
+              },
+              "memory_max": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The pod's memory limit; absent when unlimited or unknown.",
+                "title": "Memory Max"
+              },
+              "memory_peak": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Memory Peak"
+              },
+              "oom_kill": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Processes the OOM killer has killed in the pod's cgroup.",
+                "title": "Oom Kill"
+              },
+              "observed_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+                "title": "Observed At"
+              },
+              "memory_warning": {
+                "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+                "title": "Memory Warning",
                 "type": "boolean"
               }
             },
