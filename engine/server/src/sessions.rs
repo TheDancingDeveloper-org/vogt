@@ -2559,7 +2559,7 @@ impl SessionRegistry {
         // conversation would move `cwd` to its transcript's directory, which
         // is not the checkout the caller named, so the two are refused
         // together rather than cut from somewhere unasked.
-        let worktree = spec.worktree.take();
+        let mut worktree = spec.worktree.take();
         if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
             return Err(ApiError::BadRequest(
                 "a worktree cannot be cut for a resumed conversation; start it fresh, or resume in the worktree as cwd".into(),
@@ -2632,6 +2632,11 @@ impl SessionRegistry {
         // clone — travels through the bootstrap response, so neither value
         // enters the Kubernetes object.
         if pod_backed {
+            // A worktree a dispatch profile filled in is dropped: the pod has
+            // its own checkout (WI-4707). One the caller asked for is refused.
+            if worktree.as_ref().is_some_and(|w| w.if_supported) {
+                worktree = None;
+            }
             validate_pod_placement_fields(worktree.is_some())?;
         }
         // An opencode pod runs a model only through a registered provider, as
