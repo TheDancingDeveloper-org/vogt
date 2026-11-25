@@ -1,11 +1,40 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
+import type { Plugin } from "vite";
 
 // Backend dev server target — `cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910`
 const BACKEND = "http://127.0.0.1:8910";
 
+// `src/index.tsx` awaits the runtime transport before it imports `./App`, so
+// the App chunk would download one round trip late. Preload it from the HTML
+// (fetch and parse only, not evaluate) so the download overlaps the transport
+// await. The import stays dynamic, so the demo seeding order is unchanged.
+// The chunk name is content-hashed, so the link is injected from the bundle.
+function preloadAppChunk(): Plugin {
+  return {
+    name: "vogt-preload-app-chunk",
+    apply: "build",
+    transformIndexHtml: {
+      order: "post",
+      handler(html, ctx) {
+        const chunk = Object.values(ctx.bundle ?? {}).find(
+          (item) =>
+            item.type === "chunk" &&
+            item.facadeModuleId != null &&
+            /[\\/]src[\\/]App\.tsx$/.test(item.facadeModuleId),
+        );
+        if (!chunk) {
+          throw new Error("preloadAppChunk: App chunk not found in bundle");
+        }
+        const tag = `<link rel="modulepreload" crossorigin href="/${chunk.fileName}">`;
+        return html.replace("</head>", `    ${tag}\n  </head>`);
+      },
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), preloadAppChunk()],
   server: {
     port: 5173,
     strictPort: true,
