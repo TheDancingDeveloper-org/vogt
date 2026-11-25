@@ -1287,7 +1287,9 @@ describe("a swimlane is a grouping, not a filter value", () => {
       "2",
     );
     // Grouping is this client's arrangement of what it already loaded.
-    expect(vogt.matching("GET /work")).toHaveLength(1);
+    // One load is two reads since WI-4757: the in-progress column asks for its
+    // live sessions in a call of its own. Grouping adds none.
+    expect(vogt.matching("GET /work")).toHaveLength(2);
   });
 
   it("gives a project with no work a lane of its own", async () => {
@@ -1317,8 +1319,9 @@ describe("a swimlane is a grouping, not a filter value", () => {
     expect(laneHead(container, "Gamma").querySelector(".board-lane-count")?.textContent).toBe(
       "0",
     );
-    // Still one load: an empty lane is this client arranging what it has.
-    expect(vogt.matching("GET /work")).toHaveLength(1);
+    // Still one load (two reads, see above): an empty lane is this client
+    // arranging what it has.
+    expect(vogt.matching("GET /work")).toHaveLength(2);
   });
 
   it("says nothing is here rather than nothing matches, when nothing is here", async () => {
