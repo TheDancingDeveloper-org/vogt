@@ -2196,6 +2196,101 @@ fn a_model_matching_forbidden_text_is_refused_and_a_bad_pattern_is_skipped() {
     assert!(start_on(&built, "opencode", "other-model").is_ok());
 }
 
+/// WI-4737: the allowed half of the model policy. A false refusal would block
+/// legitimate starts on every deployment, so each pair the fleet really uses
+/// must start, under a project policy that has live rules.
+#[test]
+fn the_fleets_legitimate_model_template_pairs_are_not_refused() {
+    let cases: [(&str, Option<&str>); 18] = [
+        ("claude", Some("claude-sonnet-5-5")),
+        ("claude", Some("claude-opus-5-5")),
+        ("claude", Some("claude-haiku-5-5")),
+        ("claude", Some("claude-fable-5-2")),
+        ("claude", Some("opus")),
+        ("claude", Some("sonnet")),
+        ("claude", Some("haiku")),
+        ("codex", Some("gpt-5.6")),
+        ("opencode", Some("gpt-5.6")),
+        ("codex", Some("openai/gpt-5.6")),
+        ("opencode", Some("anthropic/claude-sonnet-5-5")),
+        ("opencode", Some("openrouter/claude-opus-5-5")),
+        ("Claude Code (protected)", Some("claude-sonnet-5-5")),
+        ("claude", None),
+        ("codex", None),
+        ("opencode", None),
+        ("claude", Some("claude-opus-4-1")),
+        ("codex", Some("gpt-8")),
+    ];
+    let (built, script) = policied_start(json!({
+        "review": {"never_models": ["gpt-9"]},
+        "forbidden_text": ["(?i)grok"]
+    }));
+    *script.answers.lock().unwrap() = (0..cases.len() + 4)
+        .map(|n| {
+            (
+                200,
+                format!(r#"{{"id":"eng-ok-{n}","name":"beta-{n}","cwd":"/work/tree"}}"#),
+            )
+        })
+        .collect();
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    for (template, model) in cases {
+        let mut params = start_params(Some("beta"), None, "because");
+        params.template = Some(template.to_string());
+        params.model = model.map(str::to_string);
+        let outcome = start_session(ctx, &params);
+        assert!(
+            outcome.is_ok(),
+            "{template} / {model:?} was refused: {outcome:?}"
+        );
+    }
+    // A work item with no project has no project policy to judge.
+    {
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_work_item(&WorkItem {
+            id: "wrk_WI-77".to_string(),
+            reference: "WI-77".to_string(),
+            kind: WorkKind::Feature,
+            title: "Orphan".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            priority: Priority::P2,
+            effort: None,
+            project_id: None,
+            project_slug: None,
+            initiative_id: None,
+            origin: Origin::Created,
+            trust_state: TrustState::Unverified,
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: moment(),
+            updated_at: moment(),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    let mut params = start_params(None, None, "because");
+    params.work_item = Some("WI-77".to_string());
+    params.template = Some("codex".to_string());
+    params.model = Some("gpt-5.6".to_string());
+    // It cannot open without a scratch project, but that is not a model refusal.
+    let outcome = start_session(ctx, &params);
+    assert!(
+        !matches!(outcome, Err(VogtError::PolicyRefused(_))),
+        "project-less item was refused by the model policy: {outcome:?}"
+    );
+    // A purpose profile that fills the model (review: claude / opus).
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.session.model.as_deref(), Some("opus"));
+    assert_eq!(started.session.template.as_deref(), Some("claude"));
+}
+
 /// WI-4725: `started_by_session` keeps only that starter's sessions on every
 /// path: full and digest, with and without `states`, by engine id or `ses_…`
 /// id, and never an unlinked row.
