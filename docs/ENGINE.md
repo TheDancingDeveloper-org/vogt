@@ -4145,6 +4145,12 @@ that is not returned has no key in the response (a client that decodes
 `WorkResult` fills the default), and `mode=summary` still drops the body and
 comments.
 
+`work.list(with_sessions=true)` (default off, then rows carry no key) adds
+`live_sessions: {count, worst, ids}` to every row from one grouped read for the
+page: the item's sessions that are alive or hibernated, `worst` the lowest
+attention class (the oversight ordering), and `count` 0 with empty `ids` where
+none is live (WI-4751).
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —

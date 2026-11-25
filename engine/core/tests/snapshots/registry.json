@@ -12656,6 +12656,12 @@
             "title": "Include Finished",
             "type": "boolean"
           },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). One extra grouped read for the whole page. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
+            "type": "boolean"
+          },
           "mode": {
             "default": "summary",
             "description": "`summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.",
@@ -13003,7 +13009,7 @@
                 "type": "array"
               }
             ],
-            "description": "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode.",
+            "description": "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode. With `with_sessions`, each row also carries `live_sessions`.",
             "title": "Items"
           },
           "total": {
