@@ -3134,6 +3134,9 @@ impl PodBackend {
         link: std::sync::Arc<crate::agent_stream::PodLink>,
         size: (u16, u16),
     ) -> Self {
+        // A raw 0 or 65535 must not reach `current_size()`, the engine's vt100
+        // grid or the hibernation record (WI-4567).
+        let size = crate::pty::clamp_pty_size(size.0, size.1);
         link.set_pty_size(size);
         Self {
             id,
@@ -3152,6 +3155,7 @@ impl SessionBackend for PodBackend {
         )
     }
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let (cols, rows) = crate::pty::clamp_pty_size(cols, rows);
         *self.size.lock() = (cols, rows);
         self.link.set_pty_size((cols, rows));
         crate::agent_stream::global()
@@ -6892,5 +6896,37 @@ mod creation_error_tests {
             creation_error(api(500, "boom")),
             ApiError::InternalSource { .. }
         ));
+    }
+
+    fn backend_sized(size: (u16, u16)) -> PodBackend {
+        let id = Uuid::new_v4();
+        let (link, _reader) = crate::agent_stream::global().register_pod(id);
+        PodBackend::new(id, link, size)
+    }
+
+    /// `current_size()` is `(rows, cols)`; it feeds the engine's vt100 grid and
+    /// the hibernation record (WI-4567).
+    #[test]
+    fn a_new_pod_backend_holds_its_size_within_bounds() {
+        assert_eq!(backend_sized((0, 0)).current_size().unwrap(), (1, 1));
+        assert_eq!(
+            backend_sized((65535, 65535)).current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, crate::pty::MAX_PTY_COLS)
+        );
+        assert_eq!(backend_sized((120, 40)).current_size().unwrap(), (40, 120));
+    }
+
+    #[test]
+    fn a_pod_backend_resize_is_clamped_before_it_is_stored() {
+        let backend = backend_sized((120, 40));
+        // No agent is attached, so the frame send may fail; the stored size
+        // is set first.
+        let _ = backend.resize(0, 65535);
+        assert_eq!(
+            backend.current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, 1)
+        );
+        let _ = backend.resize(100, 30);
+        assert_eq!(backend.current_size().unwrap(), (30, 100));
     }
 }
