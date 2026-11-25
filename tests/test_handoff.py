@@ -522,6 +522,38 @@ def test_review_of_opens_a_session_on_the_review_brief(instance: AppContext) -> 
     assert "watch the migration" in prompt[prompt.index("## Also asked") :]
 
 
+def test_review_of_with_no_purpose_runs_as_the_review_purpose(
+    instance: AppContext,
+) -> None:
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(
+            base_url="http://127.0.0.1:8910", transport=StandInEngine()
+        ),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    item = native_work_item(ctx, title="Review me", project="vogt", body="Done.")
+    comment_work(
+        ctx,
+        CommentParams(
+            ref=item.ref,
+            body="ready",
+            kind="handoff",
+            handoff=_fields(base="main"),
+            reason=WHY,
+        ),
+    )
+    implicit = start_session(ctx, StartSessionParams(review_of=item.ref, reason=WHY))
+    assert implicit.session.purpose == "review"
+    explicit = start_session(
+        ctx,
+        StartSessionParams(review_of=item.ref, purpose="implement", reason=WHY),
+    )
+    assert explicit.session.purpose == "implement"
+
+
 def test_review_of_refuses_a_different_item(instance: AppContext) -> None:
     engine = StandInEngine()
     ctx = dataclasses.replace(
