@@ -887,7 +887,7 @@ export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal)
   call<BoardListResult>("board.list", params, "POST", signal);
 
 export const getWork = (ref: string) =>
-  call<WorkDetail>("work.get", { ref, mode: "full" });
+  call<WorkDetail>("work.get", { ref, mode: "full", include: ["all"] });
 
 /** The most refs one `work.get_many` takes (`WORK_GET_MANY_LIMIT` in the
  *  core's models); a caller with more asks in pages of this size. */

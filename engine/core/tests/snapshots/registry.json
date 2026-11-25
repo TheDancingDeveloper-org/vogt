@@ -9767,7 +9767,7 @@
     },
     {
       "name": "work.get",
-      "summary": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+      "summary": "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
       "scope": "read",
       "mutating": false,
       "reason_required": false,
@@ -9787,11 +9787,37 @@
             "type": "string"
           },
           "comment_limit": {
-            "default": 50,
+            "default": null,
+            "description": "How many comments to return. Default 3 (the newest); with `include` containing `all`, 200.",
             "maximum": 500,
             "minimum": 0,
             "title": "Comment Limit",
             "type": "integer"
+          },
+          "include": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "comments",
+                    "sessions",
+                    "branches",
+                    "git",
+                    "delivery",
+                    "relations",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it.",
+            "title": "Include"
           },
           "mode": {
             "default": "full",
