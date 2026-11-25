@@ -24,7 +24,7 @@ use super::{
 };
 
 mod answer;
-mod input;
+mod input_tests;
 mod lifecycle;
 mod manage;
 mod start;
