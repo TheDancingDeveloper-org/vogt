@@ -63,6 +63,8 @@ pub enum VogtError {
     InvalidSnooze(String),
     MissingReason(String),
     InvalidParams(String),
+    /// A start's model is one the project or the template will not run (WI-1590).
+    PolicyRefused(String),
     MigrationError(String),
     MigrationLocked(String),
     /// SQLite reported the database busy or locked past its busy timeout.
@@ -196,6 +198,7 @@ impl VogtError {
             | Self::InvalidSnooze(m)
             | Self::MissingReason(m)
             | Self::InvalidParams(m)
+            | Self::PolicyRefused(m)
             | Self::MigrationError(m)
             | Self::NotImplemented(m)
             | Self::MigrationLocked(m)
@@ -256,6 +259,7 @@ impl VogtError {
             Self::InvalidSnooze(_) => "invalid_snooze",
             Self::MissingReason(_) => "missing_reason",
             Self::InvalidParams(_) => "invalid_params",
+            Self::PolicyRefused(_) => "policy_refused",
             Self::MigrationError(_) => "migration_error",
             Self::MigrationLocked(_) => "migration_locked",
             Self::StorageBusy(_) => "storage_busy",
@@ -328,7 +332,7 @@ impl VogtError {
             | Self::GitHubUnavailable(_)
             | Self::PeerUnavailable { .. }
             | Self::ForgejoUnavailable(_) => 502,
-            Self::InvalidParams(_) => 422,
+            Self::InvalidParams(_) | Self::PolicyRefused(_) => 422,
             Self::MigrationError(_) => 500,
             Self::MigrationLocked(_) | Self::StorageBusy(_) | Self::GitHubRateLimited(_) => 503,
             Self::TransitionRejected { .. } => 409,
@@ -487,6 +491,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("invalid_snooze", 400),
         ("missing_reason", 400),
         ("invalid_params", 422),
+        ("policy_refused", 422),
         ("migration_error", 500),
         ("migration_locked", 503),
         ("engine_unavailable", 502),
@@ -578,6 +583,7 @@ mod tests {
             "invalid_snooze" => VogtError::InvalidSnooze(message),
             "missing_reason" => VogtError::MissingReason(message),
             "invalid_params" => VogtError::InvalidParams(message),
+            "policy_refused" => VogtError::PolicyRefused(message),
             "migration_error" => VogtError::MigrationError(message),
             "migration_locked" => VogtError::MigrationLocked(message),
             "engine_unavailable" => VogtError::EngineUnavailable(message),
@@ -688,7 +694,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 49);
+        assert_eq!(error_table().len(), 50);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
