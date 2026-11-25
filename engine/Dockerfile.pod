@@ -401,3 +401,11 @@ RUN apt-get update \
     && find /tmp -maxdepth 1 -type f \( -name 'flutter.tar.xz' -o -name 'android.zip' \) -delete
 USER 1000:1000
 RUN flutter config --no-analytics && flutter precache --android
+# Gradle/Kotlin daemon hygiene (WI-898): idle Gradle daemons exit after 30 min
+# instead of Gradle's default 3 h, and the Kotlin compile daemon heap is capped
+# at 2 GiB. Written to the vogt user's Gradle home; no build heap is changed.
+RUN mkdir -p /home/vogt/.gradle \
+    && printf '%s\n' \
+       'org.gradle.daemon.idletimeout=1800000' \
+       'kotlin.daemon.jvm.options=-Xmx2g' \
+       > /home/vogt/.gradle/gradle.properties
