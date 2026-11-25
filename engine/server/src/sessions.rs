@@ -1699,7 +1699,11 @@ impl SessionRegistry {
             budget: spec.budget.clone(),
             oversight: spec.role == SessionRole::Oversight,
         };
-        let provisioned = match crate::host_graft::config_home() {
+        let home = match self.cfg.host_placement.graft_config_home.clone() {
+            Some(home) => Ok(home),
+            None => crate::host_graft::config_home(),
+        };
+        let provisioned = match home {
             Ok(home) => {
                 crate::host_graft::HostGraftCredential::provision(
                     Arc::clone(&provider),
