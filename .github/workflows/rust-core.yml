@@ -71,9 +71,11 @@ jobs:
       - name: deploy scripts (shellcheck and contract tests)
         run: |
           shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh \
-            engine/deploy/agent-auth.sh engine/deploy/tests/agent-auth.sh
+            engine/deploy/agent-auth.sh engine/deploy/tests/agent-auth.sh \
+            engine/deploy/vogt-lsp.sh engine/deploy/tests/vogt-lsp.sh
           bash engine/deploy/tests/session-entrypoint.sh
           bash engine/deploy/tests/agent-auth.sh
+          bash engine/deploy/tests/vogt-lsp.sh
 
       - name: cargo fmt
         working-directory: engine

@@ -804,6 +804,12 @@ jobs:
           shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh
           bash engine/deploy/tests/session-entrypoint.sh
 
+      - name: vogt-lsp (shellcheck and contract test)
+        if: always() && !cancelled() && needs.changes.outputs.session_entrypoint == 'true'
+        run: |
+          shellcheck engine/deploy/vogt-lsp.sh engine/deploy/tests/vogt-lsp.sh
+          bash engine/deploy/tests/vogt-lsp.sh
+
       # The tailnet ssh/curl helpers baked into the session pod image (WI-4716).
       - name: tailnet-connect (shellcheck and contract test)
         if: always() && !cancelled() && needs.changes.outputs.session_entrypoint == 'true'
