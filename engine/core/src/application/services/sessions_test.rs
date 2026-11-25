@@ -2347,3 +2347,167 @@ fn full_rows_drop_command_unless_asked_for() {
         "claude --very-long-launch-line"
     );
 }
+
+// WI-4738: `resume` may name a Vogt session (ses_… or engine UUID).
+
+const PRIOR_ENGINE_ID: &str = "0a1b2c3d-0000-4000-8000-00000000abcd";
+
+/// A project `beta` with one finished session, started through the engine
+/// script, returning the built context, the script, and the session's
+/// `ses_…` id. The script's answers are left empty for the test to load.
+fn with_prior_session() -> (Built, Arc<Script>, String) {
+    let script = script_with(vec![(
+        200,
+        format!(r#"{{"id":"{PRIOR_ENGINE_ID}","name":"beta","cwd":"/work/tree"}}"#),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let prior = start_session(ctx, &start_params(Some("beta"), None, "first")).unwrap();
+    script.seen.lock().unwrap().clear();
+    script.answers.lock().unwrap().clear();
+    (built, script, prior.session.id)
+}
+
+/// Start a resume of `resume`; `answers` are the engine's replies in the
+/// order the client asks (the history row first). Returns the outcome and
+/// the requests the engine saw.
+fn resume_of(
+    built: &Built,
+    script: &Script,
+    resume: &str,
+    template: Option<&str>,
+    mut answers: Vec<(u16, String)>,
+) -> (Result<super::sessions::SessionResult, VogtError>, String) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!()
+    };
+    answers.reverse();
+    *script.answers.lock().unwrap() = answers;
+    script.seen.lock().unwrap().clear();
+    let mut params = start_params(Some("beta"), None, "resume");
+    params.resume = Some(resume.to_string());
+    params.template = template.map(str::to_string);
+    let outcome = start_session(ctx, &params);
+    let seen = script.seen.lock().unwrap().join("\n");
+    (outcome, seen)
+}
+
+fn archived(conversation: Option<&str>, resume_template: Option<&str>) -> (u16, String) {
+    (
+        200,
+        json!({
+            "id": PRIOR_ENGINE_ID,
+            "created_at": "2026-11-25T00:00:00Z",
+            "conversation_id": conversation,
+            "resume_template": resume_template,
+        })
+        .to_string(),
+    )
+}
+
+fn started_reply(id: &str) -> (u16, String) {
+    (
+        200,
+        format!(r#"{{"id":"{id}","name":"beta","cwd":"/work/tree"}}"#),
+    )
+}
+
+fn assert_resumes_stored(outcome: &Result<super::sessions::SessionResult, VogtError>, seen: &str) {
+    assert!(outcome.is_ok(), "{outcome:?}\n{seen}");
+    assert!(seen.contains(r#""resume":"conv-123""#), "{seen}");
+    assert!(seen.contains(r#""template":"codex""#), "{seen}");
+    assert!(!seen.contains(r#""resume":"ses_"#), "{seen}");
+}
+
+#[test]
+fn resume_by_vogt_session_id_sends_the_stored_conversation_and_template() {
+    let (built, script, ses) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![
+            archived(Some("conv-123"), Some("codex")),
+            started_reply("eng-new"),
+        ],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn resume_by_engine_uuid_sends_the_stored_conversation_and_template() {
+    let (built, script, _) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        PRIOR_ENGINE_ID,
+        None,
+        vec![
+            archived(Some("conv-123"), Some("codex")),
+            started_reply("eng-new"),
+        ],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn an_unknown_resume_string_passes_through_to_the_engine() {
+    let (built, script, _) = with_prior_session();
+    // A raw conversation id (plain, UUID-shaped but unknown to the history
+    // and the engine, and an unknown ses_ id such as OpenCode's own) keeps
+    // today's behaviour. Only the UUID is looked up, so only it sees 404s.
+    let cases: [(&str, Vec<(u16, String)>); 3] = [
+        ("conv-raw", vec![started_reply("eng-1")]),
+        (
+            "11111111-2222-4333-8444-555555555555",
+            vec![
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                started_reply("eng-2"),
+            ],
+        ),
+        ("ses_notavogtsession", vec![started_reply("eng-3")]),
+    ];
+    for (raw, answers) in cases {
+        let (outcome, seen) = resume_of(&built, &script, raw, Some("claude"), answers);
+        assert!(outcome.is_ok(), "{raw}: {outcome:?}\n{seen}");
+        assert!(seen.contains(&format!(r#""resume":"{raw}""#)), "{seen}");
+    }
+}
+
+#[test]
+fn a_session_without_a_recorded_conversation_is_a_clear_refusal() {
+    let (built, script, ses) = with_prior_session();
+    for resume in [ses.as_str(), PRIOR_ENGINE_ID] {
+        let (outcome, seen) = resume_of(&built, &script, resume, None, vec![archived(None, None)]);
+        let Err(VogtError::InvalidRequest(message)) = outcome else {
+            panic!("expected invalid_request, got {outcome:?}");
+        };
+        assert!(
+            message.contains("no recorded agent conversation"),
+            "{message}"
+        );
+        assert!(!seen.contains("POST"), "the engine started a pane: {seen}");
+    }
+}
+
+#[test]
+fn a_resume_template_that_conflicts_with_the_asked_one_is_refused() {
+    let (built, script, ses) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        Some("claude"),
+        vec![archived(Some("conv-123"), Some("codex"))],
+    );
+    let Err(VogtError::InvalidRequest(message)) = outcome else {
+        panic!("expected invalid_request, got {outcome:?}");
+    };
+    assert!(message.contains("resumes through template"), "{message}");
+    assert!(!seen.contains("POST"), "{seen}");
+}
