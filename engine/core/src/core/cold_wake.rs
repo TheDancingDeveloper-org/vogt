@@ -67,6 +67,11 @@ impl Decision {
         }
     }
 
+    /// A wake whose compaction inputs could not be read: a plain resume.
+    pub fn read_failed() -> Self {
+        Self::bare("read_failed")
+    }
+
     pub fn compact(&self) -> bool {
         self.outcome == "compact"
     }
