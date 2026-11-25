@@ -4185,7 +4185,7 @@
     },
     {
       "name": "session_stop",
-      "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+      "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4198,6 +4198,16 @@
             "description": "Why this write is being made (audited).",
             "minLength": 1,
             "title": "Reason",
+            "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
             "type": "string"
           }
         },
