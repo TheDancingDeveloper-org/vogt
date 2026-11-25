@@ -114,6 +114,9 @@ pub const STORE_ROUTE: &str = "/api/agent-auth/store/{var}";
 pub const BUNDLE_STORE_ROUTE: &str = "/api/agent-auth/store/{var}/bundle-file";
 /// The session's own approved grants (WI-973). Same auth as the read route.
 pub const GRANTS_ROUTE: &str = "/api/agent-auth/grants";
+/// A forge token for `git` (WI-1331): the live grant whose reason starts with
+/// `git:<host>`. Same auth as the read route.
+pub const GIT_CREDENTIAL_ROUTE: &str = "/api/agent-auth/git-credential";
 
 /// Per-session ceiling on fetches. A secret is asked for a handful of times in
 /// a session's life; a loop asking sixty times a minute is a bug or an attack,
@@ -2614,6 +2617,177 @@ pub async fn own_grants(State(state): State<Arc<AppState>>, request: Request<Bod
         .map(|held| held.grant)
         .collect();
     Json(grants).into_response()
+}
+
+/// The live grant of `session` whose reason starts with `git:<host>` (the host
+/// matched exactly and case-insensitively, then end of reason or whitespace),
+/// the soonest to expire first.
+fn git_grant_for_host(broker: &SecretBroker, session: Uuid, host: &str) -> Option<HeldGrant> {
+    let want = format!("git:{}", host.to_ascii_lowercase());
+    broker
+        .grants_for(session, time::OffsetDateTime::now_utc())
+        .into_iter()
+        .filter(|held| {
+            let reason = held.grant.reason.trim_start();
+            let lower = reason.to_ascii_lowercase();
+            lower.starts_with(&want)
+                && lower[want.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        })
+        .min_by_key(|held| held.expires_at)
+}
+
+#[derive(Deserialize)]
+pub struct GitCredentialQuery {
+    host: Option<String>,
+}
+
+/// `GET /api/agent-auth/git-credential?host=<host>` — hand a session the forge
+/// token of an approved `git:<host>` grant (WI-1331), asked for at prompt time
+/// by `vogt-git-askpass`. Authenticated, rate-limited and audited like
+/// [`fetch`]; answers `{username, token}` and audits grant and host, never the
+/// value. A `once` grant is spent whether or not the helper succeeds.
+pub async fn git_credential(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<GitCredentialQuery>,
+    request: Request<Body>,
+) -> Response {
+    let broker = state.sessions.secret_broker();
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    if !broker.enabled() {
+        return refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "on-demand secret brokering is not configured on this engine (ENGINE_AGENT_AUTH_SECRETS declares nothing)",
+        );
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let session = match presented {
+        Some(token) => presenting_session(&state, token).await,
+        None => None,
+    };
+    let Some(session) = session else {
+        auth::record_auth_failure(
+            &Method::GET,
+            &path,
+            &request_id,
+            "missing or unknown broker token",
+        )
+        .await;
+        return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
+    };
+    if let Some(retry_after) = state
+        .auth
+        .check_mutation_rate_limit(&format!("secret-broker:{session}"), FETCH_LIMIT_PER_MINUTE)
+    {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            retry_after_ms = retry_after.as_millis() as u64,
+            "secret broker rate limit exceeded"
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                header::RETRY_AFTER,
+                retry_after.as_secs().max(1).to_string(),
+            )],
+            Json(json!({ "error": "too many secret fetches from this session" })),
+        )
+            .into_response();
+    }
+    let host = query.host.unwrap_or_default().trim().to_ascii_lowercase();
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    if !host_ok {
+        return refusal(StatusCode::BAD_REQUEST, "host must be a plain hostname");
+    }
+    let missing = || {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            host = %host,
+            "git credential refused: no live grant for host"
+        );
+        refusal(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "no grant for git host {host}; ask for one with session_grant_request reason=git:{host} <why>"
+            ),
+        )
+    };
+    if !state.sessions.get(session).is_ok_and(|s| s.is_alive()) {
+        return missing();
+    }
+    let Some(candidate) = git_grant_for_host(broker, session, &host) else {
+        return missing();
+    };
+    // A `once` grant is taken before it is used and never restored.
+    let held = match candidate.grant.uses {
+        vogt_engine_contract::GrantUses::Once => {
+            match broker.take_grant(session, &candidate.grant.grant_id) {
+                Some(held) => held,
+                None => return missing(),
+            }
+        }
+        vogt_engine_contract::GrantUses::Ttl => candidate,
+    };
+    let entry = held.entry();
+    let grant_id = held.grant.grant_id.clone();
+    match broker.fetch_with(&entry, Some(&held.manifest_line())).await {
+        Ok(token) => {
+            tracing::info!(
+                target: "vogt::audit",
+                request_id = %request_id,
+                session_id = %session,
+                var = %entry.var,
+                grant_id = %grant_id,
+                host = %host,
+                "git credential brokered to session"
+            );
+            let username = if host == "github.com" {
+                "x-access-token"
+            } else {
+                "git"
+            };
+            (
+                StatusCode::OK,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(json!({ "username": username, "token": token.trim_end() })),
+            )
+                .into_response()
+        }
+        Err(failure) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                request_id = %request_id,
+                session_id = %session,
+                var = %entry.var,
+                grant_id = %grant_id,
+                host = %host,
+                error = %failure,
+                "git credential fetch failed"
+            );
+            ApiError::BadGateway(failure.to_string()).into_response()
+        }
+    }
 }
 
 /// `POST /api/agent-auth/store/{var}` — take one secret a session produced and

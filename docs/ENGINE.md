@@ -5710,6 +5710,18 @@ they hold `sessions`. The engine refuses:
 - an expiry in the past or more than 24 h ahead, or a `reason` over 2000
   characters (400).
 
+**Git credentials from a grant (WI-1331).** A grant whose `reason` starts with
+`git:<host>` (exact host, case-insensitive) also answers
+`GET /api/agent-auth/git-credential?host=<host>` with the session's broker
+token: `{username, token}` (`x-access-token` for github.com, else `git`), or
+404 naming `session_grant_request reason=git:<host> ...` when the session holds
+no live grant for the host. The soonest-expiring match wins; a `once` grant is
+spent whether or not the helper succeeds. Same auth and rate limit as `fetch`;
+the audit row carries `grant_id` and `host`, never the value.
+`vogt-agent-auth git-credential <host>` prints the two lines (silent exit 1 on
+refusal), and `vogt-git-askpass` calls it at a Password prompt when no token is
+in the environment and `VOGT_ENGINE_BROKER_URL` is set.
+
 The session fetches the grant with the command it already has, `vogt-agent-auth
 fetch VAR`. The fetch route checks the manifest first, then that session's own
 live grants. It runs the helper's `get VAR` with `ENGINE_AGENT_AUTH_SECRETS`

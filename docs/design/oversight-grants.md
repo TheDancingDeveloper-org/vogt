@@ -179,6 +179,12 @@ real grant before relying on it. `GET /api/sessions/{id}/grants` is an
 operator's read (stack secret, break-glass token or `admin`), and
 `session.grant_list` shows an agent only its own session's grants.
 
+> **Git push (WI-1331).** A credential grant whose `reason` starts with
+> `git:<host>` is also served to `vogt-git-askpass` at prompt time through
+> `GET /api/agent-auth/git-credential?host=`, so a grant approved after the
+> session started still lets `git push` authenticate (the environment is fixed
+> at spawn). See `docs/ENGINE.md` section 9.
+
 ### A capability (milestone 2)
 
 Claude Code cannot have its permission mode raised from outside the process,
