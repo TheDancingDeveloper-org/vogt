@@ -1076,7 +1076,7 @@ impl SessionRegistry {
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
             id,
             Arc::clone(&link),
-            (spec.cols.unwrap_or(80), spec.rows.unwrap_or(24)),
+            pty::clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24)),
         ));
         let spawned = pty::spawn_remote(
             id,
@@ -3429,12 +3429,9 @@ impl SessionRegistry {
         let record = self.records.get(&id)?.clone();
         let bytes = hibernation::read_screen(&self.cfg.state_dir, id);
         let summary = hibernated_summary(&record, bytes.len() as u64)?;
-        Some((
-            bytes::Bytes::from(bytes),
-            record.rows.unwrap_or(24),
-            record.cols.unwrap_or(80),
-            summary,
-        ))
+        let (cols, rows) =
+            pty::clamp_pty_size(record.cols.unwrap_or(80), record.rows.unwrap_or(24));
+        Some((bytes::Bytes::from(bytes), rows, cols, summary))
     }
 
     /// The hook a session's exit waiter calls: a session that ended — exited
@@ -4220,8 +4217,8 @@ impl SessionRegistry {
             } else {
                 record.conversation.as_ref().map(|c| c.id.clone())
             },
-            cols: cols.or(record.cols),
-            rows: rows.or(record.rows),
+            cols: cols.or(record.cols).map(|c| pty::clamp_pty_size(c, 1).0),
+            rows: rows.or(record.rows).map(|r| pty::clamp_pty_size(1, r).1),
             scrollback_bytes: None,
             companion: None,
             charter: None,
