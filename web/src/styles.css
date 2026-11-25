@@ -1754,6 +1754,75 @@ textarea {
   color: var(--activity-errored);
 }
 
+/* A pending decision (WI-1339): the question, folded context, one button per
+   option with the recommended one first, an optional note. Options wrap and,
+   at phone width, each takes the full row so a thumb hits it. */
+.inbox-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.inbox-decision-question {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.inbox-decision-context p {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inbox-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inbox-decision-option {
+  min-height: 44px;
+  padding: 6px 12px;
+}
+
+.inbox-decision-option.recommended {
+  border-color: var(--accent, currentColor);
+  font-weight: 600;
+}
+
+.inbox-decision-recommended {
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.inbox-decision-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inbox-decision-note input {
+  min-height: 36px;
+}
+
+.inbox-decision-withdraw {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 4px 0;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+}
+
+@media (max-width: 768px) {
+  .inbox-decision-option {
+    flex: 1 1 100%;
+  }
+}
+
 .inbox-entry-heading h2 {
   flex: 1 1 240px;
   margin: 0;
