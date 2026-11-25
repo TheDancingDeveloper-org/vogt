@@ -2592,17 +2592,6 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
-// The session and grant entry builders need the live engine session list joined
-// with declared sessions. They stay here so the shapes are pinned, and are
-// reached once the engine session join lands. Until then `collect` reports the
-// agent source as unconfigured coverage rather than inventing entries.
-#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
-fn session_shapes(session: &CodingSession, grant: &SessionGrant) -> (String, String) {
-    (session.id.clone(), grant.id.clone())
-}
-
-const _BRANCH_KIND: &str = BRANCH_CONCLUDED_KIND;
-
 #[cfg(test)]
 mod tests {
     use super::{inbox_archive_op, inbox_list_op, inbox_restore_op};
