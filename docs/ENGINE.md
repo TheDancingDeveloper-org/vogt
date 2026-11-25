@@ -792,6 +792,12 @@ form, and every `session.input` is audited. Calling the engine directly is
 the fallback for what they do not wrap. The recipe is in
 [Driving a session](#driving-a-session) below.
 
+Over MCP, `session.start` and `session.stop` answer compact by default (WI-3134):
+the session's `id`, `engine_session_id`, `cwd`, `name`, `project`, `work_item`,
+`activity` and `alive`, plus a start's `effective_policy` or `escalated_to`
+only when set. `mode=full` returns the complete record and `digest`. REST and
+the CLI keep the full result.
+
 `session.start`'s `resume` takes either the agent CLI's own conversation id
 (the `conversation_id` of a `session.history_list` row; its `resume_template`
 names the template to start it with) or the id of a session Vogt or the engine
