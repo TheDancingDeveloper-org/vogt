@@ -27,6 +27,7 @@ cat >"$stub" <<'STUB'
   echo "args=$*"
   echo "interp=${VOGT_LSP_PYTHON_PATH:-}"
   echo "keep=${KEEP_ME:-}"
+  echo "rainit=${VOGT_LSP_RA_INIT:-}"
   while IFS= read -r n; do echo "name=$n"; done < <(compgen -e)
 } >"$OUT"
 STUB
@@ -92,6 +93,7 @@ fakepy() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\n' >"$1"; chmod +x "$1"
 mkdir -p "$testdir/bin"
 cat >"$testdir/bin/uv" <<UV
 #!/bin/sh
+env | cut -d= -f1 >"$testdir/uv-env-names"
 [ "\$1 \$2" = "python find" ] && echo "$testdir/uv-python" && exit 0
 exit 1
 UV
@@ -155,6 +157,16 @@ done
 [[ "$(field keep)" == normal ]] || fail "normal variable was dropped"
 has_name PATH || fail "PATH was dropped"
 
+# uv python find runs with the sanitized environment (no secrets visible to it)
+rm -f "$testdir/uv-env-names"
+(cd "$testdir/wt" && rm -rf "$testdir/main/.venv" .venv rel pyrightconfig.json && : >pyproject.toml \
+  && GH_TOKEN=fake5 UV_CACHE_DIR=/fake MY_SECRET=fake6 KEEP_ME=normal bash "$script" python)
+[[ -f "$testdir/uv-env-names" ]] || fail "fake uv was not run"
+for n in GH_TOKEN MY_SECRET UV_CACHE_DIR; do
+  ! grep -qx "$n" "$testdir/uv-env-names" || fail "$n visible to uv python find"
+done
+grep -qx KEEP_ME "$testdir/uv-env-names" || fail "normal var missing for uv"
+
 # 6. jdtls data dir: stable per root, different across roots ----------------
 mkdir -p "$testdir/j1" "$testdir/j2"
 git init -q "$testdir/j1"
@@ -169,11 +181,27 @@ want="$HOME/.cache/vogt-lsp/jdtls/$(printf '%s' "$testdir/j1" | sha256sum | cut 
 run "$testdir/j2" java
 [[ "$(field args)" != "$a1" ]] || fail "jdtls data dir shared across roots"
 
-# 7. rust-analyzer flag ------------------------------------------------------
+# 7. rust-analyzer: no extra argv (the real CLI rejects unknown flags such as
+# --config); cargo.targetDir=true travels as initializationOptions JSON.
+strict="$testdir/strict-ra"
+cat >"$strict" <<'RA'
+#!/usr/bin/env bash
+for a in "$@"; do
+  echo "error: unexpected flag: \`$a\`" >&2
+  exit 2
+done
+{
+  echo "cwd=$(pwd -P)"
+  echo "args=$*"
+  echo "rainit=${VOGT_LSP_RA_INIT:-}"
+} >"$OUT"
+RA
+chmod +x "$strict"
 mkdir -p "$testdir/rs"
 : >"$testdir/rs/Cargo.toml"
-run "$testdir/rs" rust
-[[ "$(field args)" == *"cargo.targetDir=true"* ]] || fail "rust flag missing: '$(field args)'"
+(cd "$testdir/rs" && VOGT_LSP_RUST_BIN="$strict" bash "$script" rust) || fail "strict rust-analyzer stub rejected the launcher argv"
+[[ "$(field args)" == "" ]] || fail "rust got args: '$(field args)'"
+[[ "$(field rainit)" == '{"cargo":{"targetDir":true}}' ]] || fail "VOGT_LSP_RA_INIT is '$(field rainit)'"
 
 # 8. missing binary and bad usage -------------------------------------------
 rc=0

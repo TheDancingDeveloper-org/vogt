@@ -10,6 +10,11 @@
 # - Strips credentials and Python environment hints from the server's env.
 # - Execs the server at its pinned path, or VOGT_LSP_<LANG>_BIN (tests, stubs).
 #
+# - Rust: rust-analyzer's CLI takes no config flags, so the launcher execs it
+#   with no extra args and exports VOGT_LSP_RA_INIT, the JSON the client sends
+#   as initializationOptions ({"cargo":{"targetDir":true}}), like
+#   VOGT_LSP_PYTHON_PATH for basedpyright.
+#
 # VOGT_LSP_DEBUG=1 prints the resolved root and interpreter to stderr. It never
 # prints environment values.
 set -euo pipefail
@@ -156,6 +161,9 @@ if [[ ! -x "${bin}" ]]; then
   exit 127
 fi
 
+# Sanitize first so nothing below (uv, git) sees secrets or Python env hints.
+sanitize_env
+
 args=()
 case "${lang}" in
   python)
@@ -169,7 +177,7 @@ case "${lang}" in
     fi
     ;;
   rust)
-    args=(--config cargo.targetDir=true)
+    export VOGT_LSP_RA_INIT='{"cargo":{"targetDir":true}}'
     ;;
   java)
     hash="$(printf '%s' "${root}" | sha256sum | cut -d' ' -f1)"
@@ -180,6 +188,5 @@ case "${lang}" in
     ;;
 esac
 
-sanitize_env
 cd "${root}"
-exec "${bin}" "${args[@]}"
+exec "${bin}" ${args[@]+"${args[@]}"}
