@@ -18,6 +18,7 @@
 
 pub mod codex_guidance;
 pub mod codex_policy;
+pub mod codex_snapshots;
 pub mod opencode_store;
 pub mod salvage;
 #[cfg(test)]
@@ -1717,6 +1718,10 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
     argv.extend([
         "-c".to_string(),
         "features.daemon_auto_start=false".to_string(),
+        // WI-4051: Codex's shell snapshot writes the exported environment,
+        // this session's tokens included, to `$CODEX_HOME/shell_snapshots`.
+        "-c".to_string(),
+        "features.shell_snapshot=false".to_string(),
     ]);
     argv.extend(args.command_args.iter().cloned());
     if let Some(model) = args.model.map(str::trim).filter(|model| !model.is_empty()) {
@@ -2394,6 +2399,11 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
         cwd = ?config.cwd,
         "session-agent: starting the PTY"
     );
+    if config.cli == "codex" {
+        if let Some(home) = config.codex_home.as_deref() {
+            codex_snapshots::scrub_and_log(home, "boot");
+        }
+    }
     let (reader, writer, child, master) = spawn_pty(&config)?;
     tracing::info!("session-agent: PTY spawned");
     let writer = Arc::new(Mutex::new(writer));
@@ -2539,6 +2549,11 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                 tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
                                 // The CLI may have written after the flush above.
                                 let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+                                if config.cli == "codex" {
+                                    if let Some(home) = config.codex_home.as_deref() {
+                                        codex_snapshots::scrub_and_log(home, "exit");
+                                    }
+                                }
                                 send_frame(&mut sink, &Frame::Exited { status: Some(status.exit_code() as i32) }).await?;
                                 return Ok(());
                             }
@@ -4119,6 +4134,8 @@ mod tests {
                 r#"projects={"/work"={trust_level="trusted"}}"#,
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "-a",
                 "never",
                 "-s",
