@@ -139,6 +139,9 @@ pub(crate) struct RolloutTurns {
     screen_ready: bool,
     last_ready: Option<String>,
     last_done: Option<String>,
+    /// A turn ended while a goal was active, so its `ready` was held back; it
+    /// is announced if the goal ends with the session still at rest.
+    held_ready: bool,
 }
 
 /// What applying a batch of rollout events asks the caller to publish.
@@ -188,16 +191,27 @@ impl RolloutTurns {
                     self.running = false;
                     out.failed = None;
                     self.end_turn(Some(turn_id), swallow, &mut swallowed, &mut out);
+                    // An active goal continues itself: this turn ending is not
+                    // the session coming to rest, so neither ready nor done.
+                    if self.goal_active {
+                        self.held_ready |= std::mem::take(&mut out.ready);
+                    }
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
                         // A short turn can end before the first poll reads the
                         // rollout; that is still this session's turn, not
                         // history, so only turns that ended before it began
                         // are held back.
-                        out.done = !replay || completed_at.is_some_and(|t| t >= since);
+                        out.done = !self.goal_active
+                            && (!replay || completed_at.is_some_and(|t| t >= since));
                     }
                 }
-                RolloutEvent::Goal { active } => self.goal_active = *active,
+                RolloutEvent::Goal { active } => {
+                    self.goal_active = *active;
+                    if !*active && !self.running && std::mem::take(&mut self.held_ready) {
+                        out.ready = true;
+                    }
+                }
                 RolloutEvent::Failed { turn_id, reason } => {
                     self.running = false;
                     out.failed = Some(reason.clone());
@@ -413,6 +427,31 @@ mod tests {
                 failed: None
             }
         );
+    }
+
+    #[test]
+    fn an_active_goal_holds_ready_and_done_until_it_ends() {
+        let goal = |active| RolloutEvent::Goal { active };
+        let complete = |t: &str, done| RolloutEvent::Complete {
+            turn_id: t.into(),
+            done,
+            completed_at: None,
+        };
+        let mut turns = RolloutTurns::default();
+        assert_eq!(
+            turns.apply(&[goal(true), complete("a", true)], false, 0),
+            Outcome::default()
+        );
+        assert_eq!(
+            turns.apply(&[goal(false)], false, 0),
+            Outcome {
+                ready: true,
+                done: false,
+                failed: None
+            }
+        );
+        // Nothing further is held.
+        assert_eq!(turns.apply(&[goal(false)], false, 0), Outcome::default());
     }
 
     #[test]

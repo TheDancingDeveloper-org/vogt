@@ -844,7 +844,13 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
             json!({"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "step one done"}),
         ],
     );
-    await_changes(&client, &base, &id, "ready", 1).await;
+    // The goal is active, so the ended turn is not the session at rest: no
+    // `ready` is published for it.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        changes_of(&client, &base, &id, "ready").await.is_empty(),
+        "task_complete under an active goal is not ready"
+    );
     std::fs::write(&go, "").unwrap();
 
     // Well past `nudge_after`, at its prompt: no nudge while the goal drives.
@@ -862,6 +868,7 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
             json!({"type": "thread_goal_updated", "goal": {"status": "complete", "objective": "ship it"}}),
         ],
     );
+    await_changes(&client, &base, &id, "ready", 1).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while std::fs::read_to_string(&log).unwrap_or_default().is_empty() {
         assert!(
