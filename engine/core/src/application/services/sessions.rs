@@ -5800,6 +5800,21 @@ where
     Ok((decision, Some(summary)))
 }
 
+/// A storage read error while deciding on compaction is logged and the wake
+/// resumes the transcript: compaction is a saving, never a gate.
+fn plain_resume_on_read_error(
+    result: Result<(cold_wake::Decision, Option<String>), VogtError>,
+    engine_session: &str,
+) -> (cold_wake::Decision, Option<String>) {
+    result.unwrap_or_else(|error| {
+        tracing::warn!(
+            session = %engine_session, error = %error,
+            "could not read the cold-wake inputs; resuming the transcript"
+        );
+        (cold_wake::Decision::read_failed(), None)
+    })
+}
+
 fn wake_inner<C, I>(
     ctx: &AppContext<C, I>,
     engine: &EngineClient,
@@ -5832,7 +5847,8 @@ where
             escalated_to: None,
         });
     }
-    let (decision, fresh_prompt) = cold_wake_of(ctx, &current, session.as_ref())?;
+    let (decision, fresh_prompt) =
+        plain_resume_on_read_error(cold_wake_of(ctx, &current, session.as_ref()), &current.id);
     let Some(session) = session else {
         let woken = engine
             .wake_session(engine_id, None, force, fresh_prompt.as_deref())?
@@ -7309,6 +7325,15 @@ mod tests {
             body.contains("Resumed from a summary (cold wake)"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn a_cold_wake_read_error_falls_back_to_a_plain_resume() {
+        let failed = Err(VogtError::NotFound("storage read failed".to_string()));
+        let (decision, fresh_prompt) = super::plain_resume_on_read_error(failed, "eng-1");
+        assert!(!decision.compact());
+        assert_eq!(decision.audit()["outcome"], "read_failed");
+        assert!(fresh_prompt.is_none());
     }
 
     #[test]
