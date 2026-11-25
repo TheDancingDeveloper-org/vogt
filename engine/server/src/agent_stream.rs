@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch, Notify};
 use uuid::Uuid;
 use vogt_engine_contract::source::SourceDescriptor;
-use vogt_session_agent::Frame;
+use vogt_session_agent::{CgroupMemory, Frame};
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
 /// Frames the engine may queue for one attached agent. Control frames are
@@ -182,6 +182,9 @@ pub struct PodLink {
     /// An agent has completed its hello on this link at least once.
     ever_connected: AtomicBool,
     last_heartbeat: parking_lot::Mutex<Instant>,
+    /// The pod's cgroup memory from the latest heartbeat that carried it
+    /// (WI-4749). An older agent never sends one.
+    memory: parking_lot::Mutex<Option<CgroupMemory>>,
     /// When the current agent's socket was lost, while it is not connected.
     disconnected_at: parking_lot::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
@@ -234,6 +237,7 @@ impl PodLink {
             connected: AtomicBool::new(false),
             ever_connected: AtomicBool::new(false),
             last_heartbeat: parking_lot::Mutex::new(Instant::now()),
+            memory: parking_lot::Mutex::new(None),
             disconnected_at: parking_lot::Mutex::new(None),
             adopted: AtomicBool::new(false),
             durable: watch::Sender::new(0),
@@ -348,6 +352,18 @@ impl PodLink {
 
     pub fn heartbeat_age(&self) -> Duration {
         self.last_heartbeat.lock().elapsed()
+    }
+
+    /// The pod's latest reported cgroup memory, if its agent sends it.
+    pub fn memory(&self) -> Option<CgroupMemory> {
+        self.memory.lock().clone()
+    }
+
+    fn note_memory(&self, memory: Option<CgroupMemory>) {
+        if memory.is_some() {
+            tracing::debug!(?memory, "pod cgroup memory");
+            *self.memory.lock() = memory;
+        }
     }
 
     fn note_heartbeat(&self) {
@@ -1870,8 +1886,9 @@ where
                             link.salvages.fetch_add(1, Ordering::AcqRel);
                             link.salvage_notify.notify_waiters();
                         }
-                        Frame::Heartbeat { .. } => {
+                        Frame::Heartbeat { memory, .. } => {
                             link.note_heartbeat();
+                            link.note_memory(memory);
                             let next = link.next_offset();
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }
@@ -2363,8 +2380,39 @@ mod tests {
             "{frames:?}"
         );
         assert_eq!(frames[1..], [Frame::Resync { offset: 0 }]);
-        agent.send(Frame::Heartbeat { cursor: 0 });
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: None,
+        });
         assert_eq!(agent.drain().await, (vec![Frame::Ack { offset: 0 }], false));
+    }
+
+    /// WI-4749: the latest heartbeat's cgroup memory is kept per link, and a
+    /// heartbeat without one (an older agent) leaves the last value alone.
+    #[tokio::test]
+    async fn heartbeat_memory_is_stored_on_the_link() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        assert_eq!(link.memory(), None);
+        let memory = CgroupMemory {
+            memory_current: Some(42),
+            oom_kill: Some(1),
+            ..Default::default()
+        };
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: Some(memory.clone()),
+        });
+        agent.drain().await;
+        assert_eq!(link.memory(), Some(memory.clone()));
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: None,
+        });
+        agent.drain().await;
+        assert_eq!(link.memory(), Some(memory));
     }
 
     #[test]
