@@ -5,21 +5,23 @@ Used by vogt-tailnet-connect as an ssh ProxyCommand. The destination name is
 sent to the proxy unresolved (atyp 3), so the tailnet resolves it, not the pod.
 Exit 255 on any failure, as ssh expects of a failed ProxyCommand.
 """
+
 import os
 import socket
 import sys
 import threading
+from typing import NoReturn
 
 HOST, PORT = sys.argv[1], int(sys.argv[2])
 PROXY = (sys.argv[3], int(sys.argv[4])) if len(sys.argv) > 4 else ("127.0.0.1", 1055)
 
 
-def die(msg):
-    sys.stderr.write("vogt-tailnet-connect: %s\n" % msg)
+def die(msg: str) -> NoReturn:
+    sys.stderr.write(f"vogt-tailnet-connect: {msg}\n")
     sys.exit(255)
 
 
-def recv_exact(sock, n):
+def recv_exact(sock: socket.socket, n: int) -> bytes:
     buf = b""
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -32,7 +34,7 @@ def recv_exact(sock, n):
 try:
     s = socket.create_connection(PROXY, timeout=10)
 except OSError as exc:
-    die("cannot reach the tailnet proxy %s:%d: %s" % (PROXY[0], PROXY[1], exc))
+    die(f"cannot reach the tailnet proxy {PROXY[0]}:{PROXY[1]}: {exc}")
 
 try:
     s.sendall(b"\x05\x01\x00")
@@ -44,21 +46,21 @@ try:
     s.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + PORT.to_bytes(2, "big"))
     head = recv_exact(s, 4)
     if head[0] != 5 or head[1] != 0:
-        die("proxy could not connect to %s:%d (SOCKS5 reply %d)" % (HOST, PORT, head[1]))
+        die(f"proxy could not connect to {HOST}:{PORT} (SOCKS5 reply {head[1]})")
     atyp = head[3]
     if atyp == 3:
         addr_len = recv_exact(s, 1)[0]
     else:
         addr_len = {1: 4, 4: 16}.get(atyp)
         if addr_len is None:
-            die("proxy sent an unknown SOCKS5 address type %d" % atyp)
+            die(f"proxy sent an unknown SOCKS5 address type {atyp}")
     recv_exact(s, addr_len + 2)
 except OSError as exc:
-    die("handshake with the tailnet proxy failed: %s" % exc)
+    die(f"handshake with the tailnet proxy failed: {exc}")
 s.settimeout(None)
 
 
-def pump_out():
+def pump_out() -> None:
     try:
         while True:
             data = s.recv(65536)
