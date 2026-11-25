@@ -153,11 +153,16 @@ three languages within a release run.
 
 ## How changes land
 
-1. Branch from `origin/main`. Run the targeted gates for what you touched.
-2. Push and open the pull request. It runs only the path-scoped checks: fast
+1. A worker lands on the graft line `rust-2` with `g land` and stops. It
+   pushes no branch, opens no pull request and does not wait for CI. Run
+   the targeted gates for what you touched first
+   ([Pre-land check](#pre-land-check-on-rust-2)). A fork pull request instead
+   branches from `origin/main`.
+2. Oversight cuts the landed changesets into one batch pull request to `main`
+   (`graft-mirror pr-batch`). It runs only the path-scoped checks: fast
    feedback on the changed halves, not the whole suite.
-3. Review happens on the pull request. The proposed tree is not retested by a
-   second review run.
+3. Review happens on the batch pull request. The proposed tree is not
+   retested by a second review run.
 4. `land-pr` enqueues it. The merge queue runs the full suite on the exact
    tree `main` will become: Python 3.11 and 3.13, the core alone, Rust and
    the PWA, voice, the Android shell, and the `ci` gate.
@@ -233,8 +238,9 @@ environment and builds `vogt-core`.
 
 ## Landing
 
-`land-pr` (workspace `.agent-tools/bin/land-pr`) detects a merge queue from
-the base branch's rulesets. It enqueues with `gh pr merge --auto` and follows
+Oversight, not a worker, runs `land-pr` (workspace `.agent-tools/bin/land-pr`)
+on the batch pull request. It detects a merge queue from the base branch's
+rulesets. It enqueues with `gh pr merge --auto` and follows
 the entry's `merge_group` runs. On a failed run it prints the failing job's
 log and exits 1. The PR is never rebased by hand while it is queued.
 

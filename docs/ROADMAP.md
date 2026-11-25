@@ -130,10 +130,12 @@ On the dev deployment, 2026-11-06 (WI-3169, WI-3163):
 
 ### 3.4 Where `rust-2`'s own documents are behind
 
-Several of `rust-2`'s documents predate changes already on `main`. Its
-`AGENTS.md`, `CONTRIBUTING.md` and `ci.md` still describe landing on an
-integration branch, which graft replaced, and its version strings read
-0.7.22. §7 lists each document.
+`rust-2`'s `AGENTS.md`, `CONTRIBUTING.md` and `ci.md` now describe the
+graft flow (WI-3377): a worker lands on the line with `g land` and stops,
+oversight cuts the batch pull request to `main`, and the merge queue runs the
+full suite. Their text was not compared with `main`'s copy line by line.
+The version strings read 0.7.22 because the tree's manifests declare 0.7.22
+(`main` is at 0.7.27); they move only at release. §7 lists each document.
 
 ---
 
@@ -425,12 +427,12 @@ by sentence.
 
 | Document | On `main` | On `rust-2` |
 |---|---|---|
-| `AGENTS.md` | Current. | Behind `main`: describes the integration-branch landing flow that graft replaced. |
+| `AGENTS.md` | Current. | Landing described as graft (WI-3377); not diffed against `main`. |
 | `README.md` | Current. | Near identical. |
 | `docs/ARCHITECTURE.md` | Current for the released product. | WI-3378 documents core selection, crate ownership and both session paths. |
 | `docs/ENGINE.md` | Current for local sessions. | WI-3378 clarifies pod hibernation, resources, files/git, worktree cleanup and tasks. Other main-line reconciliation remains separate. |
 | `docs/DEPLOYMENT.md` | Current (0.7.27). Compose only. | WI-3379 adds the Kubernetes chapter, complete pod-settings inventory and generic manifest example; live cluster validation remains operator-owned. |
-| `docs/CONTRIBUTING.md`, `docs/ci.md` | Current. | Behind `main` (90 and 102 lines). |
+| `docs/CONTRIBUTING.md`, `docs/ci.md` | Current. | Landing described as graft, then the merge queue (WI-3377); not diffed against `main`. |
 | `docs/AGENT_GUIDE.md`, `docs/API.md` | Current. | Behind `main` (178 and 100 lines). Not checked for what changes in a pod. |
 | `docs/USER_GUIDE.md`, `docs/CONFIG.md`, `docs/CUSTOMISATION.md` | Current. | Small differences. `CONFIG.md` is generated. |
 | `docs/GETTING_STARTED.md`, `docs/SCHEMA.md`, `docs/GITHUB_APP.md` | Current. | Identical. The schema is shared by both cores. |
