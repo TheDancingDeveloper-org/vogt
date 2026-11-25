@@ -25,6 +25,18 @@ use crate::{
     session_backend::SessionBackend,
 };
 
+/// Widest PTY a client may ask for, in columns.
+pub const MAX_PTY_COLS: u16 = 500;
+/// Tallest PTY a client may ask for, in rows.
+pub const MAX_PTY_ROWS: u16 = 200;
+
+/// Bring a `(cols, rows)` size into `1..=MAX_PTY_COLS` x `1..=MAX_PTY_ROWS`.
+/// A client's resize, a stored size and a spec's size all pass through this
+/// before they reach the agent's PTY or the engine's grid (WI-4567).
+pub fn clamp_pty_size(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.clamp(1, MAX_PTY_COLS), rows.clamp(1, MAX_PTY_ROWS))
+}
+
 /// One chunk of PTY output. `pos` is the byte offset (in the lifetime stream)
 /// at which `data` begins. Lets re-attaching clients de-duplicate scrollback
 /// replay vs live broadcast.
@@ -1401,6 +1413,7 @@ impl Session {
         *self.last_person_input_at.lock()
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let (cols, rows) = clamp_pty_size(cols, rows);
         self.backend.resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
@@ -1666,9 +1679,10 @@ pub fn spawn(
     history: Option<Arc<SessionHistory>>,
 ) -> Result<SpawnedSession> {
     let pty_system = portable_pty::native_pty_system();
+    let (cols, rows) = clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24));
     let size = PtySize {
-        rows: spec.rows.unwrap_or(24),
-        cols: spec.cols.unwrap_or(80),
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     };
@@ -1820,7 +1834,10 @@ pub fn spawn_remote(
         defaults,
         bus,
         history,
-        (spec.rows.unwrap_or(24), spec.cols.unwrap_or(80)),
+        {
+            let (cols, rows) = clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24));
+            (rows, cols)
+        },
         cwd.to_string_lossy().into_owned(),
         backend,
         reader,
@@ -1846,6 +1863,7 @@ fn assemble_session(
     pid: Option<u32>,
     launcher: &'static str,
 ) -> Result<SpawnedSession> {
+    let (cols, rows) = clamp_pty_size(cols, rows);
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
     let command = Some(command_display(spec, &defaults));
     let runtime = tokio::runtime::Handle::current();
@@ -3857,5 +3875,88 @@ mod attach_render_tests {
             waits_us[waits_us.len() * 99 / 100],
             waits_us.last().unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod pty_size_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_size_is_held_within_bounds_and_a_normal_one_is_untouched() {
+        assert_eq!(clamp_pty_size(0, 0), (1, 1));
+        assert_eq!(clamp_pty_size(65535, 65535), (MAX_PTY_COLS, MAX_PTY_ROWS));
+        assert_eq!(clamp_pty_size(120, 40), (120, 40));
+        assert_eq!(clamp_pty_size(80, 24), (80, 24));
+    }
+
+    /// Kills the session on drop, so a failed assertion fails the test
+    /// instead of hanging the runtime on the live `cat`.
+    struct KillOnDrop(Arc<Session>);
+    impl std::ops::Deref for KillOnDrop {
+        type Target = Session;
+        fn deref(&self) -> &Session {
+            &self.0
+        }
+    }
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn spawn_cat(cols: Option<u16>, rows: Option<u16>) -> KillOnDrop {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = SessionSpec {
+            name: "clamp".into(),
+            command: Some(vec!["cat".into()]),
+            cols,
+            rows,
+            ..Default::default()
+        };
+        let spawned = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir.path(),
+                scrollback_bytes: 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                on_exit: None,
+            },
+            EventBus::new(8),
+            None,
+        )
+        .unwrap();
+        KillOnDrop(spawned.session)
+    }
+
+    #[tokio::test]
+    async fn session_resize_clamps_what_reaches_the_pty_and_the_grid() {
+        let session = spawn_cat(None, None);
+        let size = session.watch_size();
+        session.resize(0, 0).unwrap();
+        assert_eq!(*size.borrow(), (1, 1));
+        assert_eq!(session.backend.current_size().unwrap(), (1, 1)); // (rows, cols)
+        session.resize(65535, 65535).unwrap();
+        assert_eq!(*size.borrow(), (MAX_PTY_COLS, MAX_PTY_ROWS));
+        assert_eq!(
+            session.backend.current_size().unwrap(),
+            (MAX_PTY_ROWS, MAX_PTY_COLS)
+        );
+        session.resize(120, 40).unwrap();
+        assert_eq!(*size.borrow(), (120, 40));
+        assert_eq!(session.backend.current_size().unwrap(), (40, 120));
+    }
+
+    #[tokio::test]
+    async fn a_stored_spec_size_is_clamped_when_the_session_starts() {
+        let session = spawn_cat(Some(65535), Some(0));
+        assert_eq!(*session.watch_size().borrow(), (MAX_PTY_COLS, 1));
+        assert_eq!(session.backend.current_size().unwrap(), (1, MAX_PTY_COLS)); // (rows, cols)
     }
 }
