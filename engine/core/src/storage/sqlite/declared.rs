@@ -8,19 +8,22 @@ use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 
+#[cfg(test)]
+use crate::core::Principal;
 use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
     AuthDecision, Charter, Clock, CodingSession, Comment, ContractExemption, Decision,
     DriftProposal, Event, ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label,
-    Moment, PasswordCredential, Principal, Project, RelationKind, SessionGrant, SessionReport,
-    Suppression, Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction,
-    WriteBackOutcome, WriteBackRecord,
+    Moment, PasswordCredential, Project, RelationKind, SessionGrant, SessionReport, Suppression,
+    Token, Watch, WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome,
+    WriteBackRecord,
 };
 use crate::errors::VogtError;
+#[cfg(test)]
+use crate::storage::interface::BootstrapResult;
 use crate::storage::interface::{
-    AuditQuery, Blocker, BoardCellQuery, BootstrapResult, CarriedCredentials, CarryReport,
-    CloneStamp, Counts, DeclaredStore, MigrationReport, ProjectUpdate, ReadView, WorkFilter,
-    WorkItemUpdate, WriteTxn,
+    AuditQuery, Blocker, BoardCellQuery, CarriedCredentials, CarryReport, CloneStamp, Counts,
+    DeclaredStore, MigrationReport, ProjectUpdate, ReadView, WorkFilter, WorkItemUpdate, WriteTxn,
 };
 use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
@@ -31,6 +34,7 @@ use crate::storage::sqlite::query::{
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_REVISION: &str = "revision";
+#[cfg(test)]
 const META_CREATED_AT: &str = "created_at";
 const META_WORK_REF_SEQ: &str = "work_ref_seq";
 const META_CLONED_FROM: &str = "cloned_from_instance_id";
@@ -39,7 +43,9 @@ const META_CLONED_BACKUP_TAKEN_AT: &str = "cloned_backup_taken_at";
 /// Ids per `unstopped_sessions_for_items` query. Small under test so a test
 /// can cross it without hundreds of rows.
 pub(crate) const UNSTOPPED_SESSIONS_CHUNK: usize = if cfg!(test) { 4 } else { 500 };
+#[cfg(test)]
 const INIT_OPERATION: &str = "instance.init";
+#[cfg(test)]
 const INIT_REASON: &str = "instance bootstrap";
 const WORK_REF_PREFIX: &str = "WI-";
 
@@ -270,6 +276,7 @@ where
         migrator::bundled_version("declared", migrations_root().as_deref()).unwrap_or(0)
     }
 
+    #[cfg(test)]
     fn bootstrap(&self, principal: &Principal) -> Result<BootstrapResult, VogtError> {
         let mut conn = self.open(true)?;
         let tx = conn
@@ -1267,6 +1274,7 @@ impl ReadView for SqliteReadView {
         }
         Ok(found)
     }
+    #[cfg(test)]
     fn list_inbox_triage(&self, limit: i64) -> Result<Vec<InboxTriage>, VogtError> {
         many(
             &self.conn,
@@ -1329,36 +1337,6 @@ impl ReadView for SqliteReadView {
         .is_some_and(|flag| flag != 0))
     }
 
-    fn latest_session_reports(
-        &self,
-        engine_session_ids: &[String],
-    ) -> Result<std::collections::BTreeMap<String, SessionReport>, VogtError> {
-        let mut found = std::collections::BTreeMap::new();
-        for chunk in engine_session_ids.chunks(500) {
-            if chunk.is_empty() {
-                continue;
-            }
-            let placeholders = vec!["?"; chunk.len()].join(", ");
-            let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
-                .iter()
-                .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
-                .collect();
-            let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
-            for report in many(
-                &self.conn,
-                &format!(
-                    "SELECT * FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY engine_session_id ORDER BY created_at DESC, id DESC) AS rn FROM session_reports r WHERE engine_session_id IN ({placeholders})) WHERE rn = 1"
-                ),
-                refs.as_slice(),
-                row_session_report,
-            )? {
-                if let Some(engine) = report.engine_session_id.clone() {
-                    found.insert(engine, report);
-                }
-            }
-        }
-        Ok(found)
-    }
     fn list_session_reports(
         &self,
         engine_session_id: Option<&str>,
@@ -1794,6 +1772,7 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     ) -> Result<BTreeMap<String, InboxTriage>, VogtError> {
         self.view.inbox_triage_by_keys(a)
     }
+    #[cfg(test)]
     fn list_inbox_triage(&self, a: i64) -> Result<Vec<InboxTriage>, VogtError> {
         self.view.list_inbox_triage(a)
     }
@@ -1819,12 +1798,6 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         self.view.session_cold_wake_opt_out(a)
     }
 
-    fn latest_session_reports(
-        &self,
-        ids: &[String],
-    ) -> Result<std::collections::BTreeMap<String, SessionReport>, VogtError> {
-        self.view.latest_session_reports(ids)
-    }
     fn list_session_reports(
         &self,
         a: Option<&str>,
@@ -1910,9 +1883,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     fn commit(self) -> Result<(), VogtError> {
         SqliteWrite::commit(self)
     }
-    fn txn_id(&self) -> &str {
-        &self.txn_id
-    }
+    #[cfg(test)]
     fn revision(&self) -> i64 {
         self.revision
     }
@@ -2408,12 +2379,6 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![at, reason, token_id],
         ).map_err(sql_err)? > 0)
     }
-    fn reinstate_token(&mut self, token_id: &str) -> Result<bool, VogtError> {
-        Ok(self.view.conn.execute(
-            "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ? AND revoked_at IS NOT NULL",
-            [token_id],
-        ).map_err(sql_err)? > 0)
-    }
     fn upsert_password_credential(
         &mut self,
         actor_id: &str,
@@ -2497,6 +2462,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             ],
         ).map(|_| ()).map_err(sql_err)
     }
+    #[cfg(test)]
     fn set_session_stopped(
         &mut self,
         session_id: &str,
@@ -2715,6 +2681,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             params![status, actor_id, reason, at, proposal_id],
         ).map_err(sql_err)? > 0)
     }
+    #[cfg(test)]
     fn upsert_workflow(&mut self, workflow: &Workflow, at: Moment) -> Result<(), VogtError> {
         let definition = workflow.to_definition_json();
         let updated = self

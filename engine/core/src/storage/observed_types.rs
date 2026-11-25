@@ -32,12 +32,6 @@ pub struct AppendStats {
     pub unchanged: i64,
 }
 
-impl AppendStats {
-    pub fn total(self) -> i64 {
-        self.new + self.unchanged
-    }
-}
-
 /// A resolved dependency reference, ready to replace the projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepRefRow {
