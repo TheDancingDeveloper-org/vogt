@@ -271,6 +271,15 @@ COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth
 COPY --chmod=0755 deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY --chmod=0755 deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
 COPY --chmod=0755 deploy/session-entrypoint.sh /usr/local/bin/vogt-session-entrypoint
+# Tailnet access for session pods (WI-4716, WI-4713). The pod's tailscale
+# sidecar serves SOCKS5 on 127.0.0.1:1055; ssh reaches tailnet hosts through
+# `vogt-tailnet-connect` (ssh_config.d snippet) and `tcurl` wraps curl. Nothing
+# is proxied globally and there is no tailscale CLI. The relay is python3
+# (already in the image), so no netcat package is needed.
+COPY --chown=root:root --chmod=0644 deploy/pod/ssh_config-vogt-tailnet.conf /etc/ssh/ssh_config.d/50-vogt-tailnet.conf
+COPY --chmod=0755 deploy/pod/vogt-tailnet-connect /usr/local/bin/vogt-tailnet-connect
+COPY --chmod=0755 deploy/pod/tcurl /usr/local/bin/tcurl
+COPY --chmod=0755 deploy/pod/vogt-socks5-connect.py /usr/local/libexec/vogt-socks5-connect
 # The driven-session permission policy (WI-926, WI-3243): the session agent
 # starts Claude Code with --settings pointing here, as the merged image's
 # engine does for a host session. Root-owned and read-only to the session user.
