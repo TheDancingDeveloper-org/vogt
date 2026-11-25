@@ -682,6 +682,7 @@ COPY engine/deploy/vogt-prod-mcp.sh /usr/local/bin/vogt-prod-mcp
 COPY engine/deploy/cadastre-mcp.sh /usr/local/bin/cadastre-mcp
 COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
+COPY engine/deploy/vogt-lsp.sh /usr/local/bin/vogt-lsp
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
 COPY engine/deploy/claude-profile.sh /usr/local/bin/claude-profile
 COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
@@ -700,6 +701,7 @@ RUN chmod +x \
     /usr/local/bin/cadastre-mcp \
     /usr/local/bin/vogt-git-askpass \
     /usr/local/bin/vogt-rust-analyzer-mcp \
+    /usr/local/bin/vogt-lsp \
     /usr/local/bin/vogt-readonly-mcp \
     /usr/local/bin/claude-profile \
     /usr/local/bin/vogt-claude-session-hook \
