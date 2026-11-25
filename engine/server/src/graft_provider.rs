@@ -55,7 +55,7 @@ const DEFAULT_LINE: &str = "rust-2";
 
 /// Where minted session credentials are kept under the engine's state dir.
 /// The name predates the provider; adopted pods' credentials are found here.
-const CREDENTIAL_DIR: &str = "pod-graft-tokens";
+pub(crate) const CREDENTIAL_DIR: &str = "pod-graft-tokens";
 
 const SETTINGS: [(&str, &str); 5] = [
     ("ENGINE_SOURCE_GRAFT_ENDPOINT", "ENGINE_POD_GRAFT_ENDPOINT"),
