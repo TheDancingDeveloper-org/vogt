@@ -336,6 +336,12 @@ where
 /// accepted the session. An `Err` with `engine_started` set is an unknown
 /// outcome: the session may be running (a failed record is followed by a
 /// best-effort kill), so a caller that must not start twice cannot retry.
+///
+/// The phases, in the order their side effects happen: refuse what no caller
+/// may ask for (`refuse_unauthorised_start`), settle the profile, model policy
+/// and dispatch verdict (`admit_start`), draw ids and mint the session's token
+/// (`prepare_start`), ask the engine (`spawn_session`), then record the
+/// session, its actor and token, and the audit (`record_started`).
 pub(in crate::application::services) fn start_session_tracked<C, I>(
     ctx: &AppContext<C, I>,
     params: &StartSessionParams,
@@ -344,6 +350,50 @@ pub(in crate::application::services) fn start_session_tracked<C, I>(
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
+{
+    let reason = refuse_unauthorised_start(ctx, params)?;
+    let engine = engine_of(ctx)?;
+    let admitted = admit_start(ctx, engine, params)?;
+    let params = &admitted.params;
+    backfill_default_branch(ctx, params)?;
+    let mut writing = write_of(ctx);
+    let prepared = prepare_start(ctx, &writing, &admitted)?;
+    let (started, engine_spawn_ms) = spawn_session(engine, &prepared, params)?;
+    *engine_started = true;
+    let stored = record_started(
+        ctx,
+        &mut writing,
+        &admitted,
+        &prepared,
+        &started,
+        &reason,
+        engine_spawn_ms,
+    );
+    if let Err(error) = stored {
+        // The terminal is already running and Vogt holds no record of it.
+        // Stop it so a failed write never leaves an orphan process.
+        let _ = engine.kill_session(
+            &started.id,
+            Some(&reason),
+            Some(&ctx.principal.identity_ref),
+        );
+        return Err(error);
+    }
+    Ok(SessionResult {
+        session: summarize(ctx, &stored?, Some(&started))?,
+        escalated_to: admitted.escalated,
+    })
+}
+
+/// A start's cleaned reason, after refusing a `bypass` posture an agent asked
+/// for: only a person can grant it.
+fn refuse_unauthorised_start<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+) -> Result<String, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
 {
     let reason = writes::validate_reason(&params.reason)?;
     if params.permission_mode == "bypass" && ctx.principal.kind == ActorKind::Agent {
@@ -354,7 +404,40 @@ where
             ctx.principal.identity_ref
         )));
     }
-    let engine = engine_of(ctx)?;
+    Ok(reason)
+}
+
+/// What the guards, the profile and the dispatch verdict settled before
+/// anything is minted or sent.
+struct Admitted {
+    /// The start's params after the profile and a resume filled them.
+    params: StartSessionParams,
+    read_only: bool,
+    /// The profile fields the caller set itself.
+    overrides: Vec<&'static str>,
+    /// A worktree the profile filled, not the caller, is a default: the engine
+    /// drops it when the session resolves to a pod, which checks out the
+    /// source itself (WI-4707). A caller's own `worktree=true` stays a hard ask.
+    worktree_from_profile: bool,
+    started_by_session: Option<String>,
+    started_by_kind: Option<String>,
+    override_reason: Option<String>,
+    decision: dispatch_profiles::Decision,
+    dispatch_notes: Vec<String>,
+    escalated: Option<String>,
+}
+
+/// Resolve the caller, the profile and the model policy, and judge the start
+/// against the dispatch rules. Refuses before the engine is asked.
+fn admit_start<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    params: &StartSessionParams,
+) -> Result<Admitted, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
     let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
     let override_reason = override_reason(params, started_by_kind.as_deref())?;
     let settings = dispatch_profiles::resolve(&dispatch_preferences(ctx)?);
@@ -378,9 +461,6 @@ where
     refuse_forbidden_model(ctx, &resolved)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;
-    // A worktree the profile filled, not the caller, is a default: the engine
-    // drops it when the session resolves to a pod, which checks out the
-    // source itself (WI-4707). A caller's own `worktree=true` stays a hard ask.
     let worktree_from_profile = params.purpose.is_some() && !overrides.contains(&"worktree");
     refuse_privilege_above_caller(ctx, params, started_by_kind.as_deref())?;
     let decision = dispatch_check(
@@ -414,9 +494,50 @@ where
         ));
     }
     let escalated = escalated_to.filter(|_| enforcing).map(str::to_string);
-    backfill_default_branch(ctx, params)?;
-    let mut writing = write_of(ctx);
-    let session_id = fresh(&writing, "ses");
+    Ok(Admitted {
+        params: resolved,
+        read_only,
+        overrides,
+        worktree_from_profile,
+        started_by_session,
+        started_by_kind,
+        override_reason,
+        decision,
+        dispatch_notes,
+        escalated,
+    })
+}
+
+/// The ids, subject, token and engine spec a start carries from admission to
+/// the engine call and the record.
+struct Prepared {
+    session_id: String,
+    subject: Subject,
+    actor_ref: String,
+    scopes: Vec<String>,
+    token_hash: String,
+    budget: Option<SessionBudget>,
+    /// What the start asked for (Python `params.worktree`), so a start with no
+    /// purpose and no value audits null, not false.
+    audit_worktree: Option<bool>,
+    audit_repo_map: Option<bool>,
+    worktree: bool,
+    spec: CreateSession,
+}
+
+/// Draw the session id, resolve the subject, mint the session's token and
+/// build what the engine is asked to run.
+fn prepare_start<C, I>(
+    ctx: &AppContext<C, I>,
+    writing: &writes::WriteContext<'_, C, I, impl crate::storage::interface::DeclaredStore>,
+    admitted: &Admitted,
+) -> Result<Prepared, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let params = &admitted.params;
+    let session_id = fresh(writing, "ses");
     let subject = subject_of(ctx, params, &session_id)?;
     let actor_ref = format!("agent:session:{session_id}");
     let scopes = session_scopes(ctx)?;
@@ -428,34 +549,61 @@ where
         .map(|project| project.agent_policy)
         .unwrap_or_default();
     let budget = effective_budget(params, &policy);
-    // The audit records what the start asked for (Python `params.worktree`),
-    // so a start with no purpose and no value shows null, not false.
-    let audit_worktree = params.worktree;
-    let audit_repo_map = params.repo_map;
     let worktree = params.worktree.unwrap_or(false);
     // A start by an oversight session makes it the supervisor, so the engine
     // can wake it when this session changes (WI-1521). A worker's or a
     // person's start names no supervisor.
-    let supervisor = match (started_by_kind.as_deref(), started_by_session.as_deref()) {
+    let supervisor = match (
+        admitted.started_by_kind.as_deref(),
+        admitted.started_by_session.as_deref(),
+    ) {
         (Some("oversight"), Some(caller)) => Some(caller.to_string()),
         _ => None,
     };
-    let mut spec = build_spec(ctx, params, &subject, &secret, read_only, supervisor)?;
+    let mut spec = build_spec(
+        ctx,
+        params,
+        &subject,
+        &secret,
+        admitted.read_only,
+        supervisor,
+    )?;
     // Every agent-made start names its caller to the engine (WI-4489), so
     // the engine can hold the child to its parent's standing on its own.
-    spec.started_by = started_by_session.clone();
+    spec.started_by = admitted.started_by_session.clone();
     spec.budget = budget.as_ref().map(budget_wire);
     if worktree {
         spec.worktree = Some(json!({
             "branch": worktree_branch(&subject, &session_id),
             "base_ref": worktree_base(&policy),
-            "if_supported": worktree_from_profile,
+            "if_supported": admitted.worktree_from_profile,
         }));
     }
-    // How long the engine took to accept the session: on the audit row, and
-    // logged, so a slow or refused start is attributable afterwards.
+    Ok(Prepared {
+        session_id,
+        subject,
+        actor_ref,
+        scopes,
+        token_hash,
+        budget,
+        audit_worktree: params.worktree,
+        audit_repo_map: params.repo_map,
+        worktree,
+        spec,
+    })
+}
+
+/// Ask the engine to start the session, and say how long it took to accept it:
+/// on the audit row, and logged, so a slow or refused start is attributable
+/// afterwards.
+fn spawn_session(
+    engine: &EngineClient,
+    prepared: &Prepared,
+    params: &StartSessionParams,
+) -> Result<(EngineSession, i64), VogtError> {
+    let session_id = &prepared.session_id;
     let spawn_started = std::time::Instant::now();
-    let started = match engine.create_session(&spec) {
+    let started = match engine.create_session(&prepared.spec) {
         Ok(started) => started,
         Err(error) => {
             tracing::warn!(
@@ -468,7 +616,6 @@ where
             return Err(error);
         }
     };
-    *engine_started = true;
     let engine_spawn_ms = spawn_started.elapsed().as_millis() as i64;
     tracing::info!(
         target: "vogt.sessions",
@@ -476,190 +623,273 @@ where
         started.id,
         params.template.as_deref().unwrap_or(""),
     );
+    Ok((started, engine_spawn_ms))
+}
+
+/// Record the started session: its actor, token and row, the override audit
+/// and the declared branch, in one audited write.
+fn record_started<C, I>(
+    ctx: &AppContext<C, I>,
+    writing: &mut writes::WriteContext<'_, C, I, impl crate::storage::interface::DeclaredStore>,
+    admitted: &Admitted,
+    prepared: &Prepared,
+    started: &EngineSession,
+    reason: &str,
+    engine_spawn_ms: i64,
+) -> Result<CodingSession, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let params = &admitted.params;
+    let subject = &prepared.subject;
     // A resumed conversation starts in the directory its transcript records,
     // which may be below or beside the project root. Record where it actually
     // runs; every other session runs at the registry's root.
-    let cwd = match (params.resume.is_some() || worktree, started.cwd.as_str()) {
+    let cwd = match (
+        params.resume.is_some() || prepared.worktree,
+        started.cwd.as_str(),
+    ) {
         (true, resumed) if !resumed.is_empty() => resumed.to_string(),
         _ => subject.cwd.clone(),
     };
-    let actor_id = fresh(&writing, "act");
-    let token_id = fresh(&writing, "tok");
+    let actor_id = fresh(writing, "act");
+    let token_id = fresh(writing, "tok");
     // Read after the ranking tick: `why` consumes one, and every timestamp on
     // this path — actor, token, session, overlay — shares the next one.
-    let now = now(&writing);
-    let cold_wake_opt_out = params.cold_wake_opt_out;
-    let stored = {
-        let actor_ref = actor_ref.clone();
-        let scopes = scopes.clone();
-        let token_hash = token_hash.clone();
-        let session_id = session_id.clone();
-        let engine_session_id = started.id.clone();
-        let project_id = subject.project_id.clone();
-        let work_item_id = subject.work_item_id.clone();
-        let template = params.template.clone();
-        let model = params.model.clone();
-        let effort = params.effort.clone();
-        let reason = reason.clone();
-        let work_item_ref = subject.work_item_ref.clone();
+    let now = now(writing);
+    let record = StartRecord {
+        actor_id,
+        token_id,
+        now,
+        actor_ref: prepared.actor_ref.clone(),
+        scopes: prepared.scopes.clone(),
+        token_hash: prepared.token_hash.clone(),
+        session_id: prepared.session_id.clone(),
+        engine_session_id: started.id.clone(),
+        project_id: subject.project_id.clone(),
+        work_item_id: subject.work_item_id.clone(),
+        template: params.template.clone(),
+        model: params.model.clone(),
+        effort: params.effort.clone(),
+        reason: reason.to_string(),
+        work_item_ref: subject.work_item_ref.clone(),
         // Python's `_review_subject` records the resolved item, not the input.
-        let review_of = params
+        review_of: params
             .review_of
             .as_ref()
-            .and_then(|_| subject.work_item_ref.clone());
-        let project_slug = subject.project_slug.clone();
-        let is_scratch = subject.is_scratch;
-        let resume = params.resume.clone();
-        let role = params.role.clone();
-        let permission_mode = params.permission_mode.clone();
-        let autopilot = spec.autopilot;
-        let overlay_template = ctx.config.branch_binding_template.clone();
-        let purpose = params.purpose.clone();
-        let started_by = started_by_session.clone();
-        let started_by_kind = started_by_kind.clone();
-        let audit_overrides = overrides.clone();
-        let audit_budget = budget.as_ref().map(budget_wire);
-        let audit_notes = dispatch_notes.clone();
+            .and_then(|_| subject.work_item_ref.clone()),
+        project_slug: subject.project_slug.clone(),
+        is_scratch: subject.is_scratch,
+        resume: params.resume.clone(),
+        role: params.role.clone(),
+        permission_mode: params.permission_mode.clone(),
+        autopilot: prepared.spec.autopilot,
+        overlay_template: ctx.config.branch_binding_template.clone(),
+        purpose: params.purpose.clone(),
+        started_by: admitted.started_by_session.clone(),
+        started_by_kind: admitted.started_by_kind.clone(),
+        audit_overrides: admitted.overrides.clone(),
+        audit_budget: prepared.budget.as_ref().map(budget_wire),
+        audit_notes: admitted.dispatch_notes.clone(),
         // The override's own record names only the rules broken (Python).
-        let override_notes: Vec<String> = decision
+        override_notes: admitted
+            .decision
             .violations
             .iter()
             .map(|violation| violation.message.clone())
-            .collect();
-        let audit_override = override_reason.clone();
-        let audit_escalated = escalated.clone();
-        let override_rules: Vec<&'static str> = decision
+            .collect(),
+        audit_override: admitted.override_reason.clone(),
+        audit_escalated: admitted.escalated.clone(),
+        override_rules: admitted
+            .decision
             .violations
             .iter()
             .map(|violation| violation.rule.name())
-            .collect();
-        audited_write(
-            &mut writing,
-            SESSION_START,
-            &reason.clone(),
-            move |txn, caller| {
-                let actor = Actor {
-                    id: actor_id.clone(),
-                    kind: ActorKind::Agent,
-                    display_name: format!("Session {session_id}"),
-                    identity_ref: actor_ref.clone(),
-                    disabled: false,
-                    created_at: now,
-                };
-                let token = Token {
-                    id: token_id.clone(),
-                    actor_id: actor.id.clone(),
-                    actor_identity_ref: Some(actor_ref),
-                    name: format!("session {session_id}"),
-                    scopes,
-                    kind: TokenKind::Api,
-                    created_at: now,
-                    expires_at: None,
-                    last_used_at: None,
-                    revoked_at: None,
-                    revoked_reason: None,
-                };
-                let recorded = CodingSession {
-                    id: session_id.clone(),
-                    engine_session_id,
-                    project_id: project_id.clone(),
-                    work_item_id,
-                    actor_id: actor.id.clone(),
-                    cwd: cwd.clone(),
-                    template,
-                    model: model.clone(),
-                    effort: effort.clone(),
-                    reason,
-                    purpose: purpose.clone(),
-                    started_by_session: started_by.clone(),
-                    started_by_kind: started_by_kind.clone(),
-                    started_at: now,
-                    stopped_at: None,
-                };
-                txn.insert_actor(&actor)?;
-                txn.insert_token(&token, &token_hash)?;
-                txn.insert_session(&recorded)?;
-                if cold_wake_opt_out {
-                    txn.set_session_cold_wake_opt_out(&session_id, true)?;
-                }
-                let payload = audited_payload(&recorded);
-                if let Some(why) = &audit_override {
-                    audit_dispatch_override(
-                        txn,
-                        caller,
-                        &recorded.id,
-                        why,
-                        work_item_ref.as_deref(),
-                        &override_rules,
-                        &override_notes,
-                        now,
-                    )?;
-                }
-                // The declared half of the branch binding: a session opened for a
-                // work item records the branch it will use. The summary's branch
-                // is what was recorded, which is nothing when there is no item.
-                let declared_branch = match &work_item_ref {
-                    Some(work_ref) => Some(record_declared_branch(
-                        txn,
-                        work_ref,
-                        &project_id,
-                        &overlay_template,
-                        now,
-                    )?),
-                    None => None,
-                };
-                Ok(WriteOutcome::new(
-                    recorded,
-                    "session",
-                    &session_id,
-                    payload,
-                    "session.started",
-                    json!({
-                        "work_item": work_item_ref,
-                        "branch": declared_branch,
-                        "project": project_slug,
-                        "cwd": cwd,
-                        "scratch": is_scratch,
-                        "model": model,
-                        "effort": effort,
-                        "resume": resume,
-                        "autopilot": autopilot,
-                        "role": role,
-                        "permission_mode": permission_mode,
-                        "purpose": purpose,
-                        "overrides": audit_overrides,
-                        "budget": audit_budget,
-                        "review_of": review_of,
-                        "worktree": audit_worktree,
-                        "repo_map": audit_repo_map,
-                        "started_by_session": started_by_session,
-                        "started_by_kind": started_by_kind,
-                        // Dispatch (WI-1329): the rules this start broke but
-                        // was not refused for (a person, enforcement off, or
-                        // an override), the override's reason, and any
-                        // escalation.
-                        "dispatch_notes": audit_notes,
-                        "override_reason": audit_override,
-                        "escalated_to": audit_escalated,
-                        "engine_spawn_ms": engine_spawn_ms,
-                    }),
-                ))
-            },
-        )
+            .collect(),
+        cwd,
+        cold_wake_opt_out: params.cold_wake_opt_out,
+        audit_worktree: prepared.audit_worktree,
+        audit_repo_map: prepared.audit_repo_map,
+        engine_spawn_ms,
     };
-    if let Err(error) = stored {
-        // The terminal is already running and Vogt holds no record of it.
-        // Stop it so a failed write never leaves an orphan process.
-        let _ = engine.kill_session(
-            &started.id,
-            Some(&reason),
-            Some(&ctx.principal.identity_ref),
-        );
-        return Err(error);
+    audited_write(writing, SESSION_START, reason, move |txn, caller| {
+        write_start(txn, caller, record)
+    })
+}
+
+/// Everything the start's audited write needs, drawn before it so the write
+/// body holds no handle on the request.
+struct StartRecord {
+    actor_id: String,
+    token_id: String,
+    now: Moment,
+    actor_ref: String,
+    scopes: Vec<String>,
+    token_hash: String,
+    session_id: String,
+    engine_session_id: String,
+    project_id: String,
+    work_item_id: Option<String>,
+    template: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    reason: String,
+    work_item_ref: Option<String>,
+    review_of: Option<String>,
+    project_slug: String,
+    is_scratch: bool,
+    resume: Option<String>,
+    role: String,
+    permission_mode: String,
+    autopilot: bool,
+    overlay_template: String,
+    purpose: Option<String>,
+    started_by: Option<String>,
+    started_by_kind: Option<String>,
+    audit_overrides: Vec<&'static str>,
+    audit_budget: Option<Value>,
+    audit_notes: Vec<String>,
+    override_notes: Vec<String>,
+    audit_override: Option<String>,
+    audit_escalated: Option<String>,
+    override_rules: Vec<&'static str>,
+    cwd: String,
+    cold_wake_opt_out: bool,
+    audit_worktree: Option<bool>,
+    audit_repo_map: Option<bool>,
+    engine_spawn_ms: i64,
+}
+
+/// The audited write of a started session: actor, token and session rows, the
+/// cold-wake opt-out, the override audit and the declared branch, then the
+/// `session.started` event.
+fn write_start(
+    txn: &mut impl WriteTxn,
+    caller: &Actor,
+    record: StartRecord,
+) -> Result<WriteOutcome<CodingSession>, VogtError> {
+    let recorded = insert_started_rows(txn, &record)?;
+    let payload = audited_payload(&recorded);
+    if let Some(why) = &record.audit_override {
+        audit_dispatch_override(
+            txn,
+            caller,
+            &recorded.id,
+            why,
+            record.work_item_ref.as_deref(),
+            &record.override_rules,
+            &record.override_notes,
+            record.now,
+        )?;
     }
-    Ok(SessionResult {
-        session: summarize(ctx, &stored?, Some(&started))?,
-        escalated_to: escalated,
+    // The declared half of the branch binding: a session opened for a
+    // work item records the branch it will use. The summary's branch
+    // is what was recorded, which is nothing when there is no item.
+    let declared_branch = match &record.work_item_ref {
+        Some(work_ref) => Some(record_declared_branch(
+            txn,
+            work_ref,
+            &record.project_id,
+            &record.overlay_template,
+            record.now,
+        )?),
+        None => None,
+    };
+    let summary = started_summary(&record, declared_branch);
+    Ok(WriteOutcome::new(
+        recorded,
+        "session",
+        &record.session_id,
+        payload,
+        "session.started",
+        summary,
+    ))
+}
+
+/// Insert the session's actor, token and row, and its cold-wake opt-out.
+fn insert_started_rows(
+    txn: &mut impl WriteTxn,
+    record: &StartRecord,
+) -> Result<CodingSession, VogtError> {
+    let actor = Actor {
+        id: record.actor_id.clone(),
+        kind: ActorKind::Agent,
+        display_name: format!("Session {}", record.session_id),
+        identity_ref: record.actor_ref.clone(),
+        disabled: false,
+        created_at: record.now,
+    };
+    let token = Token {
+        id: record.token_id.clone(),
+        actor_id: actor.id.clone(),
+        actor_identity_ref: Some(record.actor_ref.clone()),
+        name: format!("session {}", record.session_id),
+        scopes: record.scopes.clone(),
+        kind: TokenKind::Api,
+        created_at: record.now,
+        expires_at: None,
+        last_used_at: None,
+        revoked_at: None,
+        revoked_reason: None,
+    };
+    let recorded = CodingSession {
+        id: record.session_id.clone(),
+        engine_session_id: record.engine_session_id.clone(),
+        project_id: record.project_id.clone(),
+        work_item_id: record.work_item_id.clone(),
+        actor_id: actor.id.clone(),
+        cwd: record.cwd.clone(),
+        template: record.template.clone(),
+        model: record.model.clone(),
+        effort: record.effort.clone(),
+        reason: record.reason.clone(),
+        purpose: record.purpose.clone(),
+        started_by_session: record.started_by.clone(),
+        started_by_kind: record.started_by_kind.clone(),
+        started_at: record.now,
+        stopped_at: None,
+    };
+    txn.insert_actor(&actor)?;
+    txn.insert_token(&token, &record.token_hash)?;
+    txn.insert_session(&recorded)?;
+    if record.cold_wake_opt_out {
+        txn.set_session_cold_wake_opt_out(&record.session_id, true)?;
+    }
+    Ok(recorded)
+}
+
+/// The `session.started` event's summary: where the start's audited facts are
+/// recorded.
+fn started_summary(record: &StartRecord, declared_branch: Option<String>) -> Value {
+    json!({
+        "work_item": record.work_item_ref,
+        "branch": declared_branch,
+        "project": record.project_slug,
+        "cwd": record.cwd,
+        "scratch": record.is_scratch,
+        "model": record.model,
+        "effort": record.effort,
+        "resume": record.resume,
+        "autopilot": record.autopilot,
+        "role": record.role,
+        "permission_mode": record.permission_mode,
+        "purpose": record.purpose,
+        "overrides": record.audit_overrides,
+        "budget": record.audit_budget,
+        "review_of": record.review_of,
+        "worktree": record.audit_worktree,
+        "repo_map": record.audit_repo_map,
+        "started_by_session": record.started_by,
+        "started_by_kind": record.started_by_kind,
+        // Dispatch (WI-1329): the rules this start broke but
+        // was not refused for (a person, enforcement off, or
+        // an override), the override's reason, and any
+        // escalation.
+        "dispatch_notes": record.audit_notes,
+        "override_reason": record.audit_override,
+        "escalated_to": record.audit_escalated,
+        "engine_spawn_ms": record.engine_spawn_ms,
     })
 }
 
