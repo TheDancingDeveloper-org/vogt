@@ -1279,8 +1279,17 @@ impl Session {
             // a few KiB where the raw tail was up to the whole budget.
         }
         // Lock order is scrollback, then terminal, as in the reader thread.
-        if let Some(frame) = self.grid_frame() {
+        // Only a copy of the grid is taken under the guard, so the copy and
+        // `pos` describe the same instant (the WI-891 invariant: the payload
+        // never carries bytes past `pos`). The frame is rendered from the
+        // copy after the guard is gone: formatting a deep scrollback is the
+        // slow part, and the reader thread, which needs the ring's lock for
+        // every chunk, must not wait on it (WI-2699).
+        if let Some(screen) = self.grid_copy() {
             drop(sb);
+            #[cfg(test)]
+            attach_render_hook::run();
+            let frame = crate::screen::render_frame(&mut { screen });
             return (self.bounded_frame(frame, tail_bytes), pos, true);
         }
         // No live grid (a session restored without one): the bounded tail
@@ -1292,9 +1301,9 @@ impl Session {
         (snapshot, pos, true)
     }
 
-    /// The live grid's frame, when this session has one.
-    fn grid_frame(&self) -> Option<Vec<u8>> {
-        self.terminal.lock().as_mut().map(|t| t.frame())
+    /// A copy of the live grid's screen, when this session has one.
+    fn grid_copy(&self) -> Option<vt100::Screen> {
+        self.terminal.lock().as_ref().map(|t| t.screen_copy())
     }
 
     /// The frame, cut to `tail_bytes` when one was given and the frame is
@@ -2878,6 +2887,32 @@ fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
         && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
 }
 
+/// A test seam in [`Session::snapshot_for_attach`]: a closure that runs on the
+/// attaching thread at the point where the scrollback guard has been dropped
+/// and the frame is about to be rendered (WI-2699). A test uses it to let the
+/// session's output move while the frame is in flight.
+#[cfg(test)]
+pub(crate) mod attach_render_hook {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once, at the next render on this thread.
+    pub(crate) fn set(f: impl FnOnce() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn run() {
+        if let Some(f) = HOOK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+}
+
 #[cfg(test)]
 mod archived_exit_code_tests {
     use super::archived_exit_code;
@@ -3598,5 +3633,229 @@ mod escalation_key_tests {
             format!("{id}:permission_prompt:e3b0c44298fc1c14")
         );
         assert_eq!(approval_key(id, " go? "), approval_key(id, "go?"));
+    }
+}
+
+/// WI-2699: an attach renders its frame from a copy of the grid, outside the
+/// scrollback lock, so the PTY reader is not held up for the length of a
+/// render — and the payload still never carries bytes past `pos` (WI-891).
+#[cfg(test)]
+mod attach_render_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// Prints `L00000`..`L02999`, parks on `read`, then prints `L03000`..
+    /// `L03999` once a line arrives. Echo is off, so the line that releases it
+    /// does not land in the ring.
+    const SCRIPT: &str = "stty -echo; i=0; \
+        while [ $i -lt 3000 ]; do printf 'L%05d\\n' $i; i=$((i+1)); done; \
+        read x; \
+        while [ $i -lt 4000 ]; do printf 'L%05d\\n' $i; i=$((i+1)); done; \
+        sleep 30";
+
+    fn spawn_session(dir: &std::path::Path) -> Arc<Session> {
+        let spec = SessionSpec {
+            name: "attach-render".into(),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), SCRIPT.into()]),
+            ..Default::default()
+        };
+        spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir,
+                scrollback_bytes: 1024 * 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                on_exit: None,
+            },
+            EventBus::new(64),
+            None,
+        )
+        .unwrap()
+        .session
+    }
+
+    fn wait_for(session: &Session, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !String::from_utf8_lossy(&session.snapshot().0).contains(marker) {
+            assert!(Instant::now() < deadline, "never saw {marker}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct Attach {
+        frame: Vec<u8>,
+        pos: u64,
+        reader_moved_during_render: bool,
+        /// The ring from `pos` on, read once the session settled.
+        live_after_pos: Vec<u8>,
+    }
+
+    /// A cold attach on a quiet session whose reader is released while the
+    /// frame is rendering.
+    fn attach_while_output_lands() -> Attach {
+        // `spawn` starts its watchers on the ambient runtime.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in_rt = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let session = spawn_session(dir.path());
+        wait_for(&session, "L02999");
+        let quiet_pos = session.scrollback_position();
+
+        let moved = Arc::new(AtomicBool::new(false));
+        {
+            let session = session.clone();
+            let moved = moved.clone();
+            // Watch the broadcast rather than the ring: the reader publishes
+            // a chunk only after it has pushed it under the ring's lock, and
+            // reading the broadcast needs no lock of the render's.
+            let mut rx = session.subscribe();
+            attach_render_hook::set(move || {
+                // The guard is gone: release the child and require the reader
+                // to land its output now, before the render continues. Were
+                // the render still under the ring's lock, the reader could
+                // not push and this would time out.
+                session.write_input(b"go\n").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    match rx.try_recv() {
+                        Ok(chunk) if chunk.pos >= quiet_pos => {
+                            moved.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            });
+        }
+        let (frame, pos, reset) = session.snapshot_for_attach(None, None);
+        assert!(reset, "a cold attach is a frame");
+        wait_for(&session, "L03999");
+        let live_after_pos = session.snapshot_for_attach(Some(pos), None).0.to_vec();
+        let _ = session.kill();
+        Attach {
+            frame: frame.to_vec(),
+            pos,
+            reader_moved_during_render: moved.load(Ordering::SeqCst),
+            live_after_pos,
+        }
+    }
+
+    #[test]
+    fn the_reader_keeps_landing_output_while_a_frame_renders() {
+        let a = attach_while_output_lands();
+        assert!(
+            a.reader_moved_during_render,
+            "the reader was held up behind the render"
+        );
+    }
+
+    #[test]
+    fn no_output_is_lost_or_doubled_across_the_attach_boundary() {
+        let a = attach_while_output_lands();
+        let frame = String::from_utf8_lossy(&a.frame);
+        let live = String::from_utf8_lossy(&a.live_after_pos);
+        // The frame stops at `pos`: the last line the child had printed when
+        // the guard was held, and nothing the reader landed after it.
+        assert!(frame.contains("L02999"), "frame lost the tail");
+        assert!(!frame.contains("L03000"), "frame carries bytes past pos");
+        // The live stream picks up exactly there: every later line once, in
+        // order, none repeated from the frame.
+        let expected: String = (3000..4000).map(|i| format!("L{i:05}\r\n")).collect();
+        assert!(
+            live.starts_with(&expected),
+            "live stream from pos {} is not L03000..L03999 contiguous",
+            a.pos
+        );
+        assert!(!live.contains("L02999"), "live stream repeats the frame");
+    }
+
+    /// WI-2699 measurement, not a gate: run with
+    /// `cargo test -p vogt-engine-server --lib reader_delay_histogram -- --ignored --nocapture`.
+    ///
+    /// The child streams at full rate while one thread attaches in a loop and
+    /// another takes the ring's lock the way the reader does, timing each
+    /// wait. A wait is the delay the reader would see; the histogram is of
+    /// those waits, in microseconds.
+    #[test]
+    #[ignore = "measurement"]
+    fn reader_delay_histogram_under_attach_load() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in_rt = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let line = "x".repeat(200);
+        let spec = SessionSpec {
+            name: "attach-hist".into(),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), format!("yes {line}")]),
+            ..Default::default()
+        };
+        let session = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir.path(),
+                scrollback_bytes: 4 * 1024 * 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                on_exit: None,
+            },
+            EventBus::new(64),
+            None,
+        )
+        .unwrap()
+        .session;
+        // Let the grid fill its scrollback, so a frame is as large as it gets.
+        std::thread::sleep(Duration::from_secs(2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let attacher = {
+            let (session, stop) = (session.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut n, mut bytes) = (0u32, 0usize);
+                while !stop.load(Ordering::Relaxed) {
+                    bytes = session.snapshot_for_attach(None, None).0.len();
+                    n += 1;
+                }
+                (n, bytes)
+            })
+        };
+        let mut waits_us: Vec<u128> = Vec::new();
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            let t = Instant::now();
+            let _ = session.scrollback_position();
+            waits_us.push(t.elapsed().as_micros());
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (attaches, frame_bytes) = attacher.join().unwrap();
+        let _ = session.kill();
+        waits_us.sort_unstable();
+        let edges = [10u128, 50, 100, 500, 1_000, 5_000, 10_000, 50_000];
+        let mut prev = 0;
+        for e in edges {
+            let n = waits_us.iter().filter(|w| **w >= prev && **w < e).count();
+            println!("  {prev:>6}..{e:<6} us: {n}");
+            prev = e;
+        }
+        let n = waits_us.iter().filter(|w| **w >= prev).count();
+        println!("  {prev:>6}..     us: {n}");
+        println!(
+            "attaches {attaches}, frame {frame_bytes} B, probes {}, p50 {} us, p99 {} us, max {} us",
+            waits_us.len(),
+            waits_us[waits_us.len() / 2],
+            waits_us[waits_us.len() * 99 / 100],
+            waits_us.last().unwrap()
+        );
     }
 }
