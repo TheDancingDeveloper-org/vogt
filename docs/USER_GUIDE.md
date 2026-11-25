@@ -1194,8 +1194,9 @@ $ uv run vogt project scaffold --project vogt --reason "close what the check fou
 ```
 
 **A refusal is not an outage.** Commands that read the session engine —
-`llm-provider list`, `session list`, `session template-list`, `session
-history`, `agent-cli list`, `engine status` — use the credential named by
+`llm-provider list` (a `vogt-core` verb; the MCP tool is `llm_provider_list`
+and the REST route `GET /api/llm-providers`), `session list`, `session
+template-list`, `session history`, `agent-cli list`, `engine status` — use the credential named by
 `engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`). When the engine refuses it
 (401 unrecognised or missing, 403 lacks the capability) the command exits
 non-zero with `unauthenticated` or `forbidden` and the engine's reason,
