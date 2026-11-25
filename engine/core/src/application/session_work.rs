@@ -1089,7 +1089,10 @@ mod tests {
         let detail = crate::registry::default_registry()
             .get("work.get")
             .expect("work.get is registered")
-            .run(Some(&built), json!({"ref": "WI-7"}))
+            .run(
+                Some(&built),
+                json!({"ref": "WI-7", "include": ["sessions", "branches"]}),
+            )
             .unwrap();
         assert_eq!(
             detail["sessions"][0]["id"],

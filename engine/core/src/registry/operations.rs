@@ -156,7 +156,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "work.get",
-            "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+            "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/work/get"),
