@@ -91,6 +91,7 @@ pub mod workspace_path;
 pub mod workspace_snapshot;
 pub mod workspaces;
 pub mod worktree_clean;
+pub mod worktree_sweep;
 pub mod ws;
 
 pub use app::{router, serve_forever};
