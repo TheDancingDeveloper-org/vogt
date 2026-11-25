@@ -274,4 +274,44 @@ mod tracked {
             assert_eq!(stored, expected);
         }
     }
+
+    fn resolved(purpose: Option<&str>, review_of: Option<&str>) -> (StartSessionParams, bool) {
+        let built = opened(None);
+        let mut params = start_params(Some("beta"), None, "because");
+        params.purpose = purpose.map(str::to_string);
+        params.review_of = review_of.map(str::to_string);
+        let (filled, read_only, _) = with_ctx!(&built, |ctx| {
+            crate::application::services::sessions::resolve_purpose(ctx, &params)
+        })
+        .unwrap();
+        (filled, read_only)
+    }
+
+    #[test]
+    fn a_review_of_with_no_purpose_runs_as_review_with_the_review_profile() {
+        let (filled, read_only) = resolved(None, Some("WI-1"));
+        assert_eq!(filled.purpose.as_deref(), Some("review"));
+        assert!(read_only, "the review profile is read-only");
+        assert_eq!(
+            filled.autopilot,
+            Some(false),
+            "the review profile fill applies"
+        );
+        assert!(filled.template.is_some() && filled.model.is_some());
+    }
+
+    #[test]
+    fn a_review_of_with_an_explicit_purpose_keeps_that_purpose() {
+        let (filled, read_only) = resolved(Some("implement"), Some("WI-1"));
+        assert_eq!(filled.purpose.as_deref(), Some("implement"));
+        assert!(!read_only);
+    }
+
+    #[test]
+    fn a_start_with_no_review_of_and_no_purpose_is_unchanged() {
+        let (filled, read_only) = resolved(None, None);
+        assert_eq!(filled.purpose, None);
+        assert!(!read_only);
+        assert_eq!(filled.template, None);
+    }
 }
