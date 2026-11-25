@@ -487,6 +487,12 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         processes: resources.processes,
         sampled_at: resources.sampled_at.clone(),
         over_threshold: resources.over_threshold,
+        memory_current: resources.memory_current,
+        memory_max: resources.memory_max,
+        memory_peak: resources.memory_peak,
+        oom_kill: resources.oom_kill,
+        observed_at: resources.observed_at.clone(),
+        memory_warning: resources.memory_warning,
     });
     summary.permission_mode = live.permission_mode.clone();
     summary.stopped_by = live.stopped_by.clone();

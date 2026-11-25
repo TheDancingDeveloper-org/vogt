@@ -377,6 +377,10 @@ fn session_from(summary: c::SessionSummary, kept: Kept) -> EngineSession {
     }
 }
 
+fn to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 impl From<c::SessionResources> for EngineResources {
     fn from(resources: c::SessionResources) -> Self {
         Self {
@@ -390,6 +394,12 @@ impl From<c::SessionResources> for EngineResources {
             processes: i64::from(resources.processes),
             sampled_at: resources.sampled_at,
             over_threshold: resources.over_threshold,
+            memory_current: resources.memory_current.map(to_i64),
+            memory_max: resources.memory_max.map(to_i64),
+            memory_peak: resources.memory_peak.map(to_i64),
+            oom_kill: resources.oom_kill.map(to_i64),
+            observed_at: resources.observed_at,
+            memory_warning: resources.memory_warning,
         }
     }
 }
