@@ -61,6 +61,7 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_EXTRA_CA_FILE` | Additional CA path in the session image; ensure it exists there. |
 | `ENGINE_POD_RESOURCE_REQUESTS` | Comma-separated quantities, e.g. `cpu=250m,memory=512Mi,ephemeral-storage=2Gi`. |
 | `ENGINE_POD_RESOURCE_LIMITS` | Same format for limits; align with quota. |
+| Derived tool caps (no variable) | From the pod's effective memory limit (default merged with the template policy) the engine sets `GRADLE_OPTS` (Gradle heap 28%, Kotlin daemon heap 17%), `JAVA_TOOL_OPTIONS=-Xmx` (10%) and `CARGO_BUILD_JOBS` (15% at 512 MiB per job, at least 1), so the caps total at most about 70% of the limit from about 3.5Gi up (6Gi: 1 job, Gradle 1720m, Kotlin 1044m, JVM 614m; 8Gi: 2 jobs, 2293m, 1392m, 819m). A name already set for the pod (carried session env) is kept; a missing or unparsable memory limit keeps the fixed `GRADLE_OPTS` (4G Gradle, 3G Kotlin) and sets no others. A name supplied only through the cache ConfigMap or Secret is overridden, as pod env outranks `envFrom`. |
 | `ENGINE_POD_PRIORITY_CLASS` | PriorityClass name; empty disables. |
 | `ENGINE_POD_NODE_SELECTOR` | Comma-separated `KEY=VALUE` labels every session pod must carry; a hard placement constraint. |
 | `ENGINE_POD_PREFERRED_NODES` | Comma-separated `NAME[:WEIGHT]`, weights 1–100. |
