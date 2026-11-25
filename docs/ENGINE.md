@@ -4110,6 +4110,31 @@ records from `state_dir`, rebuilds each surviving pod's stream link over the
 kept credential (WI-3205), and leaves the pods that cannot be adopted running
 for the operator to recover. Reporting is rate-limited to one warning per pod.
 
+### Reading a work item (`work.get`, WI-4726)
+
+`work.get` is lean by default. An oversight sweep reading hand-offs does not
+need every session ever linked or every observed branch, and the old default
+cost thousands of tokens per call. The `include` parameter (a list, or a
+comma-separated string) names the sections returned beside `item`:
+
+| Section | Returned |
+|---|---|
+| `comments` | the newest `comment_limit` comments (default 3 when `include` is absent or lists sections; 200 with `all`) |
+| `relations` | `item.relations`; left empty when not named |
+| `delivery` | landed / deployed / verified, with evidence |
+| `sessions` | the live sessions plus the newest 3 stopped ones; `sessions_omitted` counts the rest |
+| `branches` | the observed branches |
+| `git` | the git story; its own `branches` list is left out when `branches` is also named |
+| `all` | the full pre-WI-4726 shape: every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check` |
+
+**Default change.** An absent `include` is `comments, delivery, relations`.
+Before WI-4726 it was everything (`all`). A caller that reads `sessions`,
+`branches`, `git`, `walked` or older comments must pass `include`
+explicitly. The web UI's work-item view passes `include: ["all"]`. A section
+that is not returned has no key in the response (a client that decodes
+`WorkResult` fills the default), and `mode=summary` still drops the body and
+comments.
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —

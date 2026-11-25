@@ -2782,6 +2782,25 @@ pub enum GetWorkParamsCommentOrder {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
+pub enum GetWorkParamsIncludeItem {
+    #[serde(rename = "comments")]
+    Comments,
+    #[serde(rename = "sessions")]
+    Sessions,
+    #[serde(rename = "branches")]
+    Branches,
+    #[serde(rename = "git")]
+    Git,
+    #[serde(rename = "delivery")]
+    Delivery,
+    #[serde(rename = "relations")]
+    Relations,
+    #[serde(rename = "all")]
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub enum ListWorkParamsKindsItem {
     #[serde(rename = "feature")]
     Feature,
