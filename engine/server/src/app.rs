@@ -363,6 +363,7 @@ fn spawn_background_tasks(state: &Arc<AppState>) {
     // grow without bound. A no-op when history is disabled or the horizon is 0.
     spawn_history_retention_sweeper(Arc::clone(state));
     crate::worktree_sweep::spawn_nightly_sweep(Arc::clone(state));
+    crate::graft_token_sweep::spawn_sweep(Arc::clone(state));
     // Background task: bound what stopped sessions keep in memory (WI-4290).
     spawn_stopped_session_reaper(Arc::clone(state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(state));

@@ -121,13 +121,14 @@ impl Schedule {
     }
 }
 
-fn last_run_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(LAST_RUN_FILE)
-}
-
 /// The unix time the last sweep finished, if one was recorded and readable.
 pub fn load_last_run(state_dir: &Path) -> Option<i64> {
-    std::fs::read_to_string(last_run_path(state_dir))
+    load_last_run_in(state_dir, LAST_RUN_FILE)
+}
+
+/// [`load_last_run`] for another sweep's own file in the state dir.
+pub fn load_last_run_in(state_dir: &Path, file: &str) -> Option<i64> {
+    std::fs::read_to_string(state_dir.join(file))
         .ok()?
         .trim()
         .parse()
@@ -137,8 +138,13 @@ pub fn load_last_run(state_dir: &Path) -> Option<i64> {
 /// Record that a sweep finished at `now` (unix seconds). Written through a
 /// temporary file and a rename so a crash leaves the old value, not half of one.
 pub fn record_last_run(state_dir: &Path, now: i64) -> std::io::Result<()> {
+    record_last_run_in(state_dir, LAST_RUN_FILE, now)
+}
+
+/// [`record_last_run`] for another sweep's own file in the state dir.
+pub fn record_last_run_in(state_dir: &Path, file: &str, now: i64) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
-    let path = last_run_path(state_dir);
+    let path = state_dir.join(file);
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, now.to_string())?;
     std::fs::rename(&tmp, &path)
@@ -153,6 +159,34 @@ pub async fn drive_schedule<S, Fut, R, RFut>(
     state_dir: &Path,
     now: impl Fn() -> i64,
     sleep: S,
+    run: R,
+    max_runs: Option<usize>,
+) where
+    S: Fn(Duration) -> Fut,
+    Fut: Future<Output = ()>,
+    R: FnMut() -> RFut,
+    RFut: Future<Output = ()>,
+{
+    drive_schedule_in(
+        schedule,
+        state_dir,
+        LAST_RUN_FILE,
+        now,
+        sleep,
+        run,
+        max_runs,
+    )
+    .await
+}
+
+/// [`drive_schedule`] keeping its last run in `last_run_file` under the state
+/// dir, so another sweep reuses the scheduler without sharing a timestamp.
+pub async fn drive_schedule_in<S, Fut, R, RFut>(
+    schedule: Schedule,
+    state_dir: &Path,
+    last_run_file: &str,
+    now: impl Fn() -> i64,
+    sleep: S,
     mut run: R,
     max_runs: Option<usize>,
 ) where
@@ -161,12 +195,12 @@ pub async fn drive_schedule<S, Fut, R, RFut>(
     R: FnMut() -> RFut,
     RFut: Future<Output = ()>,
 {
-    let mut wait = schedule.first_wait(load_last_run(state_dir), now());
+    let mut wait = schedule.first_wait(load_last_run_in(state_dir, last_run_file), now());
     let mut runs = 0usize;
     loop {
         sleep(wait).await;
         run().await;
-        if let Err(e) = record_last_run(state_dir, now()) {
+        if let Err(e) = record_last_run_in(state_dir, last_run_file, now()) {
             tracing::warn!(error = %e, "could not record the worktree sweep time");
         }
         runs += 1;
