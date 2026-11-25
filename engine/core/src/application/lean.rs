@@ -23,9 +23,8 @@ const SESSION_KEEP: &[&str] = &[
 /// The operations whose result is compacted, and how.
 fn shape_of(operation: &str) -> Option<Shape> {
     match operation {
-        "session.start" | "session.hibernate" | "session.wake" | "session.bind_work" => {
-            Some(Shape::Session)
-        }
+        "session.start" | "session.stop" | "session.hibernate" | "session.wake"
+        | "session.bind_work" => Some(Shape::Session),
         "work.create" | "work.update" | "work.transition" => Some(Shape::Item),
         "work.comment" => Some(Shape::Comment),
         _ => None,
@@ -173,6 +172,19 @@ mod tests {
         assert!(lean.get("digest").is_none() && lean.get("woke").is_none());
         let kept = apply("session.hibernate", &json!({"mode": "full"}), full.clone());
         assert_eq!(kept, full);
+    }
+
+    #[test]
+    fn a_compact_stop_is_the_session_slim_and_full_restores_it() {
+        let full = json!({"session": big_session(), "digest": null, "effective_policy": null});
+        let lean = apply("session.stop", &json!({"reason": "r"}), full.clone());
+        assert!(lean.to_string().len() <= 600, "{lean}");
+        assert_eq!(lean["session"]["id"], "ses_01ABC");
+        assert!(lean.get("effective_policy").is_none());
+        assert_eq!(
+            apply("session.stop", &json!({"mode": "full"}), full.clone()),
+            full
+        );
     }
 
     #[test]
