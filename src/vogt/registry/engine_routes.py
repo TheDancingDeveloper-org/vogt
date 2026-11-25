@@ -276,6 +276,9 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/github-check/{var}": _SESSION_SELF,
     "GET /api/sessions/{id}/grant-check": _SESSION_SELF,
     "GET /api/agent-auth/grants": _SESSION_SELF,
+    "GET /api/agent-auth/git-credential": (
+        "session-local credential fetch; the MCP counterpart is session.grant_request"
+    ),
     "POST /api/agent-auth/store/{var}/bundle-file": _SESSION_SELF,
     "POST /api/agent-auth/bootstrap": _AGENT_STREAM,
     "GET /api/agent-auth/sessions/{id}/agent": _AGENT_STREAM,
