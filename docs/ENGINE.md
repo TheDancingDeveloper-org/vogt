@@ -4146,10 +4146,13 @@ that is not returned has no key in the response (a client that decodes
 comments.
 
 `work.list(with_sessions=true)` (default off, then rows carry no key) adds
-`live_sessions: {count, worst, ids}` to every row from one grouped read for the
+`live_sessions: {count, worst, ids}` to every row from a grouped read for the
 page: the item's sessions that are alive or hibernated, `worst` the lowest
 attention class (the oversight ordering), and `count` 0 with empty `ids` where
-none is live (WI-4751).
+none is live (WI-4751). When an item has recorded un-stopped sessions and the
+engine could not be asked (absent, or it errored), its `live_sessions` is
+`null`: unknown, not "none live". Count 0 means the engine answered. The
+grouped read is one query per 500 ids, so a page of any size works (WI-4753).
 
 ### Session history APIs
 
