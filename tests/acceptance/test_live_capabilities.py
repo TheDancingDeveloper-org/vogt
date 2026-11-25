@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from tests.acceptance.checks import sessions, tracker
-from tests.acceptance.harness import Context, Options
+from tests.acceptance.harness import Context, Options, ToolError
 
 
 class FakeSessionTarget:
@@ -121,6 +121,35 @@ def test_empty_reply_names_the_provider_failure_not_transcript_writeback() -> No
 
     assert "provider/network failure" in detail
     assert "connection failed:" in detail
+
+
+class ScreenUnavailableTarget:
+    """A session whose screen read fails in the engine, but whose log is readable."""
+
+    secrets: tuple[str, ...] = ()
+
+    def tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if name == "session_screen":
+            raise ToolError("engine: screen unavailable")
+        if name == "session_log_tail":
+            return {"text": "Connection failed: error sending request"}
+        if name == "session_list":
+            return {"sessions": []}
+        raise AssertionError(f"unexpected tool call: {name} {arguments}")
+
+
+def test_missing_reply_detail_survives_a_failed_screen_read() -> None:
+    ctx = Context(
+        ScreenUnavailableTarget(),
+        Options(with_sessions=True, state={"sessions.codex": "ses_fake"}),
+        "acceptance-provider-failure",
+    )
+
+    detail = sessions._missing_reply_detail(ctx, "ses_fake")
+
+    assert "provider/network failure" in detail
 
 
 def test_dependent_session_checks_skip_after_the_first_turn_failed() -> None:
