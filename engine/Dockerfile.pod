@@ -10,7 +10,8 @@
 # tracks the tag and updates the digest.
 ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
 ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
-ARG NODE_VERSION=22.14.0
+# Node >= 22.15 is required: undici (vitest) needs zstd support in node:zlib.
+ARG NODE_VERSION=22.23.5
 ARG PNPM_VERSION=10.12.4
 ARG UV_VERSION=0.7.12
 ARG GRAFT_VERSION=0.1.0
@@ -28,8 +29,8 @@ ARG FLUTTER_VERSION=3.35.3
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
 ARG ANDROID_PLATFORM_TOOLS_VERSION=35.0.2
 ARG CHROME_VERSION=156.0.8078.80
-ARG NODE_X64_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec
-ARG NODE_ARM64_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050
+ARG NODE_X64_SHA256=cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
+ARG NODE_ARM64_SHA256=2babb9eb5264860d540849f4b064a6fbdebcdc323657d9d382ce23d313fd5e09
 ARG UV_X64_SHA256=735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a
 ARG UV_ARM64_SHA256=23233d2e950ed8187858350da5c6803b14cbbeaef780382093bb2f2bc4ba1200
 ARG GRAFT_X64_SHA256=46c64a82bbc8f218b584860662a73f69c4baeeb49a926fd7e8a36c19c1c580fa
@@ -95,6 +96,14 @@ RUN apt-get update \
        ca-certificates coreutils curl git git-lfs jq ripgrep fd-find build-essential \
        pkg-config libssl-dev python3 python3-pip python3-venv python3-dev \
        openssh-client sudo unzip zip xz-utils zstd \
+       libfontconfig-dev \
+       libfreetype-dev \
+       libvulkan-dev \
+       libwayland-dev \
+       libx11-xcb-dev \
+       libxcb1-dev \
+       libxkbcommon-dev \
+       libxkbcommon-x11-dev \
     && find /var/lib/apt/lists -type f -delete \
     && command -v timeout >/dev/null \
     && test "$(command -v timeout)" = /usr/bin/timeout
