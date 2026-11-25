@@ -17,6 +17,8 @@ import { formatAgo } from "./viewAge";
 export function activityClass(s: SessionSummary): string {
   // A requested stop exits non-zero (a kill) but is not a crash (WI-913).
   if (s.activity === "stopped") return "stopped";
+  // Asleep, not crashed: a stale code from the run before it slept is not shown.
+  if (s.activity === "hibernated") return "hibernated";
   if (s.exit_code !== null) {
     return s.exit_code === 0 ? "done" : "errored";
   }
@@ -27,6 +29,7 @@ export function activityClass(s: SessionSummary): string {
  *  reads as finished rather than as whatever it was doing when it stopped. */
 export function activityLabel(s: ActivityState, exit: number | null): string {
   if (s === "stopped") return "stopped";
+  if (s === "hibernated") return "hibernated";
   if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
   switch (s) {
     case "waiting-for-input":

@@ -663,6 +663,9 @@ export interface HistorySessionMetadata {
   created_at: string;
   ended_at: string | null;
   exit_code: number | null;
+  /** Why it ended (`exited`, `stopped`, `hibernated`, `engine-restart`, ...);
+   *  null while live and on older rows. */
+  end_reason?: string | null;
   cwd: string | null;
   command: string | null;
   scrollback_bytes: number;
