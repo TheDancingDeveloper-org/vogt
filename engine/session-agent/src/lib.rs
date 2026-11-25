@@ -215,6 +215,63 @@ pub fn delta_reply(status: u16, body: &serde_json::Value) -> DeltaReply {
     }
 }
 
+/// Where the pod's cgroup v2 files live; `VOGT_CGROUP_ROOT` overrides it.
+pub const DEFAULT_CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The pod's cgroup memory, as read from `memory.current`, `memory.max`,
+/// `memory.peak` and the `oom_kill` line of `memory.events` (WI-4749).
+/// Visibility only. A field is `None` when its file is missing or unreadable;
+/// `memory_max` is also `None` when the limit is `max` (unlimited).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgroupMemory {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_peak: Option<u64>,
+    /// Processes the kernel's OOM killer has killed in this cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kill: Option<u64>,
+}
+
+/// The cgroup root for this process: `VOGT_CGROUP_ROOT`, else
+/// [`DEFAULT_CGROUP_ROOT`].
+pub fn cgroup_root() -> PathBuf {
+    std::env::var_os("VOGT_CGROUP_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CGROUP_ROOT))
+}
+
+/// Read the cgroup memory files under `root`. `None` when none of the four
+/// could be read (not a cgroup v2 mount), so the heartbeat then omits it.
+pub fn read_cgroup_memory(root: &Path) -> Option<CgroupMemory> {
+    let number = |name: &str| -> Option<u64> {
+        std::fs::read_to_string(root.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let oom_kill = std::fs::read_to_string(root.join("memory.events"))
+        .ok()
+        .and_then(|events| {
+            events.lines().find_map(|line| {
+                let (key, value) = line.split_once(char::is_whitespace)?;
+                (key == "oom_kill").then(|| value.trim().parse().ok())?
+            })
+        });
+    let memory = CgroupMemory {
+        memory_current: number("memory.current"),
+        // `max` does not parse: unlimited reads as `None`.
+        memory_max: number("memory.max"),
+        memory_peak: number("memory.peak"),
+        oom_kill,
+    };
+    (memory != CgroupMemory::default()).then_some(memory)
+}
+
 /// Messages exchanged on the authenticated engine stream. Binary PTY data is
 /// represented as JSON byte arrays so this module remains usable by non-Rust
 /// engine clients without a second codec.
@@ -246,6 +303,10 @@ pub enum Frame {
     },
     Heartbeat {
         cursor: u64,
+        /// The pod's cgroup memory (WI-4749). Optional and additive: an old
+        /// agent omits it and an old engine ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<CgroupMemory>,
     },
     Exited {
         status: Option<i32>,
@@ -2482,7 +2543,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                 return Ok(());
                             }
                         }
-                        send_frame(&mut sink, &Frame::Heartbeat { cursor }).await?;
+                        send_frame(&mut sink, &Frame::Heartbeat { cursor, memory: read_cgroup_memory(&cgroup_root()) }).await?;
                     }
                 }
             }
@@ -2842,6 +2903,97 @@ mod tests {
             "run() did not end: {result:?}"
         );
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// WI-4749: the cgroup memory files, read from a fake root.
+    fn fake_cgroup(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn cgroup_memory_reads_the_four_files() {
+        let dir = fake_cgroup(&[
+            ("memory.current", "1048576\n"),
+            ("memory.max", "6442450944\n"),
+            ("memory.peak", "2097152\n"),
+            ("memory.events", "low 0\nhigh 0\nmax 3\noom 0\noom_kill 2\n"),
+        ]);
+        assert_eq!(
+            read_cgroup_memory(dir.path()),
+            Some(CgroupMemory {
+                memory_current: Some(1_048_576),
+                memory_max: Some(6_442_450_944),
+                memory_peak: Some(2_097_152),
+                oom_kill: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn cgroup_memory_max_means_unlimited() {
+        let dir = fake_cgroup(&[("memory.current", "10\n"), ("memory.max", "max\n")]);
+        let memory = read_cgroup_memory(dir.path()).unwrap();
+        assert_eq!(memory.memory_current, Some(10));
+        assert_eq!(memory.memory_max, None);
+    }
+
+    #[test]
+    fn cgroup_memory_tolerates_missing_files() {
+        let dir = fake_cgroup(&[("memory.current", "7\n")]);
+        let memory = read_cgroup_memory(dir.path()).unwrap();
+        assert_eq!(memory.memory_current, Some(7));
+        assert_eq!(memory.memory_peak, None);
+        assert_eq!(memory.oom_kill, None);
+        // No cgroup files at all: nothing to report.
+        assert_eq!(read_cgroup_memory(fake_cgroup(&[]).path()), None);
+        // A missing directory is the same.
+        assert_eq!(
+            read_cgroup_memory(Path::new("/nonexistent-cgroup-root")),
+            None
+        );
+    }
+
+    #[test]
+    fn cgroup_oom_kill_change_is_seen_on_the_next_read() {
+        let dir = fake_cgroup(&[("memory.events", "oom_kill 0\n")]);
+        assert_eq!(read_cgroup_memory(dir.path()).unwrap().oom_kill, Some(0));
+        std::fs::write(dir.path().join("memory.events"), "oom 1\noom_kill 1\n").unwrap();
+        assert_eq!(read_cgroup_memory(dir.path()).unwrap().oom_kill, Some(1));
+    }
+
+    #[test]
+    fn heartbeat_round_trips_with_and_without_memory() {
+        // An old agent's frame has no `memory`: it parses.
+        let old: Frame = serde_json::from_str(r#"{"type":"heartbeat","cursor":5}"#).unwrap();
+        assert_eq!(
+            old,
+            Frame::Heartbeat {
+                cursor: 5,
+                memory: None
+            }
+        );
+        // And a frame without memory serializes exactly as before.
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"type":"heartbeat","cursor":5}"#
+        );
+        let memory = CgroupMemory {
+            memory_current: Some(1),
+            oom_kill: Some(3),
+            ..Default::default()
+        };
+        let with = Frame::Heartbeat {
+            cursor: 5,
+            memory: Some(memory),
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert_eq!(serde_json::from_str::<Frame>(&text).unwrap(), with);
+        // An old engine sees an unknown field only if it denies them; ours does not.
+        assert!(text.contains("\"oom_kill\":3"));
     }
 
     /// WI-4418: a busy session keeps its heartbeat and bundle-flush clock. The
