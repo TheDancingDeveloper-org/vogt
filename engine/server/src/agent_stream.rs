@@ -375,7 +375,7 @@ impl PodLink {
     /// The pod's latest reported cgroup memory, if its agent sends it.
     /// Remember the PTY size `(cols, rows)` to replay when an agent dials in.
     pub fn set_pty_size(&self, size: (u16, u16)) {
-        *self.pty_size.lock() = Some(size);
+        *self.pty_size.lock() = Some(crate::pty::clamp_pty_size(size.0, size.1));
     }
     pub fn pty_size(&self) -> Option<(u16, u16)> {
         *self.pty_size.lock()
@@ -2330,6 +2330,34 @@ mod tests {
         let mut agent = connect(&auth, other).await;
         let (frames, _) = agent.drain().await;
         assert!(!frames.iter().any(|f| matches!(f, Frame::Resize { .. })));
+    }
+
+    /// WI-4567: a size restored from storage or sent by a client is clamped
+    /// when stored, so the replay never sends 0 or an absurd size.
+    #[tokio::test]
+    async fn hello_replays_a_clamped_pty_size() {
+        use crate::pty::{MAX_PTY_COLS, MAX_PTY_ROWS};
+        for (given, want) in [
+            ((0, 0), (1, 1)),
+            ((65535, 65535), (MAX_PTY_COLS, MAX_PTY_ROWS)),
+            ((120, 40), (120, 40)),
+        ] {
+            let auth = Arc::new(AgentAuth::default());
+            let id = Uuid::new_v4();
+            let (link, _reader) = auth.register_pod(id);
+            link.set_pty_size(given);
+            assert_eq!(link.pty_size(), Some(want));
+            let mut agent = connect(&auth, id).await;
+            let (frames, _) = agent.drain().await;
+            let sent: Vec<_> = frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::Resize { cols, rows } => Some((*cols, *rows)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, vec![want], "{given:?}");
+        }
     }
 
     #[tokio::test]
