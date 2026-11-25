@@ -185,6 +185,10 @@ pub struct PodLink {
     /// The pod's cgroup memory from the latest heartbeat that carried it
     /// (WI-4749). An older agent never sends one.
     memory: parking_lot::Mutex<Option<PodMemory>>,
+    /// The PTY size `(cols, rows)` the engine last set for this session: the
+    /// viewer's size, or the size a woken session was hibernated at. The agent
+    /// starts its PTY at its own default, so this is replayed on every hello.
+    pty_size: parking_lot::Mutex<Option<(u16, u16)>>,
     /// When the current agent's socket was lost, while it is not connected.
     disconnected_at: parking_lot::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
@@ -251,6 +255,7 @@ impl PodLink {
             ever_connected: AtomicBool::new(false),
             last_heartbeat: parking_lot::Mutex::new(Instant::now()),
             memory: parking_lot::Mutex::new(None),
+            pty_size: parking_lot::Mutex::new(None),
             disconnected_at: parking_lot::Mutex::new(None),
             adopted: AtomicBool::new(false),
             durable: watch::Sender::new(0),
@@ -368,6 +373,13 @@ impl PodLink {
     }
 
     /// The pod's latest reported cgroup memory, if its agent sends it.
+    /// Remember the PTY size `(cols, rows)` to replay when an agent dials in.
+    pub fn set_pty_size(&self, size: (u16, u16)) {
+        *self.pty_size.lock() = Some(size);
+    }
+    pub fn pty_size(&self) -> Option<(u16, u16)> {
+        *self.pty_size.lock()
+    }
     pub fn memory(&self) -> Option<CgroupMemory> {
         self.memory.lock().as_ref().map(|m| m.memory.clone())
     }
@@ -1776,6 +1788,11 @@ where
             signal: "kill".into(),
         });
     }
+    // The agent's PTY starts at its own default size; put it at the size the
+    // engine holds, so a woken or redialled pod matches the viewer's terminal.
+    if let Some((cols, rows)) = link.pty_size() {
+        let _ = tx.try_send(Frame::Resize { cols, rows });
+    }
     let mut resync = ResyncGate::default();
     // Output is acknowledged only once the log holds it: `owed` is the offset
     // the agent is waiting on, and `durable` wakes the loop as the log catches up.
@@ -2287,6 +2304,32 @@ mod tests {
         // Close the link so the blocked read returns: the runtime waits for it.
         restarted.pod(id).unwrap().finish(0);
         next.await.unwrap();
+    }
+
+    /// WI-4567: a woken pod's agent starts its PTY at its own default size.
+    /// The engine replays the size it holds for the session on hello.
+    #[tokio::test]
+    async fn hello_replays_the_sessions_pty_size_to_the_agent() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        link.set_pty_size((101, 33));
+        let mut agent = connect(&auth, id).await;
+        let (frames, closed) = agent.drain().await;
+        assert!(!closed);
+        assert!(
+            frames.contains(&Frame::Resize {
+                cols: 101,
+                rows: 33
+            }),
+            "{frames:?}"
+        );
+        // A session with no known size sends none.
+        let other = Uuid::new_v4();
+        let (_l, _r) = auth.register_pod(other);
+        let mut agent = connect(&auth, other).await;
+        let (frames, _) = agent.drain().await;
+        assert!(!frames.iter().any(|f| matches!(f, Frame::Resize { .. })));
     }
 
     #[tokio::test]
