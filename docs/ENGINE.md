@@ -6021,7 +6021,10 @@ at `warn` and audited (`target=vogt::audit`, naming the session, never a token)
 and never holds up or fails the stop; the TTL is the backstop. The engine keeps
 the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 `0700`, like the pod stream tokens in `pod-tokens/`) from mint until the revoke
-attempt, so a pod an engine restart adopts is still revoked when it ends. A
+attempt, so a pod an engine restart adopts is still revoked when it ends. With
+no mint config at teardown (the mint token file was removed) the token cannot be
+revoked, so the file is kept for a later teardown that has one; the TTL is the
+backstop. A
 session hibernated or removed with no pod running has nothing left to revoke.
 
 For a **host-backed** session with the same graft source, the provider
