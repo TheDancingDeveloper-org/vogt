@@ -223,17 +223,17 @@ pub struct ListSessionsParams {
     /// Include sessions Vogt has already stopped.
     #[serde(default)]
     pub include_stopped: bool,
-    /// `digest` (default) or `full` (every SessionSummary field).
+    /// `digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it).
     #[serde(default = "default_list_sessions_params_mode")]
     pub mode: ListSessionsParamsMode,
-    /// Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list.
+    /// Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list.
     #[serde(default)]
     #[schemars(extend("x-keep-default" = true))]
     pub fields: Vec<String>,
     /// Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`, `work_item`), with no engine call. Needs `mode=full`; sessions with no starter are not listed.
     #[serde(default)]
     pub starters_only: bool,
-    /// Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.
+    /// Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub started_by_session: Option<String>,

@@ -516,7 +516,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.list",
-            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u{2026}). `fields` accepts a list or a comma-separated string.",
+            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u{2026}), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions"),
