@@ -2105,6 +2105,97 @@ fn a_starters_read_can_name_the_work_item_without_asking_the_engine() {
     assert!(find("eng-a").get("started_by_session").is_none());
 }
 
+// WI-2024: the start's model policy (WI-1590, WI-1852), ported from Python
+// `_refuse_forbidden_model`.
+
+/// A project `beta` whose agent policy is `policy`, plus the engine script a
+/// refused start must leave untouched.
+fn policied_start(policy: serde_json::Value) -> (Built, Arc<Script>) {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-p","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut project = Project::new("prj_beta", "beta", "beta", "/work/tree", moment());
+    project.link_state = LinkState::Unlinked;
+    project.agent_policy = serde_json::from_value(policy).unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_project(&project).unwrap();
+    txn.commit().unwrap();
+    (built, script)
+}
+
+fn start_on(
+    built: &Built,
+    template: &str,
+    model: &str,
+) -> Result<super::sessions::SessionResult, VogtError> {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!()
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.template = Some(template.to_string());
+    params.model = Some(model.to_string());
+    start_session(ctx, &params)
+}
+
+fn assert_refused_before_the_engine(
+    outcome: Result<super::sessions::SessionResult, VogtError>,
+    script: &Script,
+    needle: &str,
+) {
+    let Err(VogtError::PolicyRefused(message)) = outcome else {
+        panic!("expected policy_refused, got {outcome:?}");
+    };
+    assert!(message.contains(needle), "{message}");
+    assert!(
+        script.seen.lock().unwrap().is_empty(),
+        "the engine was asked"
+    );
+}
+
+#[test]
+fn a_claude_template_with_a_non_claude_model_is_refused() {
+    let (built, script) = policied_start(json!({}));
+    assert_refused_before_the_engine(
+        start_on(&built, "claude", "grok-4.7"),
+        &script,
+        "does not take model 'grok-4.7'",
+    );
+    assert!(start_on(&built, "claude", "claude-opus-4-1").is_ok());
+}
+
+#[test]
+fn a_bare_claude_alias_on_another_agent_is_refused() {
+    let (built, script) = policied_start(json!({}));
+    assert_refused_before_the_engine(
+        start_on(&built, "codex", "opus"),
+        &script,
+        "does not resolve the Claude Code alias 'opus'",
+    );
+}
+
+#[test]
+fn a_model_on_the_projects_never_models_is_refused() {
+    let (built, script) = policied_start(json!({"review": {"never_models": ["gpt-9"]}}));
+    assert_refused_before_the_engine(start_on(&built, "codex", "gpt-9"), &script, "never_models");
+    assert!(start_on(&built, "codex", "gpt-8").is_ok());
+}
+
+#[test]
+fn a_model_matching_forbidden_text_is_refused_and_a_bad_pattern_is_skipped() {
+    let (built, script) = policied_start(json!({"forbidden_text": ["(?=x)", "(?i)grok"]}));
+    assert_refused_before_the_engine(
+        start_on(&built, "opencode", "GROK-4.7"),
+        &script,
+        "forbidden_text pattern '(?i)grok'",
+    );
+    assert!(start_on(&built, "opencode", "other-model").is_ok());
+}
+
 /// WI-4725: `started_by_session` keeps only that starter's sessions on every
 /// path: full and digest, with and without `states`, by engine id or `ses_…`
 /// id, and never an unlinked row.
