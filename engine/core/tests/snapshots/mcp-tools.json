@@ -1414,6 +1414,12 @@
             "default": null,
             "title": "Label"
           },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every card: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
+            "type": "boolean"
+          },
           "lane_mode": {
             "default": "none",
             "enum": [
@@ -2317,6 +2323,12 @@
             "default": true,
             "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`.",
             "title": "Include Prs",
+            "type": "boolean"
+          },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
             "type": "boolean"
           },
           "mode": {
