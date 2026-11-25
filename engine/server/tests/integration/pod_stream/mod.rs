@@ -1035,15 +1035,13 @@ async fn post_with_session_ref(h: &Harness, session_ref: &str) -> reqwest::Statu
 
 // ---- host-backed sessions: the graft credential's lifecycle (WI-3986)
 
-/// The config home host credentials are delivered under in these tests.
+/// The config home host credentials are delivered under in these tests. It
+/// reaches the engine through `host_placement.graft_config_home`, not the
+/// process environment, which parallel tests share (WI-4216).
 fn host_config_home() -> std::path::PathBuf {
     static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap().keep();
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        dir
-    })
-    .clone()
+    HOME.get_or_init(|| tempfile::tempdir().unwrap().keep())
+        .clone()
 }
 
 fn host_token_path(session_ref: &str) -> std::path::PathBuf {
@@ -1056,7 +1054,6 @@ fn host_token_path(session_ref: &str) -> std::path::PathBuf {
 /// A harness whose `pod` template runs `script` on the host, with the
 /// session's environment written to `out`.
 async fn host_harness(out: &std::path::Path, command: Option<&str>) -> Harness {
-    host_config_home();
     let script = format!("env > {}; exec cat", out.display());
     let template = SessionTemplate {
         name: "pod".into(),
@@ -1081,6 +1078,7 @@ async fn host_harness(out: &std::path::Path, command: Option<&str>) -> Harness {
         // These start Vogt workers on the host, which a worker is refused
         // unless the transition override is set (WI-4428).
         cfg.host_placement.allow_workers = true;
+        cfg.host_placement.graft_config_home = Some(host_config_home());
     })
     .await;
     h.client = client_for(GRAFT_CORE_TOKEN);
