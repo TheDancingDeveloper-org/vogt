@@ -1817,16 +1817,24 @@ mod driven_policy_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let err = super::protected_hook_binary(&dir.join("missing")).unwrap_err();
-        assert!(err.contains("cannot be inspected"), "{err}");
+        assert!(
+            err.contains("cannot be inspected"),
+            "error of {} bytes",
+            err.len()
+        );
         let link = dir.join("hook-link");
         std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
         let err = super::protected_hook_binary(&link).unwrap_err();
-        assert!(err.contains("a symlink"), "{err}");
+        assert!(err.contains("a symlink"), "error of {} bytes", err.len());
         if unsafe { libc::geteuid() } != 0 {
             let own = dir.join("own-hook");
             std::fs::write(&own, "#!/bin/sh\nexit 0\n").unwrap();
             let err = super::protected_hook_binary(&own).unwrap_err();
-            assert!(err.contains("must be a root-owned regular file"), "{err}");
+            assert!(
+                err.contains("must be a root-owned regular file"),
+                "error of {} bytes",
+                err.len()
+            );
         }
         // A root-owned regular file in a root-owned directory passes.
         if std::path::Path::new("/bin/sh").exists() {
