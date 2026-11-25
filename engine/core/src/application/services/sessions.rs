@@ -1099,6 +1099,80 @@ fn model_matches_forbidden_text<'a>(model: &str, patterns: &'a [String]) -> Opti
         .find(|pattern| regex::Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(model)))
 }
 
+/// Is `text` a hyphenated UUID (8-4-4-4-12 hex digits)?
+fn is_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(group, len)| group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Let `resume` name a Vogt session (WI-4738). A `ses_…` id or an engine UUID
+/// that Vogt or the engine knows is replaced by that session's recorded agent
+/// conversation id, and its `resume_template` fills a template the caller left
+/// open. Anything that resolves to nothing is a raw CLI conversation id and
+/// passes through unchanged. Resolved here, not in the engine: the `ses_` id
+/// is Vogt's, and the engine only ever sees conversation ids.
+fn resolve_resume<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    mut params: StartSessionParams,
+) -> Result<StartSessionParams, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(wanted) = params.resume.as_deref().map(str::trim) else {
+        return Ok(params);
+    };
+    let (engine_id, known) = if wanted.starts_with("ses_") {
+        match resolve_target(ctx, wanted) {
+            Ok(target) => (target.engine_session_id, true),
+            Err(VogtError::NotFound(_)) => return Ok(params),
+            Err(error) => return Err(error),
+        }
+    } else if is_uuid(wanted) {
+        let known = ctx.declared.read()?.session_by_engine_id(wanted)?.is_some();
+        (wanted.to_string(), known)
+    } else {
+        return Ok(params);
+    };
+    let (conversation, template) = match engine.archived_session(&engine_id)? {
+        Some(row) => (row.conversation_id, row.resume_template),
+        // Not archived yet: a live session records its conversation too.
+        None => match engine.get_session(&engine_id)? {
+            Some(live) => (live.conversation_id, None),
+            // Unknown to the engine. A Vogt session still has no
+            // conversation to resume; any other UUID is a raw CLI id.
+            None if known => (None, None),
+            None => return Ok(params),
+        },
+    };
+    let conversation = conversation.filter(|id| !id.is_empty()).ok_or_else(|| {
+        VogtError::InvalidRequest(format!(
+            "session {wanted} has no recorded agent conversation to resume (it never ran an \
+             agent, or the engine did not capture its id); start a new session instead"
+        ))
+    })?;
+    if let (Some(asked), Some(needed)) = (params.template.as_deref(), template.as_deref()) {
+        if resolved_template_tag(asked) != resolved_template_tag(needed) {
+            return Err(VogtError::InvalidRequest(format!(
+                "session {wanted} resumes through template {}, not {}; drop template or name {}",
+                py_repr(needed),
+                py_repr(asked),
+                py_repr(needed)
+            )));
+        }
+    }
+    if params.template.is_none() {
+        params.template = template;
+    }
+    params.resume = Some(conversation);
+    Ok(params)
+}
+
 /// Refuse a start whose model the template or the subject's project forbids
 /// (WI-1590, WI-1852; Python `_refuse_forbidden_model`). Judged on the params
 /// after the profile has filled them, before anything reaches the engine.
@@ -1721,6 +1795,9 @@ where
     // permission posture, so naming a purpose cannot raise a start past what
     // the caller could ask for directly (WI-1323).
     let (resolved, read_only, overrides) = resolve_purpose(ctx, &escalated_params)?;
+    // After the purpose, before the model policy: a resume that names a
+    // session brings its template, and the policy judges that template.
+    let resolved = resolve_resume(ctx, engine, resolved)?;
     refuse_forbidden_model(ctx, &resolved)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;

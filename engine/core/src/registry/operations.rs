@@ -508,7 +508,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.start",
-            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
+            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. `resume` continues an agent conversation: pass a `conversation_id` from session_history_list (whose `resume_template` names the template to use), or the id of a session (ses_\u{2026} or engine UUID), whose recorded conversation and `resume_template` are used; a session with no recorded conversation is refused, and a `template` that conflicts with its `resume_template` is refused. Any other value is passed to the agent CLI as its own conversation id. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions"),
@@ -892,7 +892,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.history_list",
-            "List archived sessions (history), newest first.",
+            "List archived sessions (history), newest first. Each row carries `conversation_id` (the agent's own id, for session_start `resume`) and `resume_template` (the template session_start should use with it); session_start `resume` also takes a row's session id.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/history"),
