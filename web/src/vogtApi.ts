@@ -437,10 +437,24 @@ export interface BoardCellRequest {
   cursor?: string;
 }
 
+/** The live coding sessions of one work item (`with_sessions`). `worst` is
+ *  the session most in need of attention, in the core's attention words. */
+export interface LiveSessions {
+  count: number;
+  worst: string | null;
+  ids: string[];
+}
+
+/** A board card row. `live_sessions` is present only when the call asked
+ *  `with_sessions`; `null` means unknown (the engine could not be asked),
+ *  which is not the same as `{ count: 0 }`. Used by the board only: the
+ *  shared WorkItem type is untouched. */
+export type WorkListRow = WorkItem & { live_sessions?: LiveSessions | null };
+
 export interface BoardCellPage {
   lane_key: string;
   state: string;
-  items: WorkItem[];
+  items: WorkListRow[];
   total: number;
   next_cursor?: string | null;
 }
