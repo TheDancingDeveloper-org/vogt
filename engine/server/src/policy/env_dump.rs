@@ -174,15 +174,29 @@ fn keep_code(pieces: &[Piece], kept: &mut String) {
 
 /// Whether a simple command is a `gh` or `git` call whose arguments are text
 /// it writes out (a comment, a commit message). A substitution, a `<` read or
-/// an `@file` argument makes it code, so it is kept.
+/// an `@file` argument makes it code, so it is kept. So does anything outside
+/// a short list of text subcommands: `git -c alias.x=...`, `-c core.pager=...`
+/// and `gh alias set --shell` run shell code from their arguments.
 fn text_argument_command(simple: &str) -> bool {
     if simple.contains(['$', '`', '<', '@']) {
         return false;
     }
-    let (words, _, _) = command_words_assigning(simple);
-    words
-        .first()
-        .is_some_and(|program| matches!(base(program), "gh" | "git"))
+    let (words, _, assigns) = command_words_assigning(simple);
+    if !assigns.is_empty() || words.iter().any(|w| w.starts_with('!')) {
+        return false;
+    }
+    let word = |i: usize| words.get(i).map(String::as_str);
+    match word(0).map(base) {
+        Some("gh") => {
+            matches!(word(1), Some("issue" | "pr"))
+                && matches!(
+                    word(2),
+                    Some("comment" | "close" | "create" | "edit" | "reopen" | "review")
+                )
+        }
+        Some("git") => matches!(word(1), Some("commit" | "tag" | "notes")),
+        _ => false,
+    }
 }
 
 fn refuse(what: &str) -> String {
@@ -1226,6 +1240,11 @@ mod tests {
             "cat \"/proc/1/environ\"",
             "gh api -F body=@/proc/1/environ",
             "x=$(env)",
+            "git -c alias.x='!cat /proc/1/environ' x",
+            "git -c core.pager='cat /proc/self/environ' log",
+            "gh alias set --shell x 'cat /proc/1/environ'",
+            "git -c alias.y='!python3 -c \"import os;print(os.environ)\"' y",
+            "GIT_PAGER='cat /proc/1/environ' git log",
             "echo x; env",
             "true && printenv",
         ] {
