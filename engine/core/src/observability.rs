@@ -12,7 +12,6 @@
 //! subscriber. Nothing in this chunk emits yet, so the surface stays public
 //! for the HTTP adapter.
 
-#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{LazyLock, Mutex};
@@ -67,11 +66,6 @@ pub(crate) fn in_isolated_test_process(test: &str) -> bool {
     false
 }
 
-/// `logger("http")` is the `tracing` target modules should use.
-pub fn logger(area: &str) -> String {
-    format!("{LOGGER_NAMESPACE}.{area}")
-}
-
 pub fn accepted_request_id(raw: Option<&str>) -> Option<String> {
     let candidate = raw?.trim();
     let ok = !candidate.is_empty()
@@ -98,17 +92,6 @@ where
 
 pub fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok()
-}
-
-/// Open the request scope with no actor. `set_request_actor` fills it once auth
-/// has resolved who is calling.
-pub async fn with_actor<F, T>(identity_ref: String, body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    ACTOR
-        .scope(std::cell::RefCell::new(Some(identity_ref)), body)
-        .await
 }
 
 /// `set_request_actor`: record who is calling, inside an already-open scope.
