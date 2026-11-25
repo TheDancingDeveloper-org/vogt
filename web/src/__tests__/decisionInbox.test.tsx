@@ -112,4 +112,28 @@ describe("decisions in the Inbox", () => {
     expect(vogt.matching("POST /decisions/withdraw")[0]?.body).toMatchObject({ id: "dec_1" });
     mounted.unmount();
   });
+
+  it("offers Withdraw to a person who is not the asker", async () => {
+    const vogt = fakeVogt({
+      "GET /inbox": { body: RESULT },
+      "GET /auth/whoami": WHOAMI,
+      "POST /decisions/withdraw": { body: { decision: { id: "dec_1", state: "withdrawn" } } },
+    });
+    const mounted = mountAt("/inbox", "/inbox", () => <Inbox />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Withdraw" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+    await waitFor(() => expect(vogt.matching("POST /decisions/withdraw")).toHaveLength(1));
+    mounted.unmount();
+  });
+
+  it("hides Withdraw from an agent that did not ask", async () => {
+    fakeVogt({
+      "GET /inbox": { body: RESULT },
+      "GET /auth/whoami": { body: { identity_ref: "agent:engine:other", kind: "agent" } },
+    });
+    const mounted = mountAt("/inbox", "/inbox", () => <Inbox />);
+    await waitFor(() => expect(screen.getByText("Which branch should land first?")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
+    mounted.unmount();
+  });
 });
