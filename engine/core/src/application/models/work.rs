@@ -434,6 +434,9 @@ pub struct BoardListParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub label: Option<String>,
+    /// Add `live_sessions` {count, worst, ids} to every card: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     #[serde(default = "default_board_list_params_lane_mode")]
     pub lane_mode: BoardListParamsLaneMode,
     #[schemars(extend("minItems" = 1))]
@@ -646,6 +649,9 @@ pub struct BacklogParams {
     /// Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`.
     #[serde(default = "default_backlog_params_include_prs")]
     pub include_prs: bool,
+    /// Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     /// `summary` (default) returns each ranked row without its full work item (`item` is null; ref, title, kind, state, priority and score remain); `full` includes it, bodies and all.
     #[serde(default = "default_backlog_params_mode")]
     pub mode: BacklogParamsMode,
