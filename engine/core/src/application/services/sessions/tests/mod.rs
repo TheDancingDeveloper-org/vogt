@@ -83,7 +83,10 @@ fn context(
     crate::application::context::Built,
     Arc<Mutex<Vec<(String, String, String)>>>,
 ) {
-    let dir = std::env::temp_dir().join(format!("vogt-ses-{name}-{}", std::process::id()));
+    // Unique per call: tests that share a name run in parallel and must not delete each other's dir.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("vogt-ses-{name}-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut clock = None;
