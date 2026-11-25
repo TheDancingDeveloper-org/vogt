@@ -2366,7 +2366,12 @@ impl SessionRegistry {
     /// Provisional history row, written at spawn with `ended_at` and
     /// `exit_code` NULL, so a session SIGKILLed on redeploy is still visible
     /// in the History tab.
-    fn write_provisional_history_row(&self, session: &Arc<Session>, role: SessionRole) {
+    fn write_provisional_history_row(
+        &self,
+        session: &Arc<Session>,
+        role: SessionRole,
+        waking: bool,
+    ) {
         if let Some(history) = self.history.clone() {
             let role = role.as_str();
             let live = Arc::clone(session);
@@ -2394,6 +2399,14 @@ impl SessionRegistry {
                     economics: None,
                 };
                 drop(live);
+                // A wake continues the same row: the stop that hibernated it
+                // is not this run's outcome, so clear it (WI-4567). The upsert
+                // below keeps NULLs, so this must come first.
+                if waking {
+                    if let Err(e) = history.reopen_session(sid).await {
+                        tracing::warn!(session = %sid, error = %e, "failed to reopen history row on wake");
+                    }
+                }
                 if let Err(e) = history.archive_session(record).await {
                     tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
                 }
@@ -3157,6 +3170,7 @@ impl SessionRegistry {
         // forget on a SIGKILL. A failed write is logged, not fatal: the
         // session runs; it is only not recoverable.
         let fresh = matches!(&creating, Creating::Fresh(_));
+        let waking = matches!(&creating, Creating::Wake(_));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
             Creating::Fresh(Origin::Api) => Some(self.fresh_record(
@@ -3211,7 +3225,7 @@ impl SessionRegistry {
         // guard means this provisional write can never NULL a completed row,
         // even if it lands after the finalize under load. Metadata only — no
         // FTS write here, so it cannot wipe indexed output either.
-        self.write_provisional_history_row(&session, spec.role);
+        self.write_provisional_history_row(&session, spec.role, waking);
         self.bus.publish(ServerEvent::SessionCreated {
             id: session.id,
             name: session.name(),
