@@ -47,10 +47,7 @@ impl Attention {
     }
 
     /// The classes a person, or a driver acting for one, must act on.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "The sweep filter uses this; the test asserts it.")
-    )]
+    #[cfg(test)]
     pub fn needs_you(self) -> bool {
         matches!(self, Self::Approval | Self::Blocked | Self::Waiting)
     }
