@@ -505,6 +505,7 @@ mod tests {
             "secrets.py",
             "token.ts",
         ];
+        // Fixed test fixtures, not user data: the assert message printing them is a CodeQL false positive.
         for name in secret {
             assert!(is_secret_name(name), "{name} must be refused");
         }
