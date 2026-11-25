@@ -36,6 +36,9 @@ const META_WORK_REF_SEQ: &str = "work_ref_seq";
 const META_CLONED_FROM: &str = "cloned_from_instance_id";
 const META_CLONED_AT: &str = "cloned_at";
 const META_CLONED_BACKUP_TAKEN_AT: &str = "cloned_backup_taken_at";
+/// Ids per `unstopped_sessions_for_items` query. Small under test so a test
+/// can cross it without hundreds of rows.
+pub(crate) const UNSTOPPED_SESSIONS_CHUNK: usize = if cfg!(test) { 4 } else { 500 };
 const INIT_OPERATION: &str = "instance.init";
 const INIT_REASON: &str = "instance bootstrap";
 const WORK_REF_PREFIX: &str = "WI-";
@@ -553,7 +556,7 @@ impl<I: IdFactory> Drop for SqliteWrite<I> {
 #[cfg(test)]
 #[derive(Default, Clone, Copy)]
 pub(crate) struct SessionReads {
-    /// `unstopped_sessions_for_items` calls.
+    /// `unstopped_sessions_for_items` queries (one per chunk of ids).
     pub grouped: usize,
     /// `list_sessions` calls, the per-item lookup.
     pub per_item: usize,
@@ -1484,20 +1487,31 @@ impl ReadView for SqliteReadView {
         &self,
         work_item_ids: &[String],
     ) -> Result<Vec<CodingSession>, VogtError> {
-        #[cfg(test)]
-        READS.with(|reads| reads.borrow_mut().grouped += 1);
-        if work_item_ids.is_empty() {
-            return Ok(Vec::new());
+        // One query per chunk of ids: bundled SQLite caps bound variables
+        // (32766), and a page size is the caller's to choose (WI-4753).
+        let mut out = Vec::new();
+        for chunk in work_item_ids.chunks(UNSTOPPED_SESSIONS_CHUNK) {
+            #[cfg(test)]
+            READS.with(|reads| reads.borrow_mut().grouped += 1);
+            let mut filter = Filter::new();
+            filter.and_in("work_item_id", chunk.iter().cloned());
+            filter.and_fixed("stopped_at IS NULL");
+            out.extend(select_filtered::<CodingSession>(
+                &self.conn,
+                filter,
+                "ORDER BY started_at DESC, id DESC",
+                Vec::new(),
+            )?);
         }
-        let mut filter = Filter::new();
-        filter.and_in("work_item_id", work_item_ids.iter().cloned());
-        filter.and_fixed("stopped_at IS NULL");
-        select_filtered::<CodingSession>(
-            &self.conn,
-            filter,
-            "ORDER BY started_at DESC, id DESC",
-            Vec::new(),
-        )
+        // Chunks are each newest-first; restore the one ordering.
+        if work_item_ids.len() > UNSTOPPED_SESSIONS_CHUNK {
+            out.sort_by(|a, b| {
+                b.started_at
+                    .cmp(&a.started_at)
+                    .then_with(|| b.id.cmp(&a.id))
+            });
+        }
+        Ok(out)
     }
     fn list_live_sessions_started_by(
         &self,
