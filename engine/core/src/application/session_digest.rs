@@ -61,15 +61,15 @@ pub(crate) fn digest_in<C: Clock, I: IdFactory>(
         return Err(VogtError::NotFound(format!("no session {}", py_repr(id))));
     }
     let Some(live) = live else {
-        return Ok(result(id, None, &Numbers::default(), window, None));
+        return Ok(result(id, None, &Numbers::default(), window, None, None));
     };
     let template = target
         .session
         .as_ref()
         .and_then(|row| row.template.as_deref());
-    let excerpt = excerpt_of(ctx, &live, template);
+    let (excerpt, reply_at) = excerpt_of(ctx, &live, template);
     let numbers = live.economics.as_ref().map(numbers_of).unwrap_or_default();
-    Ok(result(id, Some(&live), &numbers, window, excerpt))
+    Ok(result(id, Some(&live), &numbers, window, excerpt, reply_at))
 }
 
 /// The engine's counters. A value that is not an integer is absent rather
@@ -104,16 +104,16 @@ fn excerpt_of<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     live: &EngineSession,
     template: Option<&str>,
-) -> Option<String> {
+) -> (Option<String>, Option<String>) {
     let roots = &ctx.config.session_transcript_roots;
     if roots.is_empty() {
-        return None;
+        return (None, None);
     }
     let roots: HashMap<&str, &Path> = roots
         .iter()
         .map(|(agent, root)| (agent.as_str(), root.as_path()))
         .collect();
-    let found = transcripts::find_in(
+    let Some(found) = transcripts::find_in(
         &roots,
         &ctx.config.claude_account_dirs,
         &live.id,
@@ -122,9 +122,22 @@ fn excerpt_of<C: Clock, I: IdFactory>(
         Some(live.cwd.as_str()),
         None,
         false,
-    )?;
-    transcripts::last_reply_excerpt(&found)
-        .map(|excerpt| excerpt.chars().take(EXCERPT_LIMIT).collect())
+    ) else {
+        return (None, None);
+    };
+    // The transcript file's own modification time: `updated_at` follows the
+    // engine's activity change and can lag the transcript, so the reader gets
+    // the age of what the excerpt was read from (WI-3992).
+    let reply_at = std::fs::metadata(&found.path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(|moment| {
+            chrono::DateTime::<chrono::Utc>::from(moment)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        });
+    let excerpt = transcripts::last_reply_excerpt(&found)
+        .map(|excerpt| excerpt.chars().take(EXCERPT_LIMIT).collect());
+    (excerpt, reply_at)
 }
 
 fn blocked_of(blocked: &EngineBlocked) -> Value {
@@ -149,6 +162,7 @@ fn result(
     numbers: &Numbers,
     window: Option<i64>,
     excerpt: Option<String>,
+    reply_at: Option<String>,
 ) -> Value {
     let budget_line = numbers.reported.then(|| {
         SessionEconomics {
@@ -173,6 +187,7 @@ fn result(
         "activity": live.map(|session| session.activity.as_str()),
         "blocked": live.and_then(|session| session.blocked.as_ref()).map(blocked_of),
         "last_reply_excerpt": excerpt,
+        "last_reply_at": reply_at,
         "turns": numbers.turns,
         "context_tokens": numbers.context,
         "peak_context_tokens": numbers.peak,
@@ -349,6 +364,8 @@ mod tests {
         let excerpt = result["last_reply_excerpt"].as_str().unwrap();
         assert!(excerpt.starts_with("The bot is created."), "{excerpt}");
         assert_eq!(excerpt.chars().count(), 120);
+        let at = result["last_reply_at"].as_str().unwrap();
+        assert!(at.ends_with('Z') && at.len() == 20, "{at}");
         let _ = fs::remove_dir_all(&dir);
     }
 
