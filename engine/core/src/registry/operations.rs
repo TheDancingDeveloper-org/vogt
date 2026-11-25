@@ -532,7 +532,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.stop",
-            "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u{2026} id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+            "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u{2026} id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/stop"),
