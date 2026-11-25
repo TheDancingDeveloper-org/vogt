@@ -3175,6 +3175,10 @@ impl SessionRegistry {
         // forget on a SIGKILL. A failed write is logged, not fatal: the
         // session runs; it is only not recoverable.
         let fresh = matches!(&creating, Creating::Fresh(_));
+        // True for a wake and also for adopt (`adopt_one` creates with
+        // `Creating::Wake`). Clearing the old outcome on adopt is intended: the
+        // session is live again, and a shutdown drain may have left
+        // `engine-shutdown` on its row (WI-4567).
         let waking = matches!(&creating, Creating::Wake(_));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
@@ -8174,6 +8178,119 @@ mod host_placement_tests {
         );
         assert_eq!(sessions.host_slot_counts()["live"], 1);
         let _ = sessions.remove(id);
+    }
+
+    async fn registry_with_history(
+        dir: &std::path::Path,
+    ) -> (SessionRegistry, Arc<crate::history::SessionHistory>) {
+        let history = Arc::new(crate::history::SessionHistory::new(dir).await.unwrap());
+        let cfg = crate::agent_tasks::tests::test_config(dir.to_path_buf());
+        let sessions = SessionRegistry::new(
+            Arc::new(cfg),
+            EventBus::default(),
+            Some(Arc::clone(&history)),
+        );
+        (sessions, history)
+    }
+
+    /// Removes (kills) the session when the test ends, including by a failed
+    /// assertion: a live `cat` would otherwise keep the runtime from shutting
+    /// down and a failing test would hang instead of failing.
+    struct RemoveOnDrop<'a>(&'a SessionRegistry, Uuid);
+
+    impl Drop for RemoveOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.remove(self.1);
+        }
+    }
+
+    async fn wait_for_row(
+        history: &crate::history::SessionHistory,
+        id: Uuid,
+        ready: impl Fn(&crate::history::SessionMetadata) -> bool,
+    ) -> crate::history::SessionMetadata {
+        for _ in 0..200 {
+            if let Ok(row) = history.get_session(id).await {
+                if ready(&row) {
+                    return row;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the history row for {id} never reached the expected state");
+    }
+
+    /// WI-4567: a wake through `create_inner` (`Creating::Wake`) clears the
+    /// outcome the run that hibernated left on the history row. Fails if
+    /// `waking` is not passed to `write_provisional_history_row`: the
+    /// provisional upsert's COALESCE then keeps the old exit code.
+    #[tokio::test]
+    async fn a_wake_clears_the_old_outcome_on_the_history_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, history) = registry_with_history(dir.path()).await;
+        let id = Uuid::new_v4();
+        history
+            .archive_session(crate::history::ArchiveRecord {
+                id,
+                name: "worker".into(),
+                created_at: time::OffsetDateTime::now_utc(),
+                ended_at: Some(time::OffsetDateTime::now_utc()),
+                exit_code: Some(137),
+                cwd: None,
+                command: Some("cat".into()),
+                scrollback_bytes: 0,
+                end_reason: Some(crate::history::END_EXITED),
+                identity: None,
+                economics: None,
+            })
+            .await
+            .unwrap();
+        sessions
+            .records
+            .insert(id, hibernated_record(id, None, Some("host")));
+        sessions.wake(id, Default::default()).await.unwrap();
+        let _cleanup = RemoveOnDrop(&sessions, id);
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_none()).await;
+        assert_eq!(row.exit_code, None, "the old 137 must not outlive the wake");
+        assert_eq!(row.end_reason, None);
+    }
+
+    /// WI-4567: hibernating a live session records `hibernated` with no exit
+    /// code (the SIGKILL is ours, not a crash), and a wake then reopens the
+    /// row. Drives the real exit waiter, so it fails if `mark_hibernating` is
+    /// not seen by `try_spawn_archive` (the row would carry the kill's code).
+    #[tokio::test]
+    async fn hibernate_then_wake_leaves_no_exit_code_on_the_history_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, history) = registry_with_history(dir.path()).await;
+        let session = sessions.create(spec("hib", None)).unwrap();
+        let id = session.id;
+        let _cleanup = RemoveOnDrop(&sessions, id);
+        wait_for_row(&history, id, |_| true).await;
+        sessions
+            .hibernate(
+                id,
+                None,
+                vogt_engine_contract::HibernateTrigger::Manual,
+                true,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_some()).await;
+        assert_eq!(
+            row.end_reason.as_deref(),
+            Some(crate::history::END_HIBERNATED)
+        );
+        assert_eq!(
+            row.exit_code, None,
+            "a hibernation kill is not an exit code"
+        );
+        sessions.wake(id, Default::default()).await.unwrap();
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_none()).await;
+        assert_eq!(row.exit_code, None);
+        assert_eq!(row.end_reason, None);
     }
 
     #[tokio::test]
