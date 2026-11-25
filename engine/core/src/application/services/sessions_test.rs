@@ -2511,3 +2511,61 @@ fn a_resume_template_that_conflicts_with_the_asked_one_is_refused() {
     assert!(message.contains("resumes through template"), "{message}");
     assert!(!seen.contains("POST"), "{seen}");
 }
+
+// WI-4738 review: a live (not yet archived) session resumes through its own
+// template, so a codex or opencode conversation never reaches `claude --resume`.
+
+/// The engine's live row for the prior session: the archive lookup 404s first.
+fn live(conversation: Option<(&str, &str)>, template: Option<&str>) -> [(u16, String); 2] {
+    let mut row = json!({
+        "id": PRIOR_ENGINE_ID, "name": "beta", "cwd": "/work/tree",
+        "activity": "idle", "alive": true, "role": "worker",
+        "template": template,
+    });
+    if let Some((agent, id)) = conversation {
+        row["conversation"] = json!({"agent": agent, "id": id});
+    }
+    [(404, "{}".to_string()), (200, row.to_string())]
+}
+
+#[test]
+fn a_live_codex_session_resumes_through_its_own_template() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("codex", "conv-123")), Some("codex"));
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![missing, row, started_reply("eng-new")],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn a_live_session_template_that_conflicts_with_the_asked_one_is_refused() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("codex", "conv-123")), Some("codex"));
+    let (outcome, seen) = resume_of(&built, &script, &ses, Some("claude"), vec![missing, row]);
+    let Err(VogtError::InvalidRequest(message)) = outcome else {
+        panic!("expected invalid_request, got {outcome:?}");
+    };
+    assert!(message.contains("resumes through template"), "{message}");
+    assert!(!seen.contains("POST"), "{seen}");
+}
+
+#[test]
+fn a_live_session_with_no_known_template_resumes_as_before() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("claude", "conv-123")), None);
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![missing, row, started_reply("eng-new")],
+    );
+    assert!(outcome.is_ok(), "{outcome:?}\n{seen}");
+    assert!(seen.contains(r#""resume":"conv-123""#), "{seen}");
+    assert!(!seen.contains(r#""template""#), "{seen}");
+}

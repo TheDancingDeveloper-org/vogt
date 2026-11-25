@@ -1143,7 +1143,8 @@ where
         Some(row) => (row.conversation_id, row.resume_template),
         // Not archived yet: a live session records its conversation too.
         None => match engine.get_session(&engine_id)? {
-            Some(live) => (live.conversation_id, None),
+            // The live row's own template is the one that resumes it.
+            Some(live) => (live.conversation_id, live.template),
             // Unknown to the engine. A Vogt session still has no
             // conversation to resume; any other UUID is a raw CLI id.
             None if known => (None, None),
