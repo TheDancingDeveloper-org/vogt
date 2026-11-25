@@ -1093,7 +1093,12 @@ HTTP; over the WebSocket the frame is dropped silently, because there is no
 reply channel to refuse into.
 
 `SessionSummary` carries an optional `command` field — the explicit command
-the session was created with; absent for default-shell sessions. It also
+the session was created with; absent for default-shell sessions. `session_list`
+with `mode=full` leaves `command` out of its rows (the launch line is long)
+unless `fields` names it. `started_by_session` on `session_list` keeps only
+the sessions that one started, on every list path (digest or full, with or
+without `states`); it accepts either the `ses_…` id or the engine session id,
+and unlinked sessions never match. It also
 carries `activity_changed_at`, the wall-clock instant when the current
 activity state began. The same timestamp accompanies `activity` events, so a
 client can keep an attention-sorted selection tied to session identity while

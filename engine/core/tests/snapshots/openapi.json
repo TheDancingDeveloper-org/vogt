@@ -3037,8 +3037,8 @@
       },
       "get": {
         "operationId": "session_list",
-        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
-        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
+        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
+        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
         "parameters": [
           {
             "name": "project",
@@ -3110,7 +3110,7 @@
             "required": false,
             "schema": {
               "default": "digest",
-              "description": "`digest` (default) or `full` (every SessionSummary field).",
+              "description": "`digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it).",
               "enum": [
                 "digest",
                 "full"
@@ -3118,7 +3118,7 @@
               "title": "Mode",
               "type": "string"
             },
-            "description": "`digest` (default) or `full` (every SessionSummary field)."
+            "description": "`digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it)."
           },
           {
             "name": "fields",
@@ -3126,14 +3126,14 @@
             "required": false,
             "schema": {
               "default": [],
-              "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list.",
+              "description": "Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list.",
               "items": {
                 "type": "string"
               },
               "title": "Fields",
               "type": "array"
             },
-            "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list."
+            "description": "Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list."
           },
           {
             "name": "starters_only",
@@ -3160,10 +3160,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
+              "description": "Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
               "title": "Started By Session"
             },
-            "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match."
+            "description": "Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match."
           },
           {
             "name": "states",
