@@ -160,6 +160,10 @@ Reading a terminal and typing into one are deliberately different grants.
   engine's `/input` route directly bypasses this. It leaves only the engine's
   `vogt::audit` "mutating request" log line (token name, method, path, status),
   so agents should use `session_input`.
+- **Open question (WI-834, undecided):** whether typing into other sessions
+  should need its own scope (for example `sessions.write`) rather than
+  riding on `work.write`. Until the operator decides, no such scope exists;
+  `work.write` is the grant, and the audit row above is the control.
 - Reads go through the core's own engine credential, so a `read`-only token
   can read screens and logs through the core even though it holds no engine
   `sessions` capability.
