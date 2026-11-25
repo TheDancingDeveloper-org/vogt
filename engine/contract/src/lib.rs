@@ -258,6 +258,12 @@ pub struct SessionTemplateSummary {
 pub struct WorktreeSpec {
     pub branch: String,
     pub base_ref: String,
+    /// The worktree is a default a dispatch profile filled in, not something
+    /// the caller asked for (WI-4707). A placement that cannot cut one, a
+    /// pod that checks out the source itself, drops it instead of refusing
+    /// the start. Absent or false is a worktree the caller asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_supported: bool,
 }
 
 /// The part of a project's agent policy the engine enforces (WI-1243).
