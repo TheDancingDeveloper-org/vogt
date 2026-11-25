@@ -285,6 +285,9 @@ pub struct StopSessionParams {
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
