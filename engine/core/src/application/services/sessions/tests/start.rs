@@ -144,3 +144,134 @@ fn an_overseer_start_defaults_to_a_context_ceiling() {
         None
     );
 }
+
+// -- characterization of `start_session_tracked` (WI-4628) ---------------------
+//
+// Written against the unsplit function and unchanged by the phase split: they
+// pin the branches the older tests left open (bypass refusal, an engine that
+// refuses, `engine_started`, where the recorded cwd comes from, the cold-wake
+// opt-out).
+
+mod tracked {
+    use crate::application::services::sessions_test::{
+        insert_project, opened, script_with, start_params,
+    };
+    use crate::storage::interface::{DeclaredStore, ReadView};
+
+    use super::*;
+
+    const ENGINE_ROW: &str = r#"{"id":"eng-t","name":"beta","cwd":"/resumed/dir"}"#;
+
+    fn recorded_cwd(built: &crate::application::context::Built) -> String {
+        with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.session_by_engine_id("eng-t").unwrap().unwrap().cwd
+        })
+    }
+
+    #[test]
+    fn an_agent_cannot_grant_bypass_and_the_engine_is_not_asked() {
+        let (_dir, built, seen) =
+            context("bypass", agent("agent:engine:eng-w"), None, |_| {}, vec![]);
+        let error = super::start_session_op(
+            &built,
+            json!({"reason": "go", "project": "beta", "permission_mode": "bypass"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, VogtError::BypassRefused(m) if m.contains("agent:engine:eng-w")),
+            "{error:?}"
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_engine_that_refuses_leaves_no_record_and_engine_started_unset() {
+        let script = script_with(vec![(500, r#"{"error":"boom"}"#.to_string())]);
+        let built = opened(Some(std::sync::Arc::clone(&script)));
+        insert_project(&built, "beta");
+        let mut engine_started = false;
+        let outcome = with_ctx!(&built, |ctx| {
+            crate::application::services::sessions::start_session_tracked(
+                ctx,
+                &start_params(Some("beta"), None, "because"),
+                &mut engine_started,
+            )
+        });
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(!engine_started);
+        let events = with_ctx!(&built, |ctx| {
+            ctx.declared
+                .read()
+                .unwrap()
+                .list_events(0, 100, None)
+                .unwrap()
+        });
+        assert!(events.iter().all(|event| event.kind != "session.started"));
+        assert!(!script
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("DELETE ")));
+    }
+
+    #[test]
+    fn a_started_session_sets_engine_started_and_a_plain_start_keeps_the_project_cwd() {
+        let script = script_with(vec![(200, ENGINE_ROW.to_string())]);
+        let built = opened(Some(script));
+        insert_project(&built, "beta");
+        let mut engine_started = false;
+        with_ctx!(&built, |ctx| {
+            crate::application::services::sessions::start_session_tracked(
+                ctx,
+                &start_params(Some("beta"), None, "because"),
+                &mut engine_started,
+            )
+        })
+        .unwrap();
+        assert!(engine_started);
+        assert_eq!(recorded_cwd(&built), "/work/tree");
+    }
+
+    #[test]
+    fn a_resume_or_a_worktree_records_the_directory_the_engine_reports() {
+        for (resume, worktree) in [(Some("raw-conversation"), None), (None, Some(true))] {
+            let script = script_with(vec![(200, ENGINE_ROW.to_string())]);
+            let built = opened(Some(script));
+            insert_project(&built, "beta");
+            let mut params = start_params(Some("beta"), None, "because");
+            params.resume = resume.map(str::to_string);
+            params.worktree = worktree;
+            with_ctx!(&built, |ctx| {
+                crate::application::services::sessions::start_session(ctx, &params)
+            })
+            .unwrap();
+            assert_eq!(recorded_cwd(&built), "/resumed/dir");
+        }
+    }
+
+    #[test]
+    fn the_cold_wake_opt_out_is_recorded_with_the_session() {
+        for (asked, expected) in [(true, true), (false, false)] {
+            let script = script_with(vec![(200, ENGINE_ROW.to_string())]);
+            let built = opened(Some(script));
+            insert_project(&built, "beta");
+            let mut params = start_params(Some("beta"), None, "because");
+            params.cold_wake_opt_out = asked;
+            let result = with_ctx!(&built, |ctx| {
+                crate::application::services::sessions::start_session(ctx, &params)
+            })
+            .unwrap();
+            let id = result.session.id.clone();
+            let stored = with_ctx!(&built, |ctx| {
+                ctx.declared
+                    .read()
+                    .unwrap()
+                    .session_cold_wake_opt_out(&id)
+                    .unwrap()
+            });
+            assert_eq!(stored, expected);
+        }
+    }
+}
