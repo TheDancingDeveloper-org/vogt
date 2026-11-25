@@ -351,6 +351,7 @@ Usage:
   vogt-agent-auth set <VAR>     (value on stdin)
   vogt-agent-auth store <VAR>   (value on stdin)
   vogt-agent-auth grants
+  vogt-agent-auth git-credential <HOST>
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -371,6 +372,10 @@ Commands:
   grants (session-side) List the credential grants a person approved for this
          session (WI-973): VAR, secret, uses, expiry, grant id and the reason
          it was approved for. Never a value. Fetch one with `fetch VAR`.
+  git-credential
+         (session-side) Ask the broker for the forge token of an approved
+         `git:<HOST>` grant (WI-1331). Prints the username and the token on two
+         lines; exits 1 silently on any refusal. Used by vogt-git-askpass.
 EOF
 }
 
@@ -791,6 +796,30 @@ list_grants() {
     rm -f "$response"
 }
 
+# `git-credential HOST` (WI-1331): the askpass's half of a `git:<host>` grant.
+# Prints username and token on two lines. Silent on every refusal (exit 1):
+# git then fails with its own message, and nothing here can echo a value or a
+# server error body. The token never touches argv.
+git_credential() {
+    local host="$1" response status url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        return 1
+    fi
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+    umask 077
+    response="$(mktemp)" || return 1
+    status="$(broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -G --data-urlencode "host=$host" \
+        "${url%/}/api/agent-auth/git-credential" 2>/dev/null)" || status="000"
+    if [[ "$status" != "200" ]]; then
+        rm -f "$response"
+        return 1
+    fi
+    jq -er '.username, .token' "$response" 2>/dev/null || { rm -f "$response"; return 1; }
+    rm -f "$response"
+}
+
 # Ask the engine whether manifest entry $1 is stale at GitHub (gh#1460). The
 # request carries no token: the engine resolves the secret itself and checks its
 # own copy, so nothing here can probe or move Inbox state with a value of its
@@ -1176,6 +1205,11 @@ main() {
             ;;
         grants)
             list_grants
+            ;;
+        git-credential)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "git-credential requires exactly one HOST"
+            git_credential "$1" || exit 1
             ;;
         -h|--help|help)
             usage
