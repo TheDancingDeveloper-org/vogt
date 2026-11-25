@@ -109,6 +109,9 @@ import {
   liveSessionsWarning,
   transitionWork,
   type BoardCellPage,
+  type BoardListResult,
+  type LiveSessions,
+  type WorkListRow,
   type WorkItem,
   type Workflow,
   type WorkflowState,
@@ -869,6 +872,87 @@ interface PendingMove {
   pick?: boolean;
 }
 
+/** The one state whose cards show live sessions (WI-1003 decision 7). */
+const LIVE_SESSIONS_STATE = "in_progress";
+
+/** Whether a live-session dot is drawn for this card, and which. The dot comes
+ *  from the row (`live_sessions`), never a per-card fetch. */
+export function liveSessionsLabel(live: LiveSessions | null | undefined): string | null {
+  if (live === undefined) return null;
+  if (live === null) return "live sessions unknown";
+  if (live.count <= 0) return null;
+  const n = live.count;
+  return `${n} live session${n === 1 ? "" : "s"}, worst: ${live.worst ?? "unknown"}`;
+}
+
+/** `with_sessions` is a whole-call parameter in the core, so the board asks
+ *  for it on a call of its own that carries only the in-progress cells, and
+ *  never on the calls for other columns. */
+async function listBoardCells(
+  params: Record<string, unknown>,
+  cells: { lane_key: string; state: string; cursor?: string }[],
+  snapshot?: string | null,
+): Promise<BoardListResult> {
+  const live = cells.filter((cell) => cell.state === LIVE_SESSIONS_STATE);
+  const plain = cells.filter((cell) => cell.state !== LIVE_SESSIONS_STATE);
+  const ask = (batch: typeof cells, withSessions: boolean, snap?: string | null) =>
+    listBoard({
+      ...params,
+      cells: batch,
+      ...(snap ? { snapshot: snap } : {}),
+      ...(withSessions ? { with_sessions: true } : {}),
+    });
+  if (!live.length) return ask(plain, false, snapshot);
+  if (!plain.length) return ask(live, true, snapshot);
+  const first = await ask(plain, false, snapshot);
+  const second = await ask(live, true, first.snapshot);
+  return { ...first, cells: [...(first.cells ?? []), ...(second.cells ?? [])] };
+}
+
+const WORST_TONE: Record<string, string> = {
+  approval: "waiting",
+  blocked: "waiting",
+  waiting: "waiting",
+  done: "done",
+  stalled: "warning",
+  running: "running",
+  idle: "idle",
+  hibernated: "idle",
+  exited: "idle",
+};
+
+/** A dot and a count for the live sessions on an in-progress card; a muted
+ *  `?` when unknown; nothing for zero or when the row did not ask. */
+function LiveSessionsDot(props: { live: LiveSessions | null | undefined }) {
+  const label = () => liveSessionsLabel(props.live);
+  return (
+    <Show when={label()}>
+      {(text) => (
+        <Show
+          when={props.live}
+          fallback={
+            <span class="board-live board-live--unknown" role="img" aria-label={text()} title={text()}>
+              <span class="board-live-dot" aria-hidden="true" />?
+            </span>
+          }
+        >
+          {(live) => (
+            <span
+              class={`board-live board-live--${WORST_TONE[live().worst ?? ""] ?? "unknown"}`}
+              role="img"
+              aria-label={text()}
+              title={text()}
+            >
+              <span class="board-live-dot" aria-hidden="true" />
+              {live().count}
+            </span>
+          )}
+        </Show>
+      )}
+    </Show>
+  );
+}
+
 interface CellPageState {
   items: WorkItem[];
   total: number;
@@ -1371,10 +1455,7 @@ const Board: Component<Props> = (props) => {
     if (!quiet) setLoading(true);
     const active = filters();
     try {
-      const answer = await listBoard({
-        ...boardParams(active),
-        cells: boardCells(active),
-      });
+      const answer = await listBoardCells(boardParams(active), boardCells(active));
       if (seq !== loadSeq) return;
       let next = new Map<string, CellPageState>();
       for (const page of answer.cells ?? []) next = mergeCellPage(next, page, false);
@@ -1417,11 +1498,11 @@ const Board: Component<Props> = (props) => {
       return next;
     });
     try {
-      const answer = await listBoard({
-        ...boardParams(filters()),
-        cells: [{ lane_key: laneKey, state, cursor: current.nextCursor }],
+      const answer = await listBoardCells(
+        boardParams(filters()),
+        [{ lane_key: laneKey, state, cursor: current.nextCursor }],
         snapshot,
-      });
+      );
       const page = answer.cells[0];
       if (!page || answer.snapshot !== snapshot) return;
       let merged: Map<string, CellPageState> | undefined;
@@ -1451,11 +1532,11 @@ const Board: Component<Props> = (props) => {
     if (!snapshot || !missing.length || loadingLanes.has(laneKey)) return;
     loadingLanes.add(laneKey);
     try {
-      const answer = await listBoard({
-        ...boardParams(filters()),
-        cells: missing.map((state) => ({ lane_key: laneKey, state })),
+      const answer = await listBoardCells(
+        boardParams(filters()),
+        missing.map((state) => ({ lane_key: laneKey, state })),
         snapshot,
-      });
+      );
       if (answer.snapshot !== snapshot) return;
       let merged: Map<string, CellPageState> | undefined;
       setCellPages((previous) => {
@@ -3795,6 +3876,11 @@ const Board: Component<Props> = (props) => {
                                                   >
                                                     {projectName(item.project_slug ?? "")}
                                                   </a>
+                                                </Show>
+                                                <Show when={item.state === LIVE_SESSIONS_STATE}>
+                                                  <LiveSessionsDot
+                                                    live={(item as WorkListRow).live_sessions}
+                                                  />
                                                 </Show>
                                                 <Show when={item.assignee_identity_ref}>
                                                   <span title={item.assignee_identity_ref ?? ""}>

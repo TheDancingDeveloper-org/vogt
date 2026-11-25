@@ -8491,6 +8491,32 @@ textarea {
   }
 }
 
+/* Live sessions on an in-progress card: a dot coloured by the worst session's
+   attention, and the count. A muted `?` is unknown, never "none". */
+.board-card-meta .board-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  --live-tone: var(--fg-muted);
+}
+.board-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live-tone);
+}
+.board-live--unknown .board-live-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--fg-muted);
+}
+.board-live--waiting { --live-tone: var(--activity-waiting); }
+.board-live--done { --live-tone: var(--activity-done); }
+.board-live--warning { --live-tone: var(--activity-warning); }
+.board-live--running { --live-tone: var(--activity-running); }
+.board-live--idle { --live-tone: var(--activity-idle); }
+
 .board-card-meta {
   display: flex;
   flex-wrap: nowrap;

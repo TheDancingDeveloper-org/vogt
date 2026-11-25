@@ -45,11 +45,12 @@ function saveGroupBy(value: GroupBy): void {
   }
 }
 
-/** Most urgent first; mirrors the core's sweep order. */
-const ATTENTION_RANK: SessionSweepRow["attention"][] = [
+/** Most urgent first; mirrors the core's `Attention::order_of` (done = 3). */
+export const ATTENTION_RANK: string[] = [
   "approval",
   "blocked",
   "waiting",
+  "done",
   "stalled",
   "running",
   "idle",
@@ -57,7 +58,7 @@ const ATTENTION_RANK: SessionSweepRow["attention"][] = [
   "exited",
   "unknown",
 ];
-const rank = (a: SessionSweepRow["attention"]) => {
+export const rank = (a: string) => {
   const i = ATTENTION_RANK.indexOf(a);
   return i < 0 ? ATTENTION_RANK.length : i;
 };
