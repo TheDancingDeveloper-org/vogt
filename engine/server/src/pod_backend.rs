@@ -3134,6 +3134,7 @@ impl PodBackend {
         link: std::sync::Arc<crate::agent_stream::PodLink>,
         size: (u16, u16),
     ) -> Self {
+        link.set_pty_size(size);
         Self {
             id,
             link,
@@ -3152,6 +3153,7 @@ impl SessionBackend for PodBackend {
     }
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         *self.size.lock() = (cols, rows);
+        self.link.set_pty_size((cols, rows));
         crate::agent_stream::global()
             .send(self.id, vogt_session_agent::Frame::Resize { cols, rows })
             .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
