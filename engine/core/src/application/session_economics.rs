@@ -242,7 +242,11 @@ pub(crate) mod tests {
         roots: Vec<(String, PathBuf)>,
         engine: Option<EngineClient>,
     ) -> Built {
-        let dir = std::env::temp_dir().join(format!("vogt-econ-{name}-{}", std::process::id()));
+        // Unique per call: `session_reads` tests reuse these names in parallel.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("vogt-econ-{name}-{}-{seq}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let mut clock = None;
