@@ -220,7 +220,8 @@ const History: Component<Props> = (props) => {
         name: live.name,
         created_at: live.created_at,
         ended_at: null,
-        exit_code: live.exit_code,
+        exit_code: live.activity === "hibernated" ? null : live.exit_code,
+        end_reason: live.activity === "hibernated" ? "hibernated" : null,
         cwd: live.cwd ?? null,
         command: live.command ?? null,
         scrollback_bytes: live.scrollback_bytes,
@@ -969,8 +970,8 @@ const History: Component<Props> = (props) => {
                                 }`}
                               >
                                 {session.live && session.exit_code === null
-                                  ? "Live"
-                                  : "Exited"}
+                                  ? session.end_reason === "hibernated" ? "Hibernated" : "Live"
+                                  : session.end_reason === "hibernated" ? "Hibernated" : "Exited"}
                               </span>
                               <Show when={pinned()}>
                                 <span class="history-pin-indicator">Pinned</span>
@@ -985,7 +986,9 @@ const History: Component<Props> = (props) => {
                                     : "error"
                               }`}
                             >
-                              {session.exit_code === null ? "No exit" : `Exit ${session.exit_code}`}
+                              {session.exit_code === null
+                                ? session.end_reason === "hibernated" ? "Hibernated" : "No exit"
+                                : `Exit ${session.exit_code}`}
                             </span>
                           </div>
                           <div class="history-session-meta">

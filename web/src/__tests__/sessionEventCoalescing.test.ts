@@ -133,6 +133,27 @@ describe("session list coalescing", () => {
   });
 });
 
+describe("a woken session drops its old exit code (WI-4567)", () => {
+  it("clears a stale 137 on wake and on hibernate", async () => {
+    await loaded();
+    store.startEventStream();
+    await settle();
+    script.feed({ type: "session-killed", id: "s1", exit_code: 137 });
+    await settle();
+    expect(store.sessionsStore.sessions.s1?.exit_code).toBe(137);
+
+    script.feed({ type: "session-woken", id: "s1" });
+    await settle();
+    expect(store.sessionsStore.sessions.s1?.exit_code ?? null).toBeNull();
+
+    script.feed({ type: "session-killed", id: "s1", exit_code: 137 });
+    script.feed({ type: "session-hibernated", id: "s1", trigger: "idle" });
+    await settle();
+    expect(store.sessionsStore.sessions.s1?.activity).toBe("hibernated");
+    expect(store.sessionsStore.sessions.s1?.exit_code ?? null).toBeNull();
+  });
+});
+
 describe("vogt-changed coalescing (WI-1254)", () => {
   const change = (seq: number, id = "WI-1", kind = "work.updated") => ({
     type: "vogt-changed",
