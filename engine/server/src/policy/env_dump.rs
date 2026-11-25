@@ -173,10 +173,12 @@ fn keep_code(pieces: &[Piece], kept: &mut String) {
 }
 
 /// Whether a simple command is a `gh` or `git` call whose arguments are text
-/// it writes out (a comment, a commit message). A substitution, a `<` read or
-/// an `@file` argument makes it code, so it is kept. So does anything outside
-/// a short list of text subcommands: `git -c alias.x=...`, `-c core.pager=...`
-/// and `gh alias set --shell` run shell code from their arguments.
+/// it writes out (a comment, a commit message). This is an allowlist: the line
+/// is exempt only when every argument is a plain-text flag with its value, or
+/// a plain positional (an issue number, a tag name). Any other flag (`-F`,
+/// `--file`, `--body-file`, `--template`, `-c`, `--shell`), any path, alias,
+/// pager, assignment prefix, substitution, `<` or `@file` makes it code, so it
+/// is kept in the scan.
 fn text_argument_command(simple: &str) -> bool {
     if simple.contains(['$', '`', '<', '@']) {
         return false;
@@ -186,17 +188,42 @@ fn text_argument_command(simple: &str) -> bool {
         return false;
     }
     let word = |i: usize| words.get(i).map(String::as_str);
-    match word(0).map(base) {
-        Some("gh") => {
-            matches!(word(1), Some("issue" | "pr"))
-                && matches!(
-                    word(2),
-                    Some("comment" | "close" | "create" | "edit" | "reopen" | "review")
-                )
+    let (flags, rest): (&[&str], usize) = match (word(0).map(base), word(1), word(2)) {
+        (Some("gh"), Some("issue" | "pr"), Some("comment")) => (&["-b", "--body"], 3),
+        (Some("gh"), Some("issue" | "pr"), Some("close")) => (&["-c", "--comment"], 3),
+        (Some("gh"), Some("issue" | "pr"), Some("create")) => {
+            (&["-t", "--title", "-b", "--body"], 3)
         }
-        Some("git") => matches!(word(1), Some("commit" | "tag" | "notes")),
-        _ => false,
+        (Some("git"), Some("commit" | "tag"), _) => (&["-m", "--message"], 2),
+        _ => return false,
+    };
+    text_flags_only(&words[rest..], flags)
+}
+
+/// Whether `args` hold only the allowed text flags, each with a value, and
+/// plain positionals. A positional is a short name or number: no flag, no
+/// path, no `=`.
+fn text_flags_only(args: &[String], flags: &[&str]) -> bool {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if flags.contains(&arg.as_str()) {
+            if iter.next().is_none() {
+                return false;
+            }
+        } else if let Some((flag, _)) = arg.split_once('=').filter(|(f, _)| f.starts_with("--")) {
+            if !flags.contains(&flag) {
+                return false;
+            }
+        } else if arg.is_empty()
+            || arg.starts_with('-')
+            || !arg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return false;
+        }
     }
+    true
 }
 
 fn refuse(what: &str) -> String {
@@ -1247,6 +1274,14 @@ mod tests {
             "GIT_PAGER='cat /proc/1/environ' git log",
             "echo x; env",
             "true && printenv",
+            "gh issue create -t x -F /proc/1/environ",
+            "gh pr comment 1 --body-file /proc/self/environ",
+            "git commit -F /proc/1/environ",
+            "git tag -a v -F /proc/self/environ",
+            "gh issue create -t x --template /proc/1/environ",
+            "git commit --file=/proc/1/environ",
+            "git commit -m x /proc/1/environ",
+            "gh issue comment 1 -b x --body-file=/proc/1/environ",
         ] {
             assert!(check(command).is_some(), "{command}");
         }
