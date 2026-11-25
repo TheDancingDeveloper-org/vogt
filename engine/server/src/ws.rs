@@ -584,6 +584,7 @@ async fn inbound_loop(
                 // Try to decode a control frame; fall back to raw text input.
                 match serde_json::from_str::<ClientControl>(&s) {
                     Ok(ClientControl::Resize { cols, rows }) => {
+                        let (cols, rows) = crate::pty::clamp_pty_size(cols, rows);
                         let _ = writer_session.resize(cols, rows);
                     }
                     Ok(ClientControl::Ping { id }) => {
