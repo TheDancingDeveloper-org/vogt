@@ -311,11 +311,21 @@ pub(crate) mod tests {
     /// A remote-backed session that records its input. `Output` feeds the
     /// output the session's screen is drawn from.
     pub(crate) fn recording_session(writes: Arc<Mutex<Vec<u8>>>) -> (Arc<Session>, Output) {
+        recording_session_running(writes, None)
+    }
+
+    /// [`recording_session`] running `command` (an agent CLI's name makes it an
+    /// agent session; `None` is the default shell).
+    pub(crate) fn recording_session_running(
+        writes: Arc<Mutex<Vec<u8>>>,
+        command: Option<Vec<String>>,
+    ) -> (Arc<Session>, Output) {
         let (tx, rx) = channel();
         let done = Arc::new(AtomicBool::new(false));
         let dir = tempfile::tempdir().unwrap().keep();
         let spec = SessionSpec {
             name: "enter-guard-test".into(),
+            command,
             ..Default::default()
         };
         let defaults = SpawnDefaults {

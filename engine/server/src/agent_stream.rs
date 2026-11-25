@@ -383,7 +383,7 @@ impl PodLink {
         self.note_memory_at(memory, now_rfc3339());
     }
 
-    fn note_memory_at(&self, memory: Option<CgroupMemory>, observed_at: String) {
+    pub(crate) fn note_memory_at(&self, memory: Option<CgroupMemory>, observed_at: String) {
         if let Some(memory) = memory {
             tracing::debug!(?memory, "pod cgroup memory");
             *self.memory.lock() = Some(PodMemory {
