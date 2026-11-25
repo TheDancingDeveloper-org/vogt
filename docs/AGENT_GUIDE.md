@@ -738,6 +738,19 @@ session_hibernate(..., wake_on={kind: "ci", project: "vogt", pr: 42,
 the session to wake; `kind: "session"` waits for a worker to end),
 `watch_list` shows what is armed and what fired, `watch_cancel` disarms one.
 
+### Register a flaky CI job
+
+When a bound branch's CI fails, Vogt names the open work items that probably
+caused it. To register a known-flaky job: create a work item in the project,
+put the failing CI job's name in its title, and add the label `ci:flaky`. The
+match is on job names only (not step or test names), as whole tokens, case-
+insensitive: a job named `engine` matches "Flaky engine test", but `eng` does
+not. Only open items count. When a bound branch's CI concludes as failed,
+Vogt adds `flaky_suspects` (the matching refs) to the `ci.branch_concluded`
+Inbox entry and event, and the notice typed into the item's live sessions gains
+`; probably flaky: WI-n (job)` for each match. A failure with no match carries
+no `flaky_suspects` and no "probably flaky" text.
+
 ### The git story that results
 
 From the branch tips and the PR edge, `work_get` derives a
