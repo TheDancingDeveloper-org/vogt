@@ -2165,6 +2165,12 @@ fn spawn_exit_waiter(
     });
 }
 
+/// The exit code a history row records: none for the stop a hibernation
+/// causes, which is not an outcome of the session.
+fn archived_exit_code(hibernating: bool, exit_code: i32) -> Option<i32> {
+    (!hibernating).then_some(exit_code)
+}
+
 fn try_spawn_archive(
     session: &Arc<Session>,
     history: Option<Arc<SessionHistory>>,
@@ -2202,7 +2208,9 @@ fn try_spawn_archive(
             name: session.name(),
             created_at: session.created_at,
             ended_at: (*session.ended_at.lock()).or(Some(time::OffsetDateTime::now_utc())),
-            exit_code: Some(exit_code),
+            // Hibernation stops the pod with SIGKILL; that 137 is ours, not a
+            // crash, so the row records none (WI-4567).
+            exit_code: archived_exit_code(session.is_hibernating(), exit_code),
             cwd: Some(session.cwd.clone()),
             command: session.command.clone(),
             scrollback_bytes,
@@ -2868,6 +2876,17 @@ fn clear_addressed_block(session: &Arc<Session>, bus: &EventBus) {
 fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
     new == ActivityState::Running
         && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
+}
+
+#[cfg(test)]
+mod archived_exit_code_tests {
+    use super::archived_exit_code;
+
+    #[test]
+    fn hibernate_kill_is_not_recorded_as_an_exit_code() {
+        assert_eq!(archived_exit_code(true, 137), None);
+        assert_eq!(archived_exit_code(false, 137), Some(137));
+    }
 }
 
 #[cfg(test)]
