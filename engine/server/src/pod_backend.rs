@@ -6044,13 +6044,18 @@ mod tests {
     }
     impl LogCapture {
         fn install(&self) -> tracing::subscriber::DefaultGuard {
-            tracing::subscriber::set_default(
+            let guard = tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
                     .with_writer(self.clone())
                     .with_ansi(false)
                     .with_max_level(tracing::Level::TRACE)
                     .finish(),
-            )
+            );
+            // Another test thread may have cached a callsite's interest while
+            // no subscriber wanted it; without this the capture can miss the
+            // event when the suite runs in parallel.
+            tracing::callsite::rebuild_interest_cache();
+            guard
         }
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
