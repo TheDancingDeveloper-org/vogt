@@ -1313,7 +1313,9 @@ def test_k8s_is_read_only_and_keeps_the_kubeconfig_out_of_argv(
     assert rec is not None
     argv = rec["argv"]
     assert argv[1] == "--read-only"
-    assert argv[2] == "--kubeconfig"
+    assert argv[2:4] == ["--toolsets", "core"]
+    assert argv[4] == "--kubeconfig"
+    assert argv[5] == rec["path"]
     assert kubeconfig.strip() not in " ".join(argv)
     assert rec["mode"] == 0o600
     assert rec["dirmode"] == 0o700
