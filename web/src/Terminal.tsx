@@ -88,10 +88,8 @@ function sharedLinksRead(which: "live" | "stopped"): ReturnType<typeof listSessi
 }
 
 /**
- * The work item a terminal's session was opened for, or null. The live
- * sessions are asked first: a terminal mostly shows a running PTY, and that
- * list is short. Only a PTY the live list does not hold (a finished run still
- * had a subject) asks again with the stopped ones (WI-4532).
+ * The Vogt session id (`ses_…`) a terminal's PTY belongs to, or null when
+ * the PTY was opened without one (a GUI-opened terminal).
  */
 export async function sessionLinkFor(sessionId: string): Promise<string | null> {
   const find = (answer: Awaited<ReturnType<typeof listSessions>>) =>
@@ -100,6 +98,12 @@ export async function sessionLinkFor(sessionId: string): Promise<string | null> 
   return row?.id ?? null;
 }
 
+/**
+ * The work item a terminal's session was opened for, or null. The live
+ * sessions are asked first: a terminal mostly shows a running PTY, and that
+ * list is short. Only a PTY the live list does not hold (a finished run still
+ * had a subject) asks again with the stopped ones (WI-4532).
+ */
 export async function workItemLinkFor(sessionId: string): Promise<string | null> {
   const find = (answer: Awaited<ReturnType<typeof listSessions>>) =>
     (answer.sessions ?? []).find((row) => row.engine_session_id === sessionId);
