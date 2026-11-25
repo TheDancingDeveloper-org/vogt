@@ -157,6 +157,8 @@ interface EntryProps {
   onWithdraw: (entry: InboxEntry) => Promise<string | null>;
   /** The reader's identity, to offer Withdraw to the asker only. */
   me: string | null;
+  /** The reader is a person: the core lets a person withdraw any pending decision. */
+  person: boolean;
 }
 
 interface DecisionOption {
@@ -352,7 +354,7 @@ const Entry: Component<EntryProps> = (props) => {
                   placeholder="Anything the asker should know"
                 />
               </label>
-              <Show when={props.me !== null && props.me === asked().asker}>
+              <Show when={props.person || (props.me !== null && props.me === asked().asker)}>
                 <button type="button" class="inbox-decision-withdraw" disabled={props.busy} onClick={() => void withdraw()}>
                   Withdraw
                 </button>
@@ -995,11 +997,21 @@ const Inbox: Component<Props> = (props) => {
   // Who is reading, read once and only when a decision is on screen: Withdraw
   // is offered to the asker alone. Unknown hides it; the core decides anyway.
   const [me, setMe] = createSignal<string | null>(null);
+  const [person, setPerson] = createSignal(false);
   let askedWhoami = false;
   createEffect(() => {
     if (askedWhoami || !entries().some((entry) => entry.kind === "decision.pending")) return;
     askedWhoami = true;
-    whoami().then((who) => setMe(who.identity_ref), () => setMe(null));
+    whoami().then(
+      (who) => {
+        setMe(who.identity_ref);
+        setPerson(who.kind === "human");
+      },
+      () => {
+        setMe(null);
+        setPerson(false);
+      },
+    );
   });
   // A decided row leaves the list at once; the re-read confirms it.
   const dropEntry = (key: string) => {
@@ -1272,7 +1284,7 @@ const Inbox: Component<Props> = (props) => {
       </Show>
       <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
         <For each={visibleEntries()}>
-          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} onAnswer={answerDecision} onWithdraw={withdrawDecision} me={me()} />}
+          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} onAnswer={answerDecision} onWithdraw={withdrawDecision} me={me()} person={person()} />}
         </For>
       </div>
       <Show when={result()?.next_cursor}>
