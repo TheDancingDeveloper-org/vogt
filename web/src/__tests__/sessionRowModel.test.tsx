@@ -28,6 +28,13 @@ function session(over: Partial<SessionSummary> & { id: string }): SessionSummary
   };
 }
 
+describe("hibernated is not a crash (WI-4567)", () => {
+  it("wins over a stale exit code in the label and class", () => {
+    expect(activityLabel("hibernated", 137)).toBe("hibernated");
+    expect(activityClass(session({ id: "h", activity: "hibernated", exit_code: 137 }))).toBe("hibernated");
+  });
+});
+
 describe("activity labels and classes", () => {
   it("reads a finished session as finished, exit code first", () => {
     expect(activityLabel("running", 0)).toBe("exited (0)");
