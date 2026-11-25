@@ -1275,6 +1275,18 @@ const PRIVATE_CACHE_ENV: &[(&str, &str)] = &[
     ("UV_CACHE_DIR", "/cache/uv"),
 ];
 
+/// Gradle/Kotlin daemon hygiene (WI-898), carried in the pod spec because the
+/// `session-home` emptyDir hides anything the image put under `/home/vogt`
+/// (a `~/.gradle/gradle.properties` would never be seen). `GRADLE_OPTS` holds
+/// JVM arguments for the Gradle client, which also sets daemon properties:
+/// `-Dorg.gradle.daemon.idletimeout` ends an idle daemon after 30 minutes
+/// instead of the 3 hour default, and `-Dorg.gradle.project.<name>` (Gradle
+/// build-environment docs) sets the project property
+/// `kotlin.daemon.jvmargs`, the Kotlin Gradle plugin's property for the
+/// Kotlin compile daemon's JVM arguments, capping its heap at 3 GiB.
+const GRADLE_OPTS: &str = "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g";
+
 /// Volumes in `pod` that a session can write and another session's pod can
 /// also mount: any claim, host path, NFS or CSI source without both the
 /// volume and the mount marked read-only. `emptyDir`, Secret, ConfigMap,
@@ -1787,6 +1799,11 @@ pub fn pod_template(
     env.push(EnvVar {
         name: "RUSTUP_AUTO_INSTALL".into(),
         value: Some("1".into()),
+        ..Default::default()
+    });
+    env.push(EnvVar {
+        name: "GRADLE_OPTS".into(),
+        value: Some(GRADLE_OPTS.into()),
         ..Default::default()
     });
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
@@ -4972,6 +4989,30 @@ mod tests {
             .find(|e| e.name == "VOGT_CLAUDE_MESSAGING_SOCKET")
             .expect("VOGT_CLAUDE_MESSAGING_SOCKET");
         assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
+    }
+
+    #[test]
+    fn the_agent_container_carries_gradle_daemon_limits_outside_home() {
+        // WI-898: the `session-home` emptyDir hides `/home/vogt/.gradle`, so
+        // the limits travel as env on the agent container, which no mount can
+        // hide. Reuse the pod the tmpdir test builds.
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let env = spec.containers[0].env.as_ref().unwrap();
+        let opts = env
+            .iter()
+            .find(|e| e.name == "GRADLE_OPTS")
+            .and_then(|e| e.value.as_deref())
+            .expect("GRADLE_OPTS");
+        assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
+        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
+        // The home mount is what hides the image's gradle.properties.
+        assert!(spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == "session-home" && m.mount_path == "/home/vogt"));
     }
 
     #[test]
