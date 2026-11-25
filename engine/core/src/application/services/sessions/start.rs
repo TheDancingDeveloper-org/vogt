@@ -445,7 +445,7 @@ where
     // Escalation before the profile fills the start (WI-1329): an item that
     // keeps failing review gets the careful profile's model and budget.
     let escalated_to =
-        dispatch_profiles::escalation(params.purpose.as_deref(), blockers_count, &settings);
+        dispatch_profiles::escalation(effective_purpose(params), blockers_count, &settings);
     let enforcing = ctx.principal.kind == ActorKind::Agent && settings.enforce;
     let mut escalated_params = params.clone();
     if let (Some(purpose), true) = (escalated_to, enforcing) {
@@ -1053,12 +1053,21 @@ fn refuse_task_without_agent(params: &StartSessionParams) -> Result<(), VogtErro
     Ok(())
 }
 
+/// The purpose a start runs as: the caller's, else `review` when it reviews an
+/// item (`review_of`), else none. A named purpose is never replaced.
+fn effective_purpose(params: &StartSessionParams) -> Option<&str> {
+    match (params.purpose.as_deref(), params.review_of.is_some()) {
+        (None, true) => Some("review"),
+        (purpose, _) => purpose,
+    }
+}
+
 /// Python's `_resolve_purpose`: fill a start's unset fields from its purpose's
 /// dispatch profile. Returns the filled params, whether the profile asks for a
 /// read-only session, and the profile fields the caller set itself (the
 /// overrides). A start with no purpose is returned unchanged. The profile is
 /// the deployment's, written by a person, over the code defaults.
-fn resolve_purpose<C, I>(
+pub(super) fn resolve_purpose<C, I>(
     ctx: &AppContext<C, I>,
     params: &StartSessionParams,
 ) -> Result<(StartSessionParams, bool, Vec<&'static str>), VogtError>
@@ -1066,6 +1075,13 @@ where
     C: Clock,
     I: IdFactory,
 {
+    // A review (`review_of` set) that names no purpose runs as `review`, so it
+    // gets the review profile and the purpose the verdict gate reads. A purpose
+    // the caller names is never replaced.
+    let params = &StartSessionParams {
+        purpose: effective_purpose(params).map(str::to_string),
+        ..params.clone()
+    };
     let Some(purpose) = params.purpose.as_deref() else {
         return Ok((params.clone(), false, Vec::new()));
     };
