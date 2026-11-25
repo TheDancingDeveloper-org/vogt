@@ -377,6 +377,9 @@ pub struct ListWorkParams {
     /// Include done and wont_do items.
     #[serde(default)]
     pub include_finished: bool,
+    /// Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). One extra grouped read for the whole page. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     /// `summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.
     #[serde(default = "default_list_work_params_mode")]
     pub mode: ListWorkParamsMode,
@@ -390,7 +393,7 @@ pub struct ListWorkParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkListResult {
-    /// Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode.
+    /// Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode. With `with_sessions`, each row also carries `live_sessions`.
     pub items: WorkListResultItems,
     pub total: i64,
     #[serde(default = "default_work_list_result_mode")]
