@@ -389,10 +389,17 @@ where
 /// the Python core returns, and an unknown name is left out, as a digest's
 /// `extra` leaves it.
 pub(super) fn slim_full_rows(listed: &mut Value, fields: Option<&[String]>) {
-    let Some(fields) = fields.filter(|fields| !fields.is_empty()) else {
+    let Some(rows) = listed.get_mut("sessions").and_then(Value::as_array_mut) else {
         return;
     };
-    let Some(rows) = listed.get_mut("sessions").and_then(Value::as_array_mut) else {
+    let Some(fields) = fields.filter(|fields| !fields.is_empty()) else {
+        // The launch line is long and repeated on every row; it is left out
+        // unless `fields` asks for it (WI-4725).
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                row.remove("command");
+            }
+        }
         return;
     };
     for row in rows {
@@ -807,6 +814,7 @@ impl<'de> serde::Deserialize<'de> for ListRequest {
                 stall_after_minutes: optional_i64(params, "stall_after_minutes", 10)?,
                 include_hidden: optional_bool(params, "include_hidden")?.unwrap_or(false),
                 fields: optional_string_list(params, "fields")?,
+                started_by_session: optional_string(params, "started_by_session")?,
             };
             let flag = optional_bool(params, "starters_only")?.unwrap_or(false);
             let set = params
@@ -1162,6 +1170,10 @@ pub struct ListSessionsParams {
     pub include_hidden: bool,
     /// Summary fields copied onto each digest row as `extra`.
     pub fields: Option<Vec<String>>,
+    /// Keep only sessions this one started (WI-4725): the starter's engine
+    /// session id or its `ses_…` id. Unlinked rows have no starter and never
+    /// match.
+    pub started_by_session: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2143,6 +2155,12 @@ where
         rows_of(ctx, params, &live, detail.as_deref())?
     };
     let stall_after = params.stall_after_minutes.saturating_mul(60);
+    // The starter filter holds on every path: full or digest, with or without
+    // `states`, linked or not (WI-4725).
+    if let Some(starter) = params.started_by_session.as_deref() {
+        let starter = resolve_target(ctx, starter)?.engine_session_id;
+        joined.retain(|summary| summary.started_by_session.as_deref() == Some(starter.as_str()));
+    }
     let mut kept = Vec::new();
     for summary in joined.drain(..) {
         if full
@@ -2711,6 +2729,7 @@ where
             stall_after_minutes: params.stall_after_minutes,
             include_hidden: false,
             fields: None,
+            started_by_session: None,
         },
         &live,
         None,
