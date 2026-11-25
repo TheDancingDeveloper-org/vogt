@@ -37,6 +37,30 @@ pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Everything else. A call that has not answered in 30 s is not going to.
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The read budget for one POST. A `tools/call` that asks the core to hold for
+/// `timeout_s`, `wait_s` or `wake_timeout_s` seconds (session_wait, chat sends,
+/// session_input) gets that wait plus [`CALL_MARGIN`]; every other call keeps
+/// [`DEFAULT_TIMEOUT`]. Never shorter than the default.
+pub fn call_timeout(body: &[u8]) -> std::time::Duration {
+    let Ok(message) = serde_json::from_slice::<Value>(body) else {
+        return DEFAULT_TIMEOUT;
+    };
+    if message.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return DEFAULT_TIMEOUT;
+    }
+    let arguments = &message["params"]["arguments"];
+    let longest_wait = ["timeout_s", "wait_s", "wake_timeout_s"]
+        .iter()
+        .filter_map(|key| arguments.get(*key).and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    let budget = std::time::Duration::from_secs(longest_wait).saturating_add(CALL_MARGIN);
+    DEFAULT_TIMEOUT.max(budget)
+}
+
+/// Headroom past a call's own wait, for the handshake and the core's reply.
+pub const CALL_MARGIN: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The streamable-HTTP session header. A server that issues one on
 /// `initialize` refuses every later request that does not send it back.
 const MCP_SESSION_HEADER: &str = "Mcp-Session-Id";
@@ -480,7 +504,7 @@ impl BridgeTransport for UreqTransport {
         let timeout = if body.is_empty() {
             DISCOVERY_TIMEOUT
         } else {
-            DEFAULT_TIMEOUT
+            call_timeout(body)
         };
         let agent: ureq::Agent = http_client::builder()
             .timeout_global(Some(timeout))
@@ -979,5 +1003,63 @@ mod tests {
         let mut next = String::new();
         bridge.serve(&tools(3), &mut next);
         assert!(next.contains("lookup"), "{next}");
+    }
+
+    /// A `tools/call` body with the given arguments, as a client sends it.
+    fn call_body(name: &str, arguments: &str) -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{{\"name\":\"{name}\",\"arguments\":{arguments}}}}}"
+        )
+    }
+
+    #[test]
+    fn a_session_wait_longer_than_thirty_seconds_is_not_cut_off_at_thirty() {
+        let body = call_body("session_wait", r#"{"id":"s","timeout_s":90}"#);
+        assert_eq!(
+            call_timeout(body.as_bytes()),
+            std::time::Duration::from_secs(90) + CALL_MARGIN,
+        );
+        let max = call_body("session_wait", r#"{"id":"s","timeout_s":600}"#);
+        assert_eq!(
+            call_timeout(max.as_bytes()),
+            std::time::Duration::from_secs(600) + CALL_MARGIN,
+        );
+    }
+
+    #[test]
+    fn the_longest_wait_argument_sets_the_budget() {
+        let body = call_body("chat_send", r#"{"wait_s":300,"wake_timeout_s":120}"#);
+        assert_eq!(
+            call_timeout(body.as_bytes()),
+            std::time::Duration::from_secs(300) + CALL_MARGIN,
+        );
+        let input = call_body("session_input", r#"{"wake_timeout_s":120}"#);
+        assert_eq!(
+            call_timeout(input.as_bytes()),
+            std::time::Duration::from_secs(120) + CALL_MARGIN,
+        );
+    }
+
+    #[test]
+    fn a_short_wait_gets_its_own_margin_on_top() {
+        let body = call_body("session_wait", r#"{"id":"s","timeout_s":5}"#);
+        assert_eq!(
+            call_timeout(body.as_bytes()),
+            std::time::Duration::from_secs(5) + CALL_MARGIN,
+        );
+        let zero = call_body("session_wait", r#"{"id":"s","timeout_s":0}"#);
+        assert_eq!(call_timeout(zero.as_bytes()), DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn a_call_without_a_wait_keeps_the_default() {
+        for body in [
+            call_body("session_list", "{}"),
+            call_body("session_wait", r#"{"id":"s","timeout_s":"soon"}"#),
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}".to_owned(),
+            "not json at all".to_owned(),
+        ] {
+            assert_eq!(call_timeout(body.as_bytes()), DEFAULT_TIMEOUT, "{body}");
+        }
     }
 }
