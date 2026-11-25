@@ -5996,6 +5996,372 @@ mod tests {
         )
         .is_err());
     }
+
+    // ---- WI-4715: the per-pod tailnet sidecar ----
+
+    fn tailnet_cfg(policy: &str) -> PodConfig {
+        PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "1"),
+                ("ENGINE_POD_TEMPLATE_POLICIES", policy),
+            ]),
+            None,
+        )
+        .unwrap()
+    }
+
+    const TAILNET_POLICY: &str = r#"{"Pod":{"tailnet":true}}"#;
+
+    /// The pod as JSON, with the bootstrap Secret's random name part blanked.
+    fn spec_json(pod: &Pod) -> serde_json::Value {
+        let mut value = serde_json::to_value(pod).unwrap();
+        for v in value["spec"]["volumes"].as_array_mut().unwrap() {
+            if v["name"] == "bootstrap" {
+                v["secret"]["secretName"] = "bootstrap".into();
+            }
+        }
+        value
+    }
+
+    /// Captures what `tracing` writes while the guard lives (a current-thread
+    /// test runtime keeps the whole create on this thread).
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    impl LogCapture {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::TRACE)
+                    .finish(),
+            )
+        }
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn tailnet_factory(
+        cfg: &PodConfig,
+        secret_posts: Vec<u16>,
+        minter: Option<Arc<crate::session_tailnet::tests::FakeMinter>>,
+    ) -> (PodBackendFactory, mock_create::Seen) {
+        let (client, seen) = mock_create::client(secret_posts);
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None)
+            .with_tailnet(minter.map(|m| m as Arc<dyn TailnetMinter>));
+        (factory, seen)
+    }
+
+    fn mounts_volume(container: &Container, volume: &str) -> bool {
+        container
+            .volume_mounts
+            .iter()
+            .flatten()
+            .any(|m| m.name == volume)
+    }
+
+    #[test]
+    fn with_the_tailnet_flag_off_the_pod_spec_is_unchanged() {
+        let plain = spec_json(&pod_template_for(&PodConfig::default()));
+        // A template that opts in changes nothing while the flag is off.
+        let opted = with_policy(TAILNET_POLICY).unwrap();
+        assert!(opted.tailnet.is_none());
+        assert_eq!(spec_json(&pod_template_for(&opted)), plain);
+        // The flag alone changes nothing for a template that did not opt in.
+        let flag_only = tailnet_cfg("{}");
+        assert!(flag_only.tailnet.is_some());
+        assert_eq!(spec_json(&pod_template_for(&flag_only)), plain);
+        let other = tailnet_cfg(r#"{"Other":{"tailnet":true}}"#);
+        assert_eq!(spec_json(&pod_template_for(&other)), plain);
+    }
+
+    #[test]
+    fn an_opted_in_template_is_only_marked_until_the_engine_holds_a_key() {
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let pod = pod_template_for(&cfg);
+        assert!(crate::session_tailnet::requested(&pod));
+        // No sidecar and no key volume in the template itself.
+        let plain = pod_template_for(&PodConfig::default());
+        assert_eq!(spec_json(&pod)["spec"], spec_json(&plain)["spec"]);
+    }
+
+    #[test]
+    fn the_tailnet_flag_is_read_and_checked() {
+        let cfg = tailnet_cfg("{}");
+        let tailnet = cfg.tailnet.unwrap();
+        assert_eq!(tailnet.image, "ghcr.io/tailscale/tailscale:v1.104.7");
+        assert_eq!(tailnet.api_url, "https://api.tailscale.com");
+        for off in ["", "0", "false"] {
+            let cfg = PodConfig::from_lookup(lookup(&[("ENGINE_POD_TAILNET", off)]), None);
+            assert!(cfg.unwrap().tailnet.is_none());
+        }
+        assert!(PodConfig::from_lookup(lookup(&[("ENGINE_POD_TAILNET", "yes")]), None).is_err());
+        let plain_http = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "1"),
+                ("ENGINE_POD_TAILNET_API_URL", "http://127.0.0.1:9"),
+            ]),
+            None,
+        );
+        assert!(plain_http.is_err());
+        let custom = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "true"),
+                (
+                    "ENGINE_POD_TAILNET_IMAGE",
+                    "registry.local/tailscale:v1.104.7",
+                ),
+                ("ENGINE_POD_TAILNET_API_URL", "https://ts.example/"),
+            ]),
+            None,
+        )
+        .unwrap()
+        .tailnet
+        .unwrap();
+        assert_eq!(custom.image, "registry.local/tailscale:v1.104.7");
+        assert_eq!(custom.api_url, "https://ts.example");
+        // The policy field is accepted (deny_unknown_fields would refuse it).
+        assert!(with_policy(TAILNET_POLICY).unwrap().template_policies["Pod"].tailnet);
+    }
+
+    #[tokio::test]
+    async fn a_minted_key_gives_the_pod_a_locked_down_sidecar_that_alone_mounts_it() {
+        use crate::session_tailnet::tests::{FakeMinter, KEY, KEY_ID};
+        let logs = LogCapture::default();
+        let _guard = logs.install();
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::minting();
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter.clone()));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        assert_eq!(*minter.minted.lock().unwrap(), [id]);
+        assert!(minter.revoked.lock().unwrap().is_empty());
+        let seen = seen.lock().unwrap();
+        let paths: Vec<_> = seen.iter().map(|(m, p, _)| format!("{m} {p}")).collect();
+        assert_eq!(
+            paths,
+            [
+                "POST /api/v1/namespaces/vogt-sessions/pods",
+                "POST /api/v1/namespaces/vogt-sessions/secrets",
+                "POST /api/v1/namespaces/vogt-sessions/secrets",
+            ]
+        );
+        assert!(!seen[0].2.contains(KEY), "key in the pod spec");
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(
+            pod.metadata.annotations.as_ref().unwrap()[crate::session_tailnet::TAILNET_ANNOTATION],
+            "sidecar"
+        );
+        let spec = pod.spec.clone().unwrap();
+        assert_ne!(
+            spec.share_process_namespace,
+            Some(true),
+            "a shared process namespace would show the sidecar to the agent"
+        );
+        let inits = spec.init_containers.clone().unwrap();
+        let sidecar = inits.last().unwrap();
+        assert_eq!(sidecar.name, "tailnet");
+        assert_eq!(
+            sidecar.image.as_deref(),
+            Some("ghcr.io/tailscale/tailscale:v1.104.7")
+        );
+        assert_eq!(
+            sidecar.restart_policy.as_deref(),
+            Some("Always"),
+            "a native sidecar"
+        );
+        assert!(
+            sidecar.startup_probe.is_none()
+                && sidecar.readiness_probe.is_none()
+                && sidecar.liveness_probe.is_none(),
+            "the agent must never wait on the sidecar"
+        );
+        let sc = sidecar.security_context.as_ref().unwrap();
+        assert_eq!(sc.run_as_user, Some(1001));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop.as_deref(),
+            Some(&["ALL".to_string()][..])
+        );
+        assert!(sc.capabilities.as_ref().unwrap().add.is_none());
+        let env: BTreeMap<_, _> = sidecar
+            .env
+            .iter()
+            .flatten()
+            .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(env["TS_HOSTNAME"], format!("vs-{}", id.simple()));
+        assert_eq!(env["TS_AUTH_ONCE"], "true");
+        assert_eq!(env["TS_USERSPACE"], "true");
+        assert_eq!(env["TS_SOCKS5_SERVER"], "127.0.0.1:1055");
+        assert_eq!(env["TS_OUTBOUND_HTTP_PROXY_LISTEN"], "127.0.0.1:1056");
+        assert!(
+            sidecar.env.iter().flatten().all(|e| e.value_from.is_none()),
+            "the key is a file, never an env value"
+        );
+        let script = sidecar.command.as_ref().unwrap().join(" ");
+        assert!(script.contains("--tun=userspace-networking"), "{script}");
+        assert!(script.contains("trap leave TERM"), "{script}");
+        assert!(script.contains("logout"), "{script}");
+        assert!(
+            script.contains("--auth-key=\"file:$TS_AUTHKEY_FILE\""),
+            "{script}"
+        );
+        // The key volume: the Secret the engine made, 0400, in the sidecar only.
+        let volumes = spec.volumes.clone().unwrap();
+        let key_volume = volumes.iter().find(|v| v.name == "tailnet-key").unwrap();
+        let secret_volume = key_volume.secret.as_ref().unwrap();
+        assert_eq!(secret_volume.default_mode, Some(0o400));
+        assert!(mounts_volume(sidecar, "tailnet-key"));
+        for other in spec.containers.iter().chain(&inits[..inits.len() - 1]) {
+            assert!(
+                !mounts_volume(other, "tailnet-key") && !mounts_volume(other, "tailnet-state"),
+                "{} mounts the tailnet key or state",
+                other.name
+            );
+        }
+        // The agent learns only where the proxies are.
+        let agent = &spec.containers[0];
+        assert_eq!(agent.name, SESSION_CONTAINER);
+        let secret_name = secret_volume.secret_name.clone().unwrap();
+        let agent_json = serde_json::to_string(agent).unwrap();
+        assert!(!agent_json.contains(&secret_name), "{agent_json}");
+        assert!(!agent_json.contains(KEY));
+        assert_eq!(
+            env_value(&pod, "VOGT_TAILNET_SOCKS5").as_deref(),
+            Some("127.0.0.1:1055")
+        );
+        // The Secret is the one the sidecar mounts, owned by the pod.
+        let secret: Secret = serde_json::from_str(&seen[2].2).unwrap();
+        assert_eq!(secret.metadata.name.as_deref(), Some(secret_name.as_str()));
+        assert!(secret_name.starts_with(&format!("vogt-ts-{}-", id.simple())));
+        assert_eq!(secret.metadata.owner_references.unwrap()[0].uid, "uid-pod");
+        assert_eq!(secret.immutable, Some(true));
+        assert_eq!(
+            secret.metadata.labels.as_ref().unwrap()["vogt.kind"],
+            "tailnet"
+        );
+        assert_eq!(secret.data.unwrap()["authkey"].0, KEY.as_bytes());
+        // The audit log names the key by id, never by value.
+        let text = logs.text();
+        assert!(text.contains(KEY_ID), "{text}");
+        assert!(!text.contains(KEY), "the key reached the log: {text}");
+        assert!(!text.contains("s3cretTailnetKeyValue"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_mint_starts_the_pod_without_the_sidecar_and_the_session_says_why() {
+        use crate::session_tailnet::tests::FakeMinter;
+        use std::io::Read;
+        let logs = LogCapture::default();
+        let _guard = logs.install();
+        let id = Uuid::new_v4();
+        let (_link, mut reader) = crate::agent_stream::global().register_pod(id);
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::answering(Err(ApiError::Internal(
+            "tailscale API refused the session key: HTTP 403".into(),
+        )));
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .expect("a mint failure never stops the session");
+        crate::agent_stream::global().forget_pod(id);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the pod and its bootstrap Secret only");
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(
+            pod.metadata.annotations.as_ref().unwrap()[crate::session_tailnet::TAILNET_ANNOTATION],
+            "unavailable"
+        );
+        // Apart from the mark, the spec is the pre-feature one.
+        let plain = pod_for(&PodConfig::default(), id);
+        assert_eq!(spec_json(&pod)["spec"], spec_json(&plain)["spec"]);
+        // The session's output records it.
+        let mut buf = vec![0u8; 4096];
+        let n = reader.read(&mut buf).unwrap();
+        let note = String::from_utf8_lossy(&buf[..n]);
+        assert!(note.contains("session tailnet unavailable"), "{note}");
+        assert!(note.contains("HTTP 403"), "{note}");
+        assert!(logs.text().contains("tailnet key unavailable"));
+    }
+
+    #[tokio::test]
+    async fn without_an_oauth_secret_a_tailnet_pod_starts_without_the_sidecar() {
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let (factory, seen) = tailnet_factory(&cfg, vec![], None);
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert!(crate::session_tailnet::secret_name_in(&pod).is_none());
+        assert!(pod
+            .spec
+            .unwrap()
+            .init_containers
+            .unwrap()
+            .iter()
+            .all(|c| c.name != "tailnet"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_tailnet_secret_deletes_the_pod_and_revokes_the_key() {
+        use crate::session_tailnet::tests::{FakeMinter, KEY, KEY_ID};
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::minting();
+        // The bootstrap Secret is made; the tailnet Secret is refused.
+        let (factory, seen) = tailnet_factory(&cfg, vec![201, 403], Some(minter.clone()));
+        let err = factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .expect_err("a pod whose sidecar can never get its key is removed");
+        assert!(!err.to_string().contains(KEY), "{err}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.last().unwrap().0, "DELETE");
+        assert!(seen.last().unwrap().1.contains("/pods/"));
+        assert_eq!(*minter.revoked.lock().unwrap(), [KEY_ID]);
+    }
+
+    #[tokio::test]
+    async fn a_template_that_did_not_opt_in_never_mints() {
+        use crate::session_tailnet::tests::FakeMinter;
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg("{}");
+        let minter = FakeMinter::minting();
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter.clone()));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        assert!(minter.minted.lock().unwrap().is_empty());
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
 }
 
 #[cfg(test)]

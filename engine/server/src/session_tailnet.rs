@@ -251,7 +251,10 @@ impl HttpTailnetMinter {
     /// The minter for `cfg`, with the OAuth client read through `get` (the
     /// process environment in production). `None` when the secret is unset:
     /// every tailnet pod then starts without the sidecar and says why.
-    pub fn from_lookup(cfg: &PodTailnet, get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+    pub fn from_lookup(
+        cfg: &PodTailnet,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>> {
         let Some(secret) = get(OAUTH_SECRET_ENV)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -324,18 +327,17 @@ impl TailnetMinter for HttpTailnetMinter {
                 .json(&key_request(id))
                 .send()
                 .await
-                .map_err(|e| {
-                    ApiError::Internal(format!("tailscale API: {}", e.without_url()))
-                })?;
+                .map_err(|e| ApiError::Internal(format!("tailscale API: {}", e.without_url())))?;
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
                 return Err(ApiError::Internal(format!(
                     "tailscale API refused the session key: HTTP {status}"
                 )));
             }
-            let reply: KeyReply = resp.json().await.map_err(|_| {
-                ApiError::Internal("tailscale API reply is not an auth key".into())
-            })?;
+            let reply: KeyReply = resp
+                .json()
+                .await
+                .map_err(|_| ApiError::Internal("tailscale API reply is not an auth key".into()))?;
             if !valid_key_id(&reply.id) || !reply.key.starts_with("tskey-auth-") {
                 return Err(ApiError::Internal(
                     "tailscale API reply is not an auth key".into(),
@@ -357,9 +359,7 @@ impl TailnetMinter for HttpTailnetMinter {
                 .bearer_auth(&token)
                 .send()
                 .await
-                .map_err(|e| {
-                    ApiError::Internal(format!("tailscale API: {}", e.without_url()))
-                })?;
+                .map_err(|e| ApiError::Internal(format!("tailscale API: {}", e.without_url())))?;
             match resp.status().as_u16() {
                 200..=299 | 404 => Ok(()),
                 status => Err(ApiError::Internal(format!(
@@ -426,7 +426,10 @@ fn sidecar(cfg: &PodTailnet, id: Uuid) -> Container {
             env("TS_SOCKS5_SERVER", SOCKS5_ADDR),
             env("TS_OUTBOUND_HTTP_PROXY_LISTEN", HTTP_PROXY_ADDR),
             env("TS_STATE_DIR", STATE_DIR),
-            env("TS_AUTHKEY_FILE", format!("{KEY_MOUNT_DIR}/{KEY_SECRET_KEY}")),
+            env(
+                "TS_AUTHKEY_FILE",
+                format!("{KEY_MOUNT_DIR}/{KEY_SECRET_KEY}"),
+            ),
             env("HOME", STATE_DIR),
         ]),
         volume_mounts: Some(vec![
@@ -607,7 +610,11 @@ pub(crate) mod tests {
     /// A fake Tailscale API: the token endpoint answers `token_status`, the
     /// key endpoints `key_status` with `key_reply`. Records (method, path,
     /// authorization, body).
-    async fn serve(token_status: u16, key_status: u16, key_reply: serde_json::Value) -> (String, Seen) {
+    async fn serve(
+        token_status: u16,
+        key_status: u16,
+        key_reply: serde_json::Value,
+    ) -> (String, Seen) {
         let seen: Seen = Arc::default();
         let log = seen.clone();
         let app = axum::Router::new().fallback(axum::routing::any(
@@ -671,12 +678,18 @@ pub(crate) mod tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         // The OAuth secret is in the token request's form body, not its URL.
         let (method, path, _, body) = &seen[0];
-        assert_eq!((method.as_str(), path.as_str()), ("POST", "/api/v2/oauth/token"));
+        assert_eq!(
+            (method.as_str(), path.as_str()),
+            ("POST", "/api/v2/oauth/token")
+        );
         assert!(body.contains("grant_type=client_credentials"), "{body}");
         assert!(body.contains("client_secret="), "{body}");
         assert!(!path.contains("oauthS3cret"));
         let (method, path, auth, body) = &seen[1];
-        assert_eq!((method.as_str(), path.as_str()), ("POST", "/api/v2/tailnet/-/keys"));
+        assert_eq!(
+            (method.as_str(), path.as_str()),
+            ("POST", "/api/v2/tailnet/-/keys")
+        );
         assert_eq!(auth, "Bearer api-access-token");
         let body: serde_json::Value = serde_json::from_str(body).unwrap();
         let create = &body["capabilities"]["devices"]["create"];
@@ -693,7 +706,10 @@ pub(crate) mod tests {
     async fn a_refused_mint_fails_without_a_secret_in_the_error() {
         // The OAuth client refused, its reply echoing the request.
         let (url, _) = serve(401, 200, key_reply()).await;
-        let err = minter(&url).mint(Uuid::new_v4()).await.expect_err("refused");
+        let err = minter(&url)
+            .mint(Uuid::new_v4())
+            .await
+            .expect_err("refused");
         let text = format!("{err} {err:?}");
         assert!(text.contains("HTTP 401"), "{text}");
         assert!(!text.contains("oauthS3cret"), "{text}");
@@ -705,7 +721,10 @@ pub(crate) mod tests {
             (200, serde_json::json!({"id": "../x", "key": KEY})),
         ] {
             let (url, _) = serve(200, status, reply).await;
-            let err = minter(&url).mint(Uuid::new_v4()).await.expect_err("refused");
+            let err = minter(&url)
+                .mint(Uuid::new_v4())
+                .await
+                .expect_err("refused");
             let text = format!("{err} {err:?}");
             assert!(!text.contains("s3cretTailnetKeyValue"), "{text}");
             assert!(!text.contains("oauthS3cret"), "{text}");
@@ -726,7 +745,9 @@ pub(crate) mod tests {
     #[test]
     fn no_secret_means_no_minter_and_debug_never_prints_one() {
         let cfg = PodTailnet::default();
-        assert!(HttpTailnetMinter::from_lookup(&cfg, |_| None).unwrap().is_none());
+        assert!(HttpTailnetMinter::from_lookup(&cfg, |_| None)
+            .unwrap()
+            .is_none());
         assert!(HttpTailnetMinter::from_lookup(&cfg, |_| Some("  ".into()))
             .unwrap()
             .is_none());
