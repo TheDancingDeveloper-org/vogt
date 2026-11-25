@@ -391,9 +391,9 @@ class VogtConfig(BaseSettings):
     ci_hung_queued_after_minutes: int = Field(
         default=30,
         description=(
-            "A run on a bound branch still queued (waiting for a runner) this many minutes after "
-            "it started raises a `ci.run_hung` Inbox entry and one notice "
-            "to the item's live sessions. Zero turns queued detection off. "
+            "A run on a bound branch still queued (waiting for a runner) this many "
+            "minutes after it started raises a `ci.run_hung` Inbox entry and one "
+            "notice to the item's live sessions. Zero turns queued detection off. "
             "Detection only: nothing is cancelled."
         ),
         json_schema_extra={"default_policy": "behaviour"},
