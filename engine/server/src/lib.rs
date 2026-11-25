@@ -41,6 +41,7 @@ pub mod git;
 pub mod github_token_check;
 pub mod graft_mint;
 pub mod graft_provider;
+pub mod graft_token_sweep;
 pub mod gui;
 pub mod hibernate_policy;
 pub mod hibernation;
