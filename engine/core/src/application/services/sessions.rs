@@ -1069,6 +1069,106 @@ fn is_claude_model(model: &str) -> bool {
     matches!(model, "opus" | "sonnet" | "haiku" | "fable") || model.starts_with("claude-")
 }
 
+/// Python `_CLAUDE_ALIAS`: the bare names only Claude Code resolves.
+fn is_claude_alias(model: &str) -> bool {
+    matches!(model, "opus" | "sonnet" | "haiku" | "fable")
+}
+
+/// The agent a template name means (Python `_resolved_template_tag`): a name
+/// or tag of `claude`, `codex` or `opencode`, compared case-insensitively;
+/// anything else is returned lower-cased.
+fn resolved_template_tag(template: &str) -> String {
+    let folded = template.trim().to_lowercase();
+    for agent in ["claude", "codex", "opencode"] {
+        if folded == agent || folded.ends_with(&format!("({agent})")) {
+            return agent.to_string();
+        }
+    }
+    // The built-in template's own name, "Claude Code (protected)".
+    if folded.starts_with("claude code") {
+        return "claude".to_string();
+    }
+    folded
+}
+
+/// The first `forbidden_text` pattern `model` matches. A pattern that does not
+/// compile is skipped, as in Python: the write path already refuses one.
+fn model_matches_forbidden_text<'a>(model: &str, patterns: &'a [String]) -> Option<&'a String> {
+    patterns
+        .iter()
+        .find(|pattern| regex::Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(model)))
+}
+
+/// Refuse a start whose model the template or the subject's project forbids
+/// (WI-1590, WI-1852; Python `_refuse_forbidden_model`). Judged on the params
+/// after the profile has filled them, before anything reaches the engine.
+fn refuse_forbidden_model<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let template = params.template.as_deref().map(resolved_template_tag);
+    let Some(model) = params.model.as_deref() else {
+        return Ok(());
+    };
+    if template.as_deref() == Some("claude") && !is_claude_model(model) {
+        return Err(VogtError::PolicyRefused(format!(
+            "template 'claude' runs Claude Code, which does not take model {}; name a claude \
+             model (claude-*, opus, sonnet, haiku, fable) or a different template",
+            py_repr(model)
+        )));
+    }
+    if let (Some(agent @ ("codex" | "opencode")), true) =
+        (template.as_deref(), is_claude_alias(model))
+    {
+        return Err(VogtError::PolicyRefused(format!(
+            "template {} runs {agent}, which does not resolve the Claude Code alias {}; use \
+             template 'claude', or name a model that agent takes",
+            py_repr(params.template.as_deref().unwrap_or("")),
+            py_repr(model)
+        )));
+    }
+    let view = ctx.declared.read()?;
+    let project = if let Some(reference) = &params.work_item {
+        match resolve::work_item(&view, reference)?.project_id {
+            Some(id) => view.project_by_id(&id)?,
+            None => None,
+        }
+    } else if let Some(slug) = &params.project {
+        Some(resolve::project(&view, slug)?)
+    } else {
+        None
+    };
+    let Some(project) = project else {
+        return Ok(());
+    };
+    let policy = &project.agent_policy;
+    let where_ = format!("project {}", py_repr(&project.slug));
+    let never = policy
+        .review
+        .as_ref()
+        .and_then(|review| review.get("never_models"))
+        .and_then(Value::as_array)
+        .is_some_and(|listed| listed.iter().any(|one| one.as_str() == Some(model)));
+    if never {
+        return Err(VogtError::PolicyRefused(format!(
+            "model {} is on {where_}'s review policy never_models, so a session may not start on it",
+            py_repr(model)
+        )));
+    }
+    if let Some(matched) = model_matches_forbidden_text(model, &policy.forbidden_text) {
+        return Err(VogtError::PolicyRefused(format!(
+            "model {} matches {where_}'s forbidden_text pattern {}, so a session may not start on it",
+            py_repr(model),
+            py_repr(matched)
+        )));
+    }
+    Ok(())
+}
+
 /// Default overseer context ceiling (`ENGINE_OVERSIGHT_CONTEXT_TOKENS`).
 const DEFAULT_OVERSIGHT_CONTEXT_TOKENS: i64 = 200_000;
 
@@ -1621,6 +1721,7 @@ where
     // permission posture, so naming a purpose cannot raise a start past what
     // the caller could ask for directly (WI-1323).
     let (resolved, read_only, overrides) = resolve_purpose(ctx, &escalated_params)?;
+    refuse_forbidden_model(ctx, &resolved)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;
     refuse_privilege_above_caller(ctx, params, started_by_kind.as_deref())?;
