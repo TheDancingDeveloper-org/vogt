@@ -21,8 +21,8 @@ use crate::application::services::preferences::InboxSavedFilter;
 use crate::application::services::{context_parts, dispatch, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
-    Clock, CodingSession, DriftProposal, IdFactory, InboxTriage, Moment, Observation, Project,
-    SessionGrant, Sweep, TriageState, WorkItem,
+    Clock, DriftProposal, IdFactory, InboxTriage, Moment, Observation, Project, Sweep, TriageState,
+    WorkItem,
 };
 use crate::decisions::{self, digest_of};
 use crate::errors::VogtError;
