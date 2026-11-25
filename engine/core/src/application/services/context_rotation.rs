@@ -49,6 +49,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
+use super::sessions::audit_system_input;
 use super::sessions::dispatch_preferences;
 use super::sessions::{hibernate, start_session_tracked, HibernateParams, StartSessionParams};
 use crate::adapters::engine::EngineSession;
@@ -411,6 +412,22 @@ where
             match engine.send_input(&row.id, &ask, true, false, None) {
                 Ok(true) => {
                     done.asked.push(row.id.clone());
+                    // The ask is text on the session's terminal: audited like
+                    // any input, byte count only.
+                    if let Err(error) = audit_system_input(
+                        ctx,
+                        &row.id,
+                        "context_rotation",
+                        REASON,
+                        ask.len(),
+                        true,
+                    ) {
+                        tracing::warn!(
+                            "context rotation: audit of the ask to {} failed: {}",
+                            row.id,
+                            error.message()
+                        );
+                    }
                 }
                 Ok(false) => {}
                 Err(error) => tracing::warn!(

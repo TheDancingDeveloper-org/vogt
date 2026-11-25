@@ -3099,6 +3099,54 @@ where
     })
 }
 
+/// Audit a write the core itself typed into a session's terminal: a CI
+/// conclusion notice, the context-rotation ask. These are system actions, not
+/// a caller's `session.input`, but they put text on a PTY all the same, so each
+/// leaves the same `session.input` row: the session (the `ses_` id when linked,
+/// otherwise the engine UUID), the actor, the byte count and the key names
+/// (none here), never the text. `source` names the system path.
+pub(crate) fn audit_system_input<C, I>(
+    ctx: &AppContext<C, I>,
+    engine_id: &str,
+    source: &str,
+    reason: &str,
+    bytes: usize,
+    submitted: bool,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let linked = ctx.declared.read()?.session_by_engine_id(engine_id)?;
+    let entity = linked
+        .as_ref()
+        .map(|session| session.id.clone())
+        .unwrap_or_else(|| engine_id.to_string());
+    let detail = json!({
+        "engine_session_id": engine_id,
+        "linked": linked.is_some(),
+        "bytes": bytes,
+        "keys": Vec::<String>::new(),
+        "submit": submitted,
+        "submitted": submitted,
+        "person": false,
+        "oversight": false,
+        "system": true,
+        "source": source,
+    });
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        SESSION_INPUT,
+        reason,
+        "session",
+        &entity,
+        &detail,
+        "session.input",
+        Some(&detail),
+    )
+}
+
 /// Read a session's screen.
 pub fn screen<C, I>(
     ctx: &AppContext<C, I>,

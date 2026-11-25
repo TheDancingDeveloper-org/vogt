@@ -251,6 +251,48 @@ fn the_budget_setting_is_validated() {
         .is_empty());
 }
 
+#[test]
+fn the_rotation_ask_leaves_one_audit_row_and_never_the_text() {
+    // WI-834: the ask is text typed into the session's PTY, so it is audited
+    // like any `session.input`: byte count, never the text or its token.
+    let (built, script, _dir) = opened(400_000);
+    budget(&built, 250_000);
+    rotate_over_budget(ctx(&built)).unwrap();
+    assert_eq!(script.posts("/input"), 1);
+    let token = last_token(&script);
+
+    let view = ctx(&built).declared.read().unwrap();
+    let rows = view
+        .list_audit(&crate::storage::interface::AuditQuery {
+            limit: 50,
+            offset: 0,
+            actor_id: None,
+            operation: Some("session.input".to_string()),
+            entity_id: None,
+            project_id: None,
+            since: None,
+            until: None,
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one audit row for the ask: {rows:?}");
+    assert_eq!(rows[0].entity_kind, "session");
+    let events = view.list_events(0, 500, None).unwrap();
+    let input: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "session.input")
+        .collect();
+    assert_eq!(input.len(), 1, "{events:?}");
+    assert_eq!(input[0].summary["source"], "context_rotation");
+    assert_eq!(input[0].summary["submit"], true);
+    assert!(input[0].summary["bytes"].as_u64().unwrap() > 0);
+    assert!(
+        !format!("{rows:?}").contains(&token)
+            && !format!("{rows:?}").contains("vogt-handoff")
+            && !format!("{:?}", input[0]).contains(&token),
+        "an audit row or its event holds the typed text"
+    );
+}
+
 fn creates(script: &Script) -> usize {
     script.posts("/api/sessions ")
 }
