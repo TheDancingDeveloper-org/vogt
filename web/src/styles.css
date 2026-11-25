@@ -12712,3 +12712,22 @@ a.vogt-projects-tag:hover {
 /* Mobile pager hand-off (WI-2706): the slot and its movable host are layout-transparent. */
 .terminal-handoff-slot,
 .terminal-handoff-host { display: contents; }
+
+.terminal-workspace-toolbar .session-id-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 22ch;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.session-id-chip .session-id-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 768px) {
+  .session-id-chip .session-id-text {
+    display: none;
+  }
+}
