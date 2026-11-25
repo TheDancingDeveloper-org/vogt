@@ -12427,7 +12427,22 @@ a.vogt-projects-tag:hover {
   white-space: pre;
 }
 
-.oversight-controls { display: flex; align-items: center; gap: 12px; }
+.oversight-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; max-width: 100%; }
+.oversight-groupby { display: inline-flex; max-width: 100%; }
+.oversight-groupby-btn { font-size: 13px; min-width: 0; }
+.oversight-groupby-btn--on { border-color: var(--activity-waiting); font-weight: 600; }
+.oversight-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.oversight-group-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  min-width: 0;
+}
+.oversight-group-title { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.oversight-group-count { font-size: 12px; color: var(--fg-muted); }
 .oversight-controls label { display: flex; align-items: center; gap: 4px; font-size: 13px; }
 .oversight-resources { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
 .oversight-resources--over { color: var(--activity-errored); font-weight: 600; }
