@@ -569,6 +569,7 @@ where
             reason: format!("rotated to {new_id}: {REASON}"),
             allow_shell: false,
             cold_wake_opt_out: None,
+            superseded_by: None,
         },
     ) {
         // Not rotated: keep the hand-off and the replacement id, back off.
