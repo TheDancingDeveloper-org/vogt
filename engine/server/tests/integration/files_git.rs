@@ -1261,6 +1261,37 @@ async fn a_pod_placement_refuses_a_worktree_and_names_the_field() {
     );
 }
 
+/// WI-4707: a worktree a dispatch profile filled in (`if_supported`) is
+/// dropped on a pod instead of refusing the start.
+#[tokio::test]
+async fn a_pod_placement_drops_a_profile_filled_worktree() {
+    let mut h = pod_stream::harness(false).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/sessions", h.base))
+        .headers(auth())
+        .json(&json!({
+            "name": "pod-profile-worktree",
+            "template": "pod",
+            "placement": "pod",
+            "worktree": { "branch": "wi-4707-worker", "base_ref": "main", "if_supported": true }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert!(
+        status.is_success(),
+        "the start is accepted: {status} {body}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), h.created.recv())
+            .await
+            .is_ok(),
+        "the pod is created"
+    );
+}
+
 /// WI-1325: `POST /api/workspaces/clean` drops build output and stamps
 /// `cleaned_at`, and removes a worktree only when no live or hibernated
 /// session uses it, the tree is clean (`force` or not), and its branch is

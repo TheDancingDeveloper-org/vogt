@@ -1808,6 +1808,10 @@ where
     refuse_forbidden_model(ctx, &resolved)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;
+    // A worktree the profile filled, not the caller, is a default: the engine
+    // drops it when the session resolves to a pod, which checks out the
+    // source itself (WI-4707). A caller's own `worktree=true` stays a hard ask.
+    let worktree_from_profile = params.purpose.is_some() && !overrides.contains(&"worktree");
     refuse_privilege_above_caller(ctx, params, started_by_kind.as_deref())?;
     let decision = dispatch_check(
         ctx,
@@ -1875,6 +1879,7 @@ where
         spec.worktree = Some(json!({
             "branch": worktree_branch(&subject, &session_id),
             "base_ref": worktree_base(&policy),
+            "if_supported": worktree_from_profile,
         }));
     }
     // How long the engine took to accept the session: on the audit row, and
