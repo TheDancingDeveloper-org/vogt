@@ -3,11 +3,13 @@
 #
 #   vogt-tailnet-connect HOST PORT
 #
-# Probes the tailscale sidecar's SOCKS5 port within 2s. If nothing answers it
-# exits 255 with a clear message, so the agent never hangs on a pod whose
-# sidecar is down. Otherwise it relays stdin/stdout through the proxy.
+# Probes the SOCKS5 proxy within 2s. If nothing answers it exits 255 with a
+# clear message, so the agent never hangs. Otherwise it relays stdin/stdout
+# through the proxy.
 #
-# VOGT_TAILNET_SOCKS5 (host:port, default 127.0.0.1:1055) overrides the proxy.
+# The proxy is VOGT_TAILNET_SOCKS5 (host:port). Unset, it is the engine's
+# tailnet SOCKS5, vogt-dev-engine.vogt-dev.svc:1055 (WI-4721). A pod with its
+# own tailscale sidecar (ENGINE_POD_TAILNET=1) is given 127.0.0.1:1055 there.
 set -u
 
 if [ "$#" -ne 2 ]; then
@@ -16,13 +18,13 @@ if [ "$#" -ne 2 ]; then
 fi
 host="$1"
 port="$2"
-proxy="${VOGT_TAILNET_SOCKS5:-127.0.0.1:1055}"
+proxy="${VOGT_TAILNET_SOCKS5:-vogt-dev-engine.vogt-dev.svc:1055}"
 proxy_host="${proxy%:*}"
 proxy_port="${proxy##*:}"
 
 # shellcheck disable=SC2016  # $1 and $2 expand in the inner shell, on purpose
 if ! timeout 2 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$proxy_host" "$proxy_port" 2>/dev/null; then
-    echo "vogt-tailnet-connect: the tailnet proxy ${proxy} is not answering; this pod's tailscale sidecar is down or was not started, so ${host}:${port} is unreachable from here." >&2
+    echo "vogt-tailnet-connect: the tailnet proxy ${proxy} is not answering; the engine's tailnet SOCKS5 (or this pod's tailscale sidecar) is down or not started, so ${host}:${port} is unreachable from here." >&2
     exit 255
 fi
 

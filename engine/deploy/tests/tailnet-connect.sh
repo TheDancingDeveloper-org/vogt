@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# WI-4716: vogt-tailnet-connect and tcurl, against a fake SOCKS5 listener.
+# WI-4716/WI-4721: vogt-tailnet-connect and tcurl, against a fake SOCKS5 listener.
 #
 #   - with no listener the helper exits 255 within 3s and says why
 #   - with a listener it relays bytes both ways to the requested HOST:PORT,
 #     sending the name unresolved (socks5h behaviour)
-#   - tcurl asks curl for socks5h://127.0.0.1:1055 unless overridden
+#   - the default proxy is the engine's vogt-dev-engine.vogt-dev.svc:1055; the
+#     per-pod 127.0.0.1:1055 is honoured via VOGT_TAILNET_SOCKS5
+#   - tcurl asks curl for socks5h://<that proxy>
 #   - the ssh_config snippet parses and selects the proxy for tailnet hosts only
 set -euo pipefail
 
@@ -18,6 +20,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+unset VOGT_TAILNET_SOCKS5
 export VOGT_TAILNET_RELAY="$root/vogt-socks5-connect.py"
 
 # A port with no listener: bind to get a free one, then close it.
@@ -33,6 +36,19 @@ elapsed=$((SECONDS - start))
 [[ $rc -eq 255 ]] || fail "no listener: exit $rc, want 255"
 [[ $elapsed -le 3 ]] || fail "no listener: took ${elapsed}s, want <= 3s"
 grep -q "not answering" "$testdir/err" || fail "no listener: message missing: $(cat "$testdir/err")"
+
+# 1b. unset VOGT_TAILNET_SOCKS5 targets the engine's proxy. A stub `timeout`
+# that always fails stands in for "nothing listening", so the test needs no
+# network; the message names the proxy that was probed.
+mkdir "$testdir/stub"
+printf '#!/bin/sh\nexit 124\n' >"$testdir/stub/timeout"
+chmod +x "$testdir/stub/timeout"
+set +e
+PATH="$testdir/stub:$PATH" "$root/vogt-tailnet-connect" 100.92.4.57 22 </dev/null 2>"$testdir/err"
+rc=$?
+set -e
+[[ $rc -eq 255 ]] || fail "default proxy: exit $rc, want 255"
+grep -q 'vogt-dev-engine.vogt-dev.svc:1055' "$testdir/err" || fail "default proxy not the engine's: $(cat "$testdir/err")"
 
 # 2. fake SOCKS5 proxy that records the request and echoes upper-cased data.
 cat >"$testdir/socks.py" <<'PY'
@@ -83,7 +99,9 @@ mkdir "$testdir/bin"
 printf '#!/bin/sh\nprintf "%%s\\n" "$@"\n' >"$testdir/bin/curl"
 chmod +x "$testdir/bin/curl"
 args="$(PATH="$testdir/bin:$PATH" "$root/tcurl" -sS http://node-e:8120/)"
-grep -qx 'socks5h://127.0.0.1:1055' <<<"$args" || fail "tcurl default proxy: $args"
+grep -qx 'socks5h://vogt-dev-engine.vogt-dev.svc:1055' <<<"$args" || fail "tcurl default proxy: $args"
+args="$(VOGT_TAILNET_SOCKS5=127.0.0.1:1055 PATH="$testdir/bin:$PATH" "$root/tcurl" http://x/)"
+grep -qx 'socks5h://127.0.0.1:1055' <<<"$args" || fail "tcurl per-pod proxy: $args"
 args="$(VOGT_TAILNET_SOCKS5=127.0.0.1:9 PATH="$testdir/bin:$PATH" "$root/tcurl" http://x/)"
 grep -qx 'socks5h://127.0.0.1:9' <<<"$args" || fail "tcurl override: $args"
 
@@ -98,6 +116,9 @@ if command -v ssh >/dev/null; then
         ssh_g "$h" | grep -qx 'connecttimeout 10' || fail "ssh_config: $h ConnectTimeout"
     done
     ssh_g edgerouter | grep -qx 'hostname 100.92.4.57' || fail "ssh_config: edgerouter HostName"
+    for pair in hertzde3=100.76.94.94 node-e=100.118.6.65 node-f=100.69.108.33 winrarhost=100.92.54.45 winrarhost1=100.92.54.45; do
+        ssh_g "${pair%%=*}" | grep -qx "hostname ${pair#*=}" || fail "ssh_config: ${pair%%=*} HostName"
+    done
     for h in github.com 100.63.0.1 100.128.0.1 192.168.1.75 example.com; do
         ssh_g "$h" | grep -q '^proxycommand' && fail "ssh_config: $h must not use the tailnet proxy"
     done
