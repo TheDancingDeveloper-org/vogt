@@ -171,6 +171,7 @@ function writeSavedLayout(tabId: string, layout: SavedTerminalLayout) {
 
 function activityClass(session: SessionSummary | undefined): string {
   if (!session) return "idle";
+  if (session.activity === "hibernated") return "hibernated";
   if (session.exit_code !== null) {
     return session.exit_code === 0 ? "done" : "errored";
   }
@@ -1610,7 +1611,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
           </button>
         </div>
       </Show>
-      <Show when={activeSession()?.exit_code != null}>
+      <Show when={activeSession()?.exit_code != null && activeSession()?.activity !== "hibernated"}>
         <div class="terminal-exited-banner" role="status">
           <span class="terminal-exited-label">
             Exited (code {activeSession()!.exit_code})

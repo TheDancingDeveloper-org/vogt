@@ -402,7 +402,7 @@ export function railBadges(s: SessionSummary, now: number): RailBadge[] {
   if (pickerWaiting(s)) badges.push({ glyph: "?", label: "waiting for a choice" });
   else if (s.exit_code === null && s.activity === "awaiting-approval") badges.push({ glyph: "⚠", label: "needs approval" });
   if (s.blocked && s.exit_code === null) badges.push({ glyph: "⛔", label: "blocked on you" });
-  if (s.activity === "errored" || (s.exit_code !== null && s.exit_code !== 0 && s.activity !== "stopped")) {
+  if (s.activity === "errored" || (s.exit_code !== null && s.exit_code !== 0 && s.activity !== "stopped" && s.activity !== "hibernated")) {
     badges.push({ glyph: "✗", label: "errored" });
   }
   if (s.autopilot) badges.push({ glyph: "AP", label: "autopilot" });
