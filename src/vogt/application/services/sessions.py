@@ -294,6 +294,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         )
         raise InvalidRequest(msg)
     params, overrides, read_only = _resolve_purpose(ctx, params)
+    worktree_from_profile = params.purpose is not None and "worktree" not in overrides
     if params.cwd and params.worktree:
         params = params.model_copy(update={"worktree": None})
     # After the profile fills the model, before anything reaches the engine:
@@ -363,6 +364,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 {
                     "branch": _worktree_branch(subject, session_id),
                     "base_ref": _worktree_base(subject.policy),
+                    # A worktree the profile filled, not the caller, is a
+                    # default the engine drops on a pod, which checks out the
+                    # source itself (WI-4707). Same rule as the Rust core.
+                    "if_supported": worktree_from_profile,
                 }
                 if params.worktree
                 else None
@@ -5052,7 +5057,7 @@ def _start_on_engine(
     session_ref: str | None = None,
     policy: AgentPolicy | None = None,
     budget: SessionBudgetParams | None = None,
-    worktree: dict[str, str] | None = None,
+    worktree: dict[str, str | bool] | None = None,
     protected_checkouts: Sequence[str] = (),
 ) -> EngineSession:
     enforced = _enforced_policy(

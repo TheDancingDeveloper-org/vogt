@@ -832,7 +832,7 @@ class EngineClient:
         companion: str | None = None,
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
-        worktree: dict[str, str] | None = None,
+        worktree: dict[str, str | bool] | None = None,
         charter: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
