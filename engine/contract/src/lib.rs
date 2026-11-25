@@ -576,7 +576,10 @@ pub struct SessionResources {
     /// CPU over the last sampling interval, in percent of one core (a busy
     /// tree on four cores reads up to 400).
     pub cpu_pct: f32,
-    /// Processes in the tree.
+    /// Processes in the tree. A real measurement always counts at least its
+    /// root process, so `0` means "not measured" (a pod session sampled for
+    /// memory only, with `rss_bytes` and `cpu_pct` also 0), never a real
+    /// zero. Readers treat it as no sample.
     pub processes: u32,
     /// RFC 3339.
     pub sampled_at: String,
