@@ -304,29 +304,55 @@ pub fn dir(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions")
 }
 
-// Path safety: every file name here is built from a parsed `Uuid`, whose
-// textual form is 36 characters of hex digits and dashes — no separator, no
-// `..` — joined onto the engine's own configured `state_dir`. CodeQL's
-// `rust/path-injection` reads the route's `{id}` as a user-provided path and
-// cannot model the `Uuid` parse as the barrier it is (see the same note in
-// `workspace_path.rs`).
-fn record_path(state_dir: &Path, id: Uuid) -> PathBuf {
-    dir(state_dir).join(format!("{id}.json"))
+// Path safety: every file name here is `<stem>.<ext>` under `dir(state_dir)`.
+// The stem is built from a parsed `Uuid` today, but `confined_path` does not
+// rely on that: it refuses any stem or extension that is not one plain path
+// component (no separator, no `..`, no absolute or prefixed form, no NUL), and
+// returns an error otherwise. CodeQL's `rust/path-injection` reads the route's
+// `{id}` as a user-provided path, so the check is explicit (WI-4407).
+fn confined_path(state_dir: &Path, stem: &str, ext: &str) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let plain = |part: &str| {
+        let mut parts = Path::new(part).components();
+        matches!(
+            (parts.next(), parts.next()),
+            (Some(Component::Normal(n)), None) if n == std::ffi::OsStr::new(part)
+        ) && !part.contains(['/', '\\', '\0'])
+    };
+    if !plain(stem) || !ext.chars().all(|c| c.is_ascii_alphanumeric()) || ext.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "hibernation file name is not a single plain path component",
+        ));
+    }
+    let root = dir(state_dir);
+    let path = root.join(format!("{stem}.{ext}"));
+    if path.parent() != Some(root.as_path()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "hibernation file escapes the sessions directory",
+        ));
+    }
+    Ok(path)
 }
 
-fn screen_path(state_dir: &Path, id: Uuid) -> PathBuf {
-    dir(state_dir).join(format!("{id}.screen"))
+fn record_path(state_dir: &Path, id: Uuid) -> std::io::Result<PathBuf> {
+    confined_path(state_dir, &id.to_string(), "json")
+}
+
+fn screen_path(state_dir: &Path, id: Uuid) -> std::io::Result<PathBuf> {
+    confined_path(state_dir, &id.to_string(), "screen")
 }
 
 /// A pod opencode's last assistant replies, as its agent sent them (WI-4291).
-fn replies_path(state_dir: &Path, id: Uuid) -> PathBuf {
-    dir(state_dir).join(format!("{id}.replies"))
+fn replies_path(state_dir: &Path, id: Uuid) -> std::io::Result<PathBuf> {
+    confined_path(state_dir, &id.to_string(), "replies")
 }
 
 /// The program's last OSC 7501 report, kept while its process runs so an
 /// engine restart that adopts the process can restore it (WI-4499).
-fn reported_path(state_dir: &Path, id: Uuid) -> PathBuf {
-    dir(state_dir).join(format!("{id}.reported"))
+fn reported_path(state_dir: &Path, id: Uuid) -> std::io::Result<PathBuf> {
+    confined_path(state_dir, &id.to_string(), "reported")
 }
 
 /// Replace `path` with `bytes`: written to a sibling temp file (0600) and
@@ -374,38 +400,41 @@ pub fn off_worker<R>(work: impl FnOnce() -> R) -> R {
 
 pub fn write(state_dir: &Path, record: &Record) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
-    write_atomic(&record_path(state_dir, record.id), &json)
+    write_atomic(&record_path(state_dir, record.id)?, &json)
 }
 
 pub fn write_screen(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic(&screen_path(state_dir, id), bytes)
+    write_atomic(&screen_path(state_dir, id)?, bytes)
 }
 
 /// The kept output of a hibernated session; empty when there is none.
 /// The rail list must not call this: it uses [`screen_metadata_len`].
 pub fn read_screen(state_dir: &Path, id: Uuid) -> Vec<u8> {
-    std::fs::read(screen_path(state_dir, id)).unwrap_or_default()
+    screen_path(state_dir, id)
+        .and_then(std::fs::read)
+        .unwrap_or_default()
 }
 
 /// The screen file's length, or zero when there is no file. Never reads
 /// the bytes (WI-2692).
 pub fn screen_metadata_len(state_dir: &Path, id: Uuid) -> u64 {
-    std::fs::metadata(screen_path(state_dir, id))
+    screen_path(state_dir, id)
+        .and_then(std::fs::metadata)
         .map(|m| m.len())
         .unwrap_or(0)
 }
 
 pub fn remove_screen(state_dir: &Path, id: Uuid) {
-    let _ = std::fs::remove_file(screen_path(state_dir, id));
+    let _ = screen_path(state_dir, id).and_then(std::fs::remove_file);
 }
 
 pub fn write_replies(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic(&replies_path(state_dir, id), bytes)
+    write_atomic(&replies_path(state_dir, id)?, bytes)
 }
 
 /// A pod session's kept replies, when it has any.
 pub fn read_replies(state_dir: &Path, id: Uuid) -> Option<Vec<u8>> {
-    std::fs::read(replies_path(state_dir, id)).ok()
+    replies_path(state_dir, id).and_then(std::fs::read).ok()
 }
 
 pub fn write_reported(
@@ -414,24 +443,24 @@ pub fn write_reported(
     status: &vogt_engine_contract::ReportedStatus,
 ) -> std::io::Result<()> {
     let json = serde_json::to_vec(status).map_err(std::io::Error::other)?;
-    write_atomic(&reported_path(state_dir, id), &json)
+    write_atomic(&reported_path(state_dir, id)?, &json)
 }
 
 /// The kept OSC 7501 report, when there is a readable one.
 pub fn read_reported(state_dir: &Path, id: Uuid) -> Option<vogt_engine_contract::ReportedStatus> {
-    let bytes = std::fs::read(reported_path(state_dir, id)).ok()?;
+    let bytes = reported_path(state_dir, id).and_then(std::fs::read).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
 pub fn remove_reported(state_dir: &Path, id: Uuid) {
-    let _ = std::fs::remove_file(reported_path(state_dir, id));
+    let _ = reported_path(state_dir, id).and_then(std::fs::remove_file);
 }
 
 /// Forget a session: its record, its kept screen, replies and report.
 pub fn remove(state_dir: &Path, id: Uuid) {
-    let _ = std::fs::remove_file(record_path(state_dir, id));
+    let _ = record_path(state_dir, id).and_then(std::fs::remove_file);
     remove_screen(state_dir, id);
-    let _ = std::fs::remove_file(replies_path(state_dir, id));
+    let _ = replies_path(state_dir, id).and_then(std::fs::remove_file);
     remove_reported(state_dir, id);
 }
 
@@ -660,6 +689,42 @@ fn alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stem_that_is_not_one_plain_component_is_refused() {
+        let root = Path::new("/state");
+        for bad in [
+            "../x",
+            "..",
+            ".",
+            "a/b",
+            "/etc/passwd",
+            "a\\b",
+            "x/../../y",
+            "",
+            "a\0b",
+        ] {
+            assert!(
+                confined_path(root, bad, "json").is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        assert!(confined_path(root, "ok", "../json").is_err());
+        assert!(confined_path(root, "ok", "").is_err());
+    }
+
+    #[test]
+    fn a_uuid_stem_resolves_under_the_sessions_dir() {
+        let root = Path::new("/state");
+        let id = Uuid::new_v4();
+        let p = confined_path(root, &id.to_string(), "json").unwrap();
+        assert_eq!(p, root.join("sessions").join(format!("{id}.json")));
+        assert_eq!(record_path(root, id).unwrap(), p);
+        assert_eq!(
+            screen_path(root, id).unwrap(),
+            root.join("sessions").join(format!("{id}.screen"))
+        );
+    }
 
     #[test]
     fn only_a_bypass_seen_and_not_granted_is_lost() {
