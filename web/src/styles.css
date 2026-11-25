@@ -12472,6 +12472,9 @@ a.vogt-projects-tag:hover {
 .oversight-controls label { display: flex; align-items: center; gap: 4px; font-size: 13px; }
 .oversight-resources { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
 .oversight-resources--over { color: var(--activity-errored); font-weight: 600; }
+.oversight-memory { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); max-width: 100%; overflow-wrap: anywhere; }
+.oversight-memory--warn { color: var(--activity-warning); font-weight: 600; }
+.oversight-memory-age { color: var(--fg-muted); font-weight: 400; opacity: 0.8; }
 
 .oversight-answers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .oversight-answer { font-size: 12px; text-align: left; overflow-wrap: anywhere; }

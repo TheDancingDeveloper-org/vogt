@@ -10,7 +10,7 @@ import { Component, For, Show, createEffect, createSignal, onCleanup, onMount, o
 import { sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
 import { recommendationCopy } from "./recommendation";
-import { formatBytes } from "./sessionRowModel";
+import { formatBytes, hasProcessSample, podMemoryBadge, rssSortKey } from "./sessionRowModel";
 import {
   VogtUnavailable,
   answerSessionInVogt,
@@ -139,7 +139,7 @@ const Oversight: Component<Props> = (props) => {
     const all = result()?.rows ?? [];
     if (!heaviestFirst()) return all;
     return [...all].sort(
-      (a, b) => (b.session.resources?.rss_bytes ?? -1) - (a.session.resources?.rss_bytes ?? -1),
+      (a, b) => rssSortKey(b.session.resources) - rssSortKey(a.session.resources),
     );
   };
   const [groupBy, setGroupBy] = createSignal<GroupBy>(loadGroupBy());
@@ -246,7 +246,7 @@ const Oversight: Component<Props> = (props) => {
               </span>
             )}
           </Show>
-          <Show when={row.session.resources}>
+          <Show when={hasProcessSample(row.session.resources) ? row.session.resources : null}>
             {(r) => (
               <span
                 class={`oversight-resources${r().over_threshold ? " oversight-resources--over" : ""}`}
@@ -254,6 +254,19 @@ const Oversight: Component<Props> = (props) => {
               >
                 {r().over_threshold ? "⚠ " : ""}
                 {formatBytes(r().rss_bytes)} · {Math.round(r().cpu_pct)}% CPU
+              </span>
+            )}
+          </Show>
+          <Show when={podMemoryBadge(row.session.resources, now())}>
+            {(b) => (
+              <span
+                class={`oversight-memory${b().warning ? " oversight-memory--warn" : ""}`}
+                title={b().title}
+              >
+                mem {b().text}
+                <Show when={b().age}>
+                  {(age) => <span class="oversight-memory-age"> · {age()}</span>}
+                </Show>
               </span>
             )}
           </Show>
