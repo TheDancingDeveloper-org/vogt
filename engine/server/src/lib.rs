@@ -76,6 +76,7 @@ pub mod secret;
 pub mod secret_broker;
 pub mod session_backend;
 pub mod session_cache;
+pub mod session_tailnet;
 pub mod session_endpoints;
 pub mod session_scratch;
 pub mod sessions;
