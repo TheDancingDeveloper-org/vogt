@@ -6,6 +6,8 @@
 //! increase of `oom_kill`. It is a pure state machine: the sampler owns one per
 //! session and decides how a notice reaches the agent.
 
+use std::time::Duration;
+
 use vogt_engine_contract::SessionResources;
 use vogt_session_agent::CgroupMemory;
 
@@ -15,6 +17,24 @@ use crate::agent_stream::PodMemory;
 pub const WARN_PERCENT: u128 = 80;
 /// The warning re-arms once a reading falls below this share.
 pub const REARM_PERCENT: u128 = 70;
+
+/// A reading older than this is stale: the pod agent sends one with every
+/// heartbeat (once a second, `BUNDLE_DEBOUNCE`), so this is thirty missed
+/// heartbeats and three sampler rounds. A stale reading raises no notice and
+/// clears `memory_warning`; the values and `observed_at` stay exposed, so the
+/// GUI can still show how old they are.
+pub const STALE_AFTER: Duration = Duration::from_secs(30);
+
+/// Whether a reading observed at `observed_at` (RFC 3339) is stale at `now`.
+/// A timestamp that does not parse is stale: nothing can vouch for it.
+pub fn is_stale(observed_at: &str, now: time::OffsetDateTime) -> bool {
+    let Ok(at) =
+        time::OffsetDateTime::parse(observed_at, &time::format_description::well_known::Rfc3339)
+    else {
+        return true;
+    };
+    now - at > STALE_AFTER
+}
 
 /// Something the agent should be told.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +68,9 @@ impl MemoryNotice {
 pub struct MemoryWatch {
     warned: bool,
     oom_seen: Option<u64>,
+    /// Notices the latch has fired for but that did not reach the agent; the
+    /// next [`observe`](Self::observe) returns them again.
+    pending: Vec<MemoryNotice>,
 }
 
 impl MemoryWatch {
@@ -61,7 +84,7 @@ impl MemoryWatch {
     /// sampler may call this every round. A missing or `max` limit never
     /// warns; the first `oom_kill` reading is a baseline, not an increase.
     pub fn observe(&mut self, memory: &CgroupMemory) -> Vec<MemoryNotice> {
-        let mut notices = Vec::new();
+        let mut notices = std::mem::take(&mut self.pending);
         if let (Some(current), Some(max)) = (memory.memory_current, memory.memory_max) {
             if max > 0 {
                 self.cross(current, max, &mut notices);
@@ -78,7 +101,20 @@ impl MemoryWatch {
             }
             self.oom_seen = Some(total);
         }
+        // A near-limit notice that is still owed is dropped once the pod has
+        // fallen back below the re-arm level: the agent need not hear of it.
+        if !self.warned {
+            notices.retain(|n| !matches!(n, MemoryNotice::NearLimit { .. }));
+        }
         notices
+    }
+
+    /// A notice from [`observe`](Self::observe) did not reach the agent (the
+    /// line was held back or the write failed): hand it out again on the next
+    /// observation. The flag and the crossing's latch are unchanged, so the
+    /// crossing still produces exactly one delivered notice.
+    pub fn requeue(&mut self, notice: MemoryNotice) {
+        self.pending.push(notice);
     }
 
     fn cross(&mut self, current: u64, max: u64, notices: &mut Vec<MemoryNotice>) {
@@ -95,14 +131,22 @@ impl MemoryWatch {
 }
 
 /// Copy a pod's memory reading, and the watch's flag, onto a resources sample.
-pub fn apply(resources: &mut SessionResources, memory: Option<&PodMemory>, warned: bool) {
+/// `memory_warning` is set only while the reading is fresh (see
+/// [`STALE_AFTER`]); the reading itself is always copied with its
+/// `observed_at`.
+pub fn apply(
+    resources: &mut SessionResources,
+    memory: Option<&PodMemory>,
+    warned: bool,
+    now: time::OffsetDateTime,
+) {
     let Some(pod) = memory else { return };
     resources.memory_current = pod.memory.memory_current;
     resources.memory_max = pod.memory.memory_max;
     resources.memory_peak = pod.memory.memory_peak;
     resources.oom_kill = pod.memory.oom_kill;
     resources.observed_at = Some(pod.observed_at.clone());
-    resources.memory_warning = warned;
+    resources.memory_warning = warned && !is_stale(&pod.observed_at, now);
 }
 
 #[cfg(test)]
@@ -195,14 +239,19 @@ mod tests {
             observed_at: None,
             memory_warning: false,
         };
-        apply(&mut resources, None, true);
+        let now = time::OffsetDateTime::parse(
+            "2026-01-01T00:00:10Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        apply(&mut resources, None, true, now);
         assert_eq!(resources.observed_at, None);
         assert!(!resources.memory_warning);
         let pod = PodMemory {
             memory: reading(9 * GIB, Some(10 * GIB), Some(1)),
             observed_at: "2026-01-01T00:00:00Z".into(),
         };
-        apply(&mut resources, Some(&pod), true);
+        apply(&mut resources, Some(&pod), true, now);
         assert_eq!(resources.memory_current, Some(9 * GIB));
         assert_eq!(resources.memory_max, Some(10 * GIB));
         assert_eq!(resources.oom_kill, Some(1));
@@ -211,6 +260,34 @@ mod tests {
             Some("2026-01-01T00:00:00Z")
         );
         assert!(resources.memory_warning);
+        // Past the staleness bound the reading stays but the flag clears.
+        let later = now + STALE_AFTER + Duration::from_secs(1);
+        apply(&mut resources, Some(&pod), true, later);
+        assert_eq!(resources.memory_current, Some(9 * GIB));
+        assert!(resources.observed_at.is_some());
+        assert!(!resources.memory_warning);
+        // A timestamp that does not parse is stale.
+        assert!(is_stale("yesterday", now));
+    }
+
+    /// A notice that did not reach the agent is owed again; one that did is
+    /// not; one made obsolete by a drop below the re-arm level is dropped.
+    #[test]
+    fn a_requeued_notice_comes_back_until_delivered() {
+        let max = Some(10 * GIB);
+        let mut w = MemoryWatch::default();
+        let mut n = w.observe(&reading(9 * GIB, max, None));
+        assert_eq!(n.len(), 1);
+        w.requeue(n.remove(0));
+        // The flag still shows the warning, and the notice is owed again.
+        assert!(w.warned());
+        let again = w.observe(&reading(9 * GIB, max, None));
+        assert_eq!(again.len(), 1);
+        // Delivered this time: nothing more.
+        assert!(w.observe(&reading(9 * GIB, max, None)).is_empty());
+        // Owed, but the pod dropped below 70% first: no stale warning.
+        w.requeue(again[0].clone());
+        assert!(w.observe(&reading(6 * GIB, max, None)).is_empty());
     }
 
     #[test]
