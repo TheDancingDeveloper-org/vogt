@@ -548,6 +548,23 @@ impl<I: IdFactory> Drop for SqliteWrite<I> {
     }
 }
 
+/// Session reads made on this thread, so a test can assert how many queries a
+/// `work.list` page cost (WI-4751).
+#[cfg(test)]
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SessionReads {
+    /// `unstopped_sessions_for_items` calls.
+    pub grouped: usize,
+    /// `list_sessions` calls, the per-item lookup.
+    pub per_item: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static READS: std::cell::RefCell<SessionReads> =
+        std::cell::RefCell::new(SessionReads::default());
+}
+
 impl ReadView for SqliteReadView {
     fn instance_id(&self) -> Result<String, VogtError> {
         meta_get(&self.conn, META_INSTANCE_ID)?
@@ -1448,6 +1465,8 @@ impl ReadView for SqliteReadView {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
+        #[cfg(test)]
+        READS.with(|reads| reads.borrow_mut().per_item += 1);
         let mut filter = Filter::new();
         filter.and_some("project_id = ?", project_id.map(str::to_string));
         filter.and_some("work_item_id = ?", work_item_id.map(str::to_string));
@@ -1459,6 +1478,25 @@ impl ReadView for SqliteReadView {
             filter,
             "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
             vec![Box::new(limit), Box::new(offset)],
+        )
+    }
+    fn unstopped_sessions_for_items(
+        &self,
+        work_item_ids: &[String],
+    ) -> Result<Vec<CodingSession>, VogtError> {
+        #[cfg(test)]
+        READS.with(|reads| reads.borrow_mut().grouped += 1);
+        if work_item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut filter = Filter::new();
+        filter.and_in("work_item_id", work_item_ids.iter().cloned());
+        filter.and_fixed("stopped_at IS NULL");
+        select_filtered::<CodingSession>(
+            &self.conn,
+            filter,
+            "ORDER BY started_at DESC, id DESC",
+            Vec::new(),
         )
     }
     fn list_live_sessions_started_by(
@@ -1829,6 +1867,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         e: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
         self.view.list_sessions(a, b, c, d, e)
+    }
+    fn unstopped_sessions_for_items(&self, a: &[String]) -> Result<Vec<CodingSession>, VogtError> {
+        self.view.unstopped_sessions_for_items(a)
     }
     fn list_live_sessions_started_by(
         &self,

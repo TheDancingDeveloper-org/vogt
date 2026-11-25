@@ -115,6 +115,8 @@ struct Raw {
     #[serde(default, deserialize_with = "keep")]
     include_finished: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
+    with_sessions: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
     mode: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
     limit: Option<Value>,
@@ -347,6 +349,8 @@ struct ListParams {
     label: Option<String>,
     query: Option<String>,
     include_finished: bool,
+    /// Add `live_sessions` to every row (WI-4751). Off by default.
+    with_sessions: bool,
     mode: String,
     limit: i64,
     offset: i64,
@@ -364,6 +368,7 @@ impl Default for ListParams {
             label: None,
             query: None,
             include_finished: false,
+            with_sessions: false,
             mode: "summary".to_string(),
             limit: 50,
             offset: 0,
@@ -422,6 +427,7 @@ impl<'de> serde::Deserialize<'de> for ListParams {
             label: text_strict(&raw.label),
             query: str_of(&query).map(str::to_string),
             include_finished: flag(&raw.include_finished),
+            with_sessions: flag(&raw.with_sessions),
             mode: str_of(&raw.mode).unwrap_or("summary").to_string(),
             limit: raw.limit.as_ref().and_then(Value::as_i64).unwrap_or(50),
             offset: raw.offset.as_ref().and_then(Value::as_i64).unwrap_or(0),
@@ -1768,6 +1774,7 @@ fn list_work<C: Clock, I: IdFactory>(
         label,
         query,
         include_finished,
+        with_sessions,
         mode,
         limit,
         offset,
@@ -1789,7 +1796,7 @@ fn list_work<C: Clock, I: IdFactory>(
         .transpose()?;
     if let Some(project_row) = project_row.as_ref() {
         if !upstream::is_linked(project_row) {
-            let mut result = work_page(mode, offset, Vec::new(), 0, Some("unlinked"));
+            let mut result = work_page(mode, offset, Vec::new(), 0, Some("unlinked"), None);
             result["detail"] = unlinked_detail(&view, project_row)?
                 .map(Value::String)
                 .unwrap_or(Value::Null);
@@ -1826,7 +1833,17 @@ fn list_work<C: Clock, I: IdFactory>(
     if upstream_rows.is_empty() {
         let page = view.list_work_items(&work_filter)?;
         let total = view.count_work_items(&work_filter)?;
-        return Ok(work_page(mode, offset, page, total, link_state));
+        let sessions = with_sessions
+            .then(|| live_sessions_by_item(ctx, &view, &page))
+            .transpose()?;
+        return Ok(work_page(
+            mode,
+            offset,
+            page,
+            total,
+            link_state,
+            sessions.as_ref(),
+        ));
     }
     // Merged paging: the declared page window cannot be pushed into SQL once
     // upstream rows join the list, so both halves are gathered and the one
@@ -1846,12 +1863,119 @@ fn list_work<C: Clock, I: IdFactory>(
     });
     let total = view.count_work_items(&work_filter)? + upstream_rows.len() as i64;
     let start = offset.max(0) as usize;
-    let page = merged
+    let page: Vec<WorkItem> = merged
         .into_iter()
         .skip(start)
         .take(limit.max(0) as usize)
         .collect();
-    Ok(work_page(mode, offset, page, total, link_state))
+    let sessions = with_sessions
+        .then(|| live_sessions_by_item(ctx, &view, &page))
+        .transpose()?;
+    Ok(work_page(
+        mode,
+        offset,
+        page,
+        total,
+        link_state,
+        sessions.as_ref(),
+    ))
+}
+
+/// Per work-item id, the `live_sessions` object of one `work.list` row.
+type LiveSessionsByItem = std::collections::HashMap<String, Value>;
+
+/// `live_sessions` {count, worst, ids} for every item of one page (WI-4751).
+///
+/// ONE `ReadView` read for the whole page
+/// (`unstopped_sessions_for_items`), joined in memory with one engine list.
+/// "Live" is `live_sessions_of`'s definition: the engine says the session is
+/// alive, or its activity is `hibernated`; an engine that cannot be asked
+/// leaves every count at 0. `worst` is the lowest `Attention::order_of` the
+/// session rail, the oversight table and `session.sweep` already sort by
+/// (`decisions::classify`, the same `stall_after` of 10 minutes).
+fn live_sessions_by_item<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    page: &[WorkItem],
+) -> Result<LiveSessionsByItem, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    use crate::decisions::{classify, Attention};
+    let item_ids: Vec<String> = page
+        .iter()
+        .filter(|item| !item.id.is_empty())
+        .map(|item| item.id.clone())
+        .collect();
+    let recorded = view.unstopped_sessions_for_items(&item_ids)?;
+    // Only an item with a recorded session needs the engine to be asked.
+    let engine_rows = match ctx.engine.as_ref() {
+        Some(engine) if !recorded.is_empty() => engine
+            .list_sessions_counted(false)
+            .map(|(rows, _hidden)| rows)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let now = super::now_of(&ctx.clock);
+    let mut grouped: std::collections::HashMap<String, Vec<(u8, String, String)>> =
+        std::collections::HashMap::new();
+    for session in &recorded {
+        let Some(item_id) = session.work_item_id.clone() else {
+            continue;
+        };
+        let Some(live) = engine_rows
+            .iter()
+            .find(|row| row.id == session.engine_session_id)
+        else {
+            continue;
+        };
+        if !(live.alive || live.hibernated()) {
+            continue;
+        }
+        let verdict = classify(
+            Some(live.activity.as_str()),
+            Some(live.alive),
+            Some(live.activity == "waiting-for-input"),
+            live.approval
+                .as_ref()
+                .map(|approval| approval.question.as_str()),
+            live.blocked.as_ref().map(|blocked| blocked.reason.as_str()),
+            live.approval
+                .as_ref()
+                .map(|approval| approval.kind.as_str()),
+            live.last_output_at
+                .as_deref()
+                .and_then(|text| crate::core::from_iso(text).ok()),
+            now,
+            10 * 60,
+            live.done_at.as_deref(),
+        );
+        let name = verdict.attention.as_str().to_string();
+        grouped.entry(item_id).or_default().push((
+            Attention::order_of(&name),
+            name,
+            session.id.clone(),
+        ));
+    }
+    let mut out = LiveSessionsByItem::new();
+    for item in page {
+        let rows = grouped.remove(&item.id).unwrap_or_default();
+        let worst = rows
+            .iter()
+            .min_by_key(|(order, _, _)| *order)
+            .map(|(_, name, _)| Value::String(name.clone()))
+            .unwrap_or(Value::Null);
+        out.insert(
+            item.id.clone(),
+            json!({
+                "count": rows.len(),
+                "worst": worst,
+                "ids": rows.iter().map(|(_, _, id)| id.clone()).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    Ok(out)
 }
 
 fn work_page(
@@ -1860,17 +1984,27 @@ fn work_page(
     page: Vec<WorkItem>,
     total: i64,
     link_state: Option<&str>,
+    sessions: Option<&LiveSessionsByItem>,
 ) -> Value {
     let following = offset + page.len() as i64;
     let page_empty = page.is_empty();
     let items: Vec<Value> = page
         .iter()
         .map(|item| {
-            if mode == "full" {
+            let mut row = if mode == "full" {
                 serde_json::to_value(item).unwrap_or(Value::Null)
             } else {
                 summary_row(item)
+            };
+            if let (Some(sessions), Some(row)) = (sessions, row.as_object_mut()) {
+                // An item with no declared id (upstream truth) has no sessions.
+                let live = sessions
+                    .get(&item.id)
+                    .cloned()
+                    .unwrap_or_else(|| json!({"count": 0, "worst": null, "ids": []}));
+                row.insert("live_sessions".to_string(), live);
             }
+            row
         })
         .collect();
     // `WorkListResult`'s field order, every key present. A scoped list and a
@@ -2295,8 +2429,6 @@ fn require_verification(
     Ok(())
 }
 
-/// Sessions bound to a declared item. An upstream item has no declared id, so
-/// it has no sessions; the live engine half is not joined here.
 /// The sessions still bound to `item` and alive or hibernated, as the full
 /// session rows the web's `liveSessionsWarning` reads (WI-998, WI-4746).
 /// Python's `_warn_live_sessions` defines "live" the same way. A warning,
@@ -2335,6 +2467,8 @@ where
         .collect()
 }
 
+/// Sessions bound to a declared item. An upstream item has no declared id, so
+/// it has no sessions; the live engine half is not joined here.
 fn sessions_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     view: &impl crate::storage::interface::ReadView,
@@ -4280,7 +4414,7 @@ mod tests {
         // `WorkListResult`'s field order, with the nulls present. A global list
         // has no link state and an empty page has no next offset, and neither
         // is a reason to drop the key.
-        let page = work_page("summary", 0, Vec::new(), 0, None);
+        let page = work_page("summary", 0, Vec::new(), 0, None, None);
         let Value::Object(map) = &page else {
             panic!("a page is an object");
         };
@@ -4300,7 +4434,7 @@ mod tests {
         assert_eq!(page["link_state"], Value::Null);
         assert_eq!(page["detail"], Value::Null);
 
-        let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"));
+        let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"), None);
         let Value::Object(scoped_map) = &scoped else {
             panic!("a page is an object");
         };
@@ -4985,6 +5119,195 @@ mod tests {
             answer["missing"].as_array().unwrap().len(),
             super::WORK_GET_MANY_LIMIT
         );
+    }
+
+    /// Two engine sessions per row is enough to rank: an approval beats a
+    /// running one, and a hibernated one counts but ranks last.
+    const ENGINE_SESSIONS: &str = r#"[
+      {"id":"eng-run","name":"a","alive":true,"activity":"running","role":"worker"},
+      {"id":"eng-appr","name":"b","alive":true,"activity":"awaiting-approval","role":"worker","approval":{"question":"Proceed?","command_excerpt":"x","detected_at":"2026-10-31T06:00:00Z","kind":"permission","key":"k","options":[]}},
+      {"id":"eng-hib","name":"c","alive":false,"activity":"hibernated","role":"worker"},
+      {"id":"eng-hib2","name":"d","alive":false,"activity":"hibernated","role":"worker"},
+      {"id":"eng-ghost","name":"f","alive":true,"activity":"running","role":"worker"},
+      {"id":"eng-dead","name":"e","alive":false,"activity":"exited","role":"worker"}
+    ]"#;
+
+    fn opened_with_engine() -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-work-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = crate::adapters::engine::EngineClient::new(
+            "http://engine",
+            None,
+            Some(std::sync::Arc::new(move |_path, _, _body, _method| {
+                (200, ENGINE_SESSIONS.as_bytes().to_vec())
+            })),
+        );
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    /// Bind a recorded session (`engine` id) to the item `reference`.
+    fn bind_session(built: &Built, reference: &str, session_id: &str, engine: &str, stopped: bool) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("builds a step clock");
+        };
+        let view = ctx.declared.read().unwrap();
+        let item_id = crate::application::resolve::work_item(&view, reference)
+            .unwrap()
+            .id;
+        let actor_id = view.list_actors(1, 0).unwrap()[0].id.clone();
+        drop(view);
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_session(&crate::core::CodingSession {
+            id: session_id.to_string(),
+            engine_session_id: engine.to_string(),
+            project_id: "prj_alpha".to_string(),
+            work_item_id: Some(item_id),
+            actor_id,
+            cwd: "/tmp".to_string(),
+            template: None,
+            model: None,
+            effort: None,
+            reason: "test".to_string(),
+            purpose: None,
+            started_by_session: None,
+            started_by_kind: None,
+            started_at: moment(),
+            stopped_at: stopped.then(moment),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn live_fixture() -> Built {
+        let built = opened_with_engine();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        insert_project(&built, "alpha", false, WriteBack::Disabled);
+        for title in ["Mixed", "Dead", "Empty", "Asleep"] {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": title, "project": "alpha", "reason": "t"}),
+            )
+            .unwrap();
+        }
+        bind_session(&built, "WI-1", "ses_run", "eng-run", false);
+        bind_session(&built, "WI-1", "ses_appr", "eng-appr", false);
+        bind_session(&built, "WI-1", "ses_hib", "eng-hib", false);
+        // Vogt stopped one; the engine's process of the other has exited.
+        bind_session(&built, "WI-2", "ses_stopped", "eng-ghost", true);
+        bind_session(&built, "WI-2", "ses_dead", "eng-dead", false);
+        bind_session(&built, "WI-4", "ses_hib2", "eng-hib2", false);
+        built
+    }
+
+    fn row<'a>(page: &'a Value, reference: &str) -> &'a Value {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["ref"] == reference)
+            .unwrap_or_else(|| panic!("no {reference} in {page}"))
+    }
+
+    #[test]
+    fn with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        for params in [json!({}), json!({"with_sessions": false})] {
+            let page = list_work(ctx, params).unwrap();
+            for item in page["items"].as_array().unwrap() {
+                assert!(item.get("live_sessions").is_none(), "{item}");
+            }
+        }
+        let page = list_work(ctx, json!({"with_sessions": true, "mode": "full"})).unwrap();
+        assert!(row(&page, "WI-1").get("live_sessions").is_some(), "{page}");
+    }
+
+    #[test]
+    fn with_sessions_counts_alive_and_hibernated_and_ranks_worst_by_attention() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+        // running + awaiting approval + hibernated: all three are live, and
+        // an approval outranks running and hibernated.
+        let mixed = &row(&page, "WI-1")["live_sessions"];
+        assert_eq!(mixed["count"], 3, "{page}");
+        assert_eq!(mixed["worst"], "approval", "{page}");
+        let mut ids: Vec<&str> = mixed["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["ses_appr", "ses_hib", "ses_run"]);
+        // A stopped record and an exited process are not live.
+        assert_eq!(
+            row(&page, "WI-2")["live_sessions"],
+            json!({"count": 0, "worst": null, "ids": []})
+        );
+        // No session at all.
+        assert_eq!(
+            row(&page, "WI-3")["live_sessions"],
+            json!({"count": 0, "worst": null, "ids": []})
+        );
+        // A hibernated session counts, and is the worst there is.
+        assert_eq!(
+            row(&page, "WI-4")["live_sessions"],
+            json!({"count": 1, "worst": "hibernated", "ids": ["ses_hib2"]})
+        );
+    }
+
+    #[test]
+    fn with_sessions_costs_one_grouped_read_for_the_whole_page() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let reads = |f: &dyn Fn()| {
+            crate::storage::sqlite::declared::READS.with(|r| *r.borrow_mut() = Default::default());
+            f();
+            crate::storage::sqlite::declared::READS.with(|r| *r.borrow())
+        };
+        let without = reads(&|| {
+            list_work(ctx, json!({})).unwrap();
+        });
+        assert_eq!((without.grouped, without.per_item), (0, 0));
+        let with = reads(&|| {
+            let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+            assert_eq!(page["items"].as_array().unwrap().len(), 4);
+        });
+        assert_eq!((with.grouped, with.per_item), (1, 0));
     }
 
     #[test]
