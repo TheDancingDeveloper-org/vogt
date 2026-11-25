@@ -16,14 +16,15 @@ use super::views::{
     Comment, CommentParamsKind, ContractExemptionView, CoverageEntry, CreateInitiativeParamsState,
     CreateWorkParamsEffort, CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef,
     DependencySummary, DepsResultStatus, DriftProposal, DriftResolveParamsResolution,
-    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
-    InitiativeTrackingIssue, ListInitiativesParamsMode, ListWorkParamsKindsItem,
-    ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource, Observation,
-    ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem, RecommendationView,
-    RelateWorkParamsKind, SessionSummary, SweepReportView, UnrelateWorkParamsKind,
-    UpdateInitiativeParamsState, UpdateWorkParamsEffort, UpdateWorkParamsPriority, VerdictFields,
-    VerificationFields, WorkItem, WorkItemBranchView, WorkItemGitStory, WorkItemRow,
-    WorkListResultItems, WorkListResultLinkState, WorkListResultMode, WriteResultMode,
+    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsIncludeItem, GetWorkParamsMode,
+    HandoffFields, Initiative, InitiativeTrackingIssue, ListInitiativesParamsMode,
+    ListWorkParamsKindsItem, ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource,
+    Observation, ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem,
+    RecommendationView, RelateWorkParamsKind, SessionSummary, SweepReportView,
+    UnrelateWorkParamsKind, UpdateInitiativeParamsState, UpdateWorkParamsEffort,
+    UpdateWorkParamsPriority, VerdictFields, VerificationFields, WorkItem, WorkItemBranchView,
+    WorkItemGitStory, WorkItemRow, WorkListResultItems, WorkListResultLinkState,
+    WorkListResultMode, WriteResultMode,
 };
 use super::{date_time, optional_date_time, optional_string};
 
@@ -313,9 +314,13 @@ pub struct ClaimCheck {
 pub struct GetWorkParams {
     /// Work item reference, e.g. WI-7. Alias: `id`.
     pub r#ref: String,
-    #[serde(default = "default_get_work_params_comment_limit")]
-    #[schemars(range(min = 0, max = 500))]
-    pub comment_limit: i64,
+    /// How many comments to return. Default 3 (the newest); with `include` containing `all`, 200.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_get_work_params_comment_limit")]
+    pub comment_limit: Option<i64>,
+    /// Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it.
+    #[serde(default)]
+    pub include: Option<Vec<GetWorkParamsIncludeItem>>,
     /// `summary` omits the item body and comments; `full` (default) keeps them.
     #[serde(default = "default_get_work_params_mode")]
     pub mode: GetWorkParamsMode,
@@ -1165,8 +1170,8 @@ fn default_create_work_params_priority() -> CreateWorkParamsPriority {
     CreateWorkParamsPriority::P2
 }
 
-fn default_get_work_params_comment_limit() -> i64 {
-    50
+fn optional_get_work_params_comment_limit(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "integer", "minimum": 0, "maximum": 500 })
 }
 
 fn default_get_work_params_mode() -> GetWorkParamsMode {

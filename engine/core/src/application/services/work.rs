@@ -127,6 +127,8 @@ struct Raw {
     #[serde(default, deserialize_with = "keep")]
     comment_order: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
+    include: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
     handoff: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
     verdict: Option<Value>,
@@ -430,9 +432,81 @@ impl<'de> serde::Deserialize<'de> for ListParams {
 /// `work.get` parameters.
 struct GetParams {
     reference: String,
-    comment_limit: i64,
+    /// None: the default for the shape (3 lean, 200 with `all`).
+    comment_limit: Option<i64>,
     newest: bool,
     summary: bool,
+    include: Include,
+}
+
+/// The sections of `work.get` beyond the item (WI-4726).
+#[derive(Clone, Copy, Default)]
+struct Include {
+    comments: bool,
+    sessions: bool,
+    branches: bool,
+    git: bool,
+    delivery: bool,
+    relations: bool,
+    /// `all`: the full pre-WI-4726 shape, uncapped and with every key.
+    all: bool,
+}
+
+impl Include {
+    /// What an absent `include` returns: the lean read.
+    const LEAN: Include = Include {
+        comments: true,
+        sessions: false,
+        branches: false,
+        git: false,
+        delivery: true,
+        relations: true,
+        all: false,
+    };
+
+    fn parse(value: Option<&Value>) -> Result<Self, VogtError> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(Self::LEAN);
+        };
+        let items: Vec<&str> = match value {
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            Value::String(text) => text.split(',').map(str::trim).collect(),
+            _ => {
+                return Err(VogtError::InvalidRequest(
+                    "include must be a list of section names".into(),
+                ))
+            }
+        };
+        let mut out = Self::default();
+        for item in items {
+            match item {
+                "comments" => out.comments = true,
+                "sessions" => out.sessions = true,
+                "branches" => out.branches = true,
+                "git" => out.git = true,
+                "delivery" => out.delivery = true,
+                "relations" => out.relations = true,
+                "all" => out.all = true,
+                other => {
+                    return Err(VogtError::InvalidRequest(format!(
+                        "include: unknown section '{other}' (comments, sessions, branches, git, delivery, relations, all)"
+                    )))
+                }
+            }
+        }
+        if out.all {
+            out = Self {
+                comments: true,
+                sessions: true,
+                branches: true,
+                git: true,
+                delivery: true,
+                relations: true,
+                all: true,
+            };
+        }
+        Ok(out)
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for GetParams {
@@ -447,13 +521,10 @@ impl<'de> serde::Deserialize<'de> for GetParams {
             .map(str::to_string);
         Ok(Self {
             reference: required_ref(reference).map_err(custom)?,
-            comment_limit: raw
-                .comment_limit
-                .as_ref()
-                .and_then(Value::as_i64)
-                .unwrap_or(200),
-            newest: str_of(&raw.comment_order) == Some("newest"),
+            comment_limit: raw.comment_limit.as_ref().and_then(Value::as_i64),
+            newest: str_of(&raw.comment_order) != Some("oldest"),
             summary: str_of(&raw.mode) == Some("summary"),
+            include: Include::parse(raw.include.as_ref()).map_err(custom)?,
         })
     }
 }
@@ -1921,27 +1992,42 @@ fn strings(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One work item with its comments, sessions, branches and git story.
+/// Comments `work.get` returns when the caller names no `comment_limit` and
+/// does not ask for `all` (WI-4726).
+const LEAN_COMMENT_LIMIT: i64 = 3;
+/// The old default, kept for `include=all`.
+const FULL_COMMENT_LIMIT: i64 = 200;
+/// Stopped sessions `include=sessions` returns besides the live ones.
+const SESSIONS_NEWEST_STOPPED: usize = 3;
+
+/// One work item with the sections `include` names (WI-4726).
 ///
 /// A declared `WI-n` and an upstream subject key resolve the same way. Comments
 /// and sessions belong to a declared row; an upstream item has none of either
 /// until it is adopted. Branches and the git story are derived reads and come
-/// back for either.
+/// back for either. The default is lean: the item, its newest comments, its
+/// relations and its delivery. `include=all` is the full shape.
 fn get_work<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     params: GetParams,
 ) -> Result<Value, VogtError> {
     let GetParams {
         reference,
-        comment_limit: limit,
+        comment_limit,
         newest,
         summary,
+        include,
     } = params;
+    let limit = comment_limit.unwrap_or(if include.all {
+        FULL_COMMENT_LIMIT
+    } else {
+        LEAN_COMMENT_LIMIT
+    });
     let reference = reference.as_str();
     let view = ctx.declared.read()?;
     let mut item = upstream::resolve_work_ref(ctx, &view, reference)?;
     let native = view.work_item_by_ref(reference)?.is_some();
-    let mut comments = if native && limit > 0 && !item.id.is_empty() {
+    let mut comments = if include.comments && native && limit > 0 && !item.id.is_empty() {
         view.comments_for(&item.id, limit, newest)?
     } else {
         Vec::new()
@@ -1950,26 +2036,96 @@ fn get_work<C: Clock, I: IdFactory>(
         item.body.clear();
         comments.clear();
     }
-    // Branches, then the git story, then the session join: the order Python's
-    // `get_work` reads the clock in, which the next timestamp depends on.
-    let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
-    let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
-    let delivery = delivery_of(ctx, &view, &item, native, &branches)?;
-    let sessions = sessions_for(ctx, &view, &item)?;
-    Ok(json!({
-        "item": item,
-        "comments": comments,
-        "sessions": sessions,
-        "branches": branches,
-        "git": git,
-        "delivery": delivery,
-        "walked": [],
-        "live_sessions": [],
+    if !include.relations {
+        item.relations.clear();
+    }
+    // Branches, then the git story, then the session join. Delivery reads the
+    // branches too, so they are derived whenever any of the three is asked for.
+    let branches = if include.branches || include.git || include.delivery {
+        crate::application::git_story::branch_views_for(ctx, &view, &item)?
+    } else {
+        Vec::new()
+    };
+    let mut git = if include.git {
+        crate::application::git_story::git_story_for(ctx, &item, &branches)?
+    } else {
+        None
+    };
+    if include.branches && !include.all {
+        // `git.branches` repeats the top-level `branches`.
+        if let Some(Value::Object(story)) = git.as_mut() {
+            story.remove("branches");
+        }
+    }
+    let delivery = if include.delivery {
+        Some(delivery_of(ctx, &view, &item, native, &branches)?)
+    } else {
+        None
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("item".into(), json!(item));
+    if include.comments || include.all {
+        out.insert("comments".into(), json!(comments));
+    }
+    if include.sessions {
+        let mut sessions = sessions_for(ctx, &view, &item)?;
+        if !include.all {
+            let omitted = cap_sessions(&mut sessions);
+            if omitted > 0 {
+                out.insert("sessions_omitted".into(), json!(omitted));
+            }
+        }
+        out.insert("sessions".into(), json!(sessions));
+    }
+    if include.branches {
+        out.insert("branches".into(), json!(branches));
+    }
+    if include.git {
+        out.insert("git".into(), json!(git));
+    }
+    if let Some(delivery) = delivery {
+        out.insert("delivery".into(), json!(delivery));
+    }
+    if include.all {
+        out.insert("walked".into(), json!([]));
+        out.insert("live_sessions".into(), json!([]));
         // Always present, null when no transition recorded a claim. Python's
         // WorkResult serializes the field even when it is None; omitting the
         // key fails a client that decodes the schema.
-        "claim_check": Value::Null,
-    }))
+        out.insert("claim_check".into(), Value::Null);
+    }
+    Ok(Value::Object(out))
+}
+
+/// Keep the live sessions and the newest few stopped ones; return how many
+/// were dropped. `rows` come from `sessions_for` (`running`, `started_at`).
+fn cap_sessions(rows: &mut Vec<Value>) -> usize {
+    let live = |row: &Value| row["stopped_at"].is_null();
+    let mut stopped: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !live(row))
+        .map(|(at, row)| {
+            (
+                at,
+                row["started_at"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    stopped.sort_by(|a, b| b.1.cmp(&a.1));
+    let keep: std::collections::HashSet<usize> = stopped
+        .iter()
+        .take(SESSIONS_NEWEST_STOPPED)
+        .map(|(at, _)| *at)
+        .collect();
+    let before = rows.len();
+    let mut at = 0;
+    rows.retain(|row| {
+        let kept = live(row) || keep.contains(&at);
+        at += 1;
+        kept
+    });
+    before - rows.len()
 }
 
 /// How many of an item's comments the delivery projection reads, newest
