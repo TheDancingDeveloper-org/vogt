@@ -93,6 +93,13 @@ function sharedLinksRead(which: "live" | "stopped"): ReturnType<typeof listSessi
  * list is short. Only a PTY the live list does not hold (a finished run still
  * had a subject) asks again with the stopped ones (WI-4532).
  */
+export async function sessionLinkFor(sessionId: string): Promise<string | null> {
+  const find = (answer: Awaited<ReturnType<typeof listSessions>>) =>
+    (answer.sessions ?? []).find((row) => row.engine_session_id === sessionId);
+  const row = find(await sharedLinksRead("live")) ?? find(await sharedLinksRead("stopped"));
+  return row?.id ?? null;
+}
+
 export async function workItemLinkFor(sessionId: string): Promise<string | null> {
   const find = (answer: Awaited<ReturnType<typeof listSessions>>) =>
     (answer.sessions ?? []).find((row) => row.engine_session_id === sessionId);

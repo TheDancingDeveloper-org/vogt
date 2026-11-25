@@ -12,7 +12,8 @@ import {
   untrack,
 } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import Terminal, { type TerminalActions } from "./Terminal";
+import Terminal, { sessionLinkFor, type TerminalActions } from "./Terminal";
+import SessionIdChip from "./SessionIdChip";
 import {
   HandoffTerminal,
   hasTerminalHandoff,
@@ -1488,6 +1489,9 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <span class="terminal-workspace-title">
           {activeSession()?.name ?? activePane()?.sessionId.slice(0, 8) ?? "terminal"}
         </span>
+        <Show when={activePane()?.sessionId}>
+          {(engineId) => <SessionIdChip engineId={engineId()} lookup={sessionLinkFor} />}
+        </Show>
         <Show when={activeSession()?.cwd}>
           <span class="terminal-workspace-cwd">{activeSession()?.cwd}</span>
         </Show>
