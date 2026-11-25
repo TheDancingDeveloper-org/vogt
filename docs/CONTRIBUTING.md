@@ -58,6 +58,10 @@ project space. Security reports go to the channel in
   - The operator approves every deploy.
 - The batch pull request lands on `main` by rebase, so a merge commit in its
   range is the usual reason a green pull request cannot land.
+  The `integrate-linear` check backstops this: on a pull request from a
+  `graft/batch-*` or `integrate/*` head it fails, naming the merge commit
+  SHAs, when `git rev-list --merges origin/main..HEAD` is not empty. Rebase
+  onto `origin/main` rather than merging `main` in.
 - A change that does not go through an integration branch, such as a fork pull
   request, branches from `origin/main` and opens its pull request against
   `main`, under the same linear-history rule.
