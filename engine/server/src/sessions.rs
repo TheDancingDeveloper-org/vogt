@@ -3510,12 +3510,15 @@ impl SessionRegistry {
             // it exits for hibernation or engine shutdown. Wake mints anew.
             if let Some((_, credential)) = host_graft_credentials.remove(&session.id) {
                 let id = session.id;
-                // The file goes now, so an engine shutdown cannot leave it and
-                // a fast wake's new file is never removed by this task.
-                credential.remove_delivered();
+                // The delivered file and the provider's copy are taken away
+                // here, synchronously: a wake that follows mints under the
+                // same paths, and the task below must neither delete nor
+                // revoke that new token (WI-4216). It only revokes the old
+                // run's token at graft.
+                let revoke = credential.into_remote_revoke();
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn(async move {
-                        if let Err(error) = credential.revoke().await {
+                        if let Err(error) = revoke.revoke().await {
                             tracing::warn!(
                                 target: "vogt::audit", session = %id, error = %error,
                                 "could not revoke the host session's graft credential; it expires on its own"
