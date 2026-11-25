@@ -2132,20 +2132,17 @@ impl SessionRegistry {
             let should_reserve =
                 matches!(*creating, Creating::Fresh(_)) || matches!(*creating, Creating::Wake(_));
             if matches!(*creating, Creating::Wake(_)) {
-                // After an engine restart the pool knows only the configured
-                // accounts: a discovered one that still resolves is registered
-                // again before its slot is taken.
-                if let Some(name) = account.as_deref() {
-                    if self.cfg.agent_onboarding.account_dir(name).is_ok() {
-                        self.account_pool.register(name);
-                    }
-                }
-                Some(wake_account_lease(
+                // A wake keeps the account its record names (WI-4704): the
+                // account's directory is in the recorded environment. One that
+                // no longer resolves is refused here as a client error, and a
+                // record naming none holds no slot.
+                wake_account_lease(
+                    &self.cfg.agent_onboarding,
                     &self.account_leases,
                     &self.account_pool,
                     id,
                     account.as_deref(),
-                )?)
+                )?
             } else if should_reserve {
                 Some(Arc::new(
                     self.account_pool
@@ -5784,18 +5781,33 @@ fn newest_per_conversation(
 /// names: that account's config directory is in the record's environment, so
 /// a wake never moves to another account. A lease a live process left in
 /// `account_leases` is reused. A full account refuses the wake with 429.
+///
+/// WI-4704: a wake writes no `CLAUDE_CONFIG_DIR`, so the account it reports
+/// must be one the process really runs under. A record naming no account gets
+/// no lease (and so no label, even when a default account is configured: the
+/// default applies to fresh starts only). A record naming an account that no
+/// longer resolves is a 400 naming it and the known accounts, not a 429 a
+/// retry can never clear.
 fn wake_account_lease(
+    onboarding: &crate::claude_config::Onboarding,
     account_leases: &DashMap<Uuid, Arc<crate::account_pool::AccountLease>>,
     account_pool: &Arc<crate::account_pool::AccountPool>,
     id: Uuid,
     account: Option<&str>,
-) -> crate::error::Result<Arc<crate::account_pool::AccountLease>> {
+) -> crate::error::Result<Option<Arc<crate::account_pool::AccountLease>>> {
     if let Some((_, lease)) = account_leases.remove(&id) {
-        return Ok(lease);
+        return Ok(Some(lease));
     }
+    let Some(name) = account else {
+        return Ok(None);
+    };
+    onboarding.account_dir(name).map_err(ApiError::BadRequest)?;
+    // After an engine restart the pool knows only the configured accounts: a
+    // discovered one that still resolves is registered again first.
+    account_pool.register(name);
     account_pool
-        .lease(account)
-        .map(Arc::new)
+        .lease(Some(name))
+        .map(|l| Some(Arc::new(l)))
         .map_err(|full| ApiError::AtCapacity(format!("cap {}; counts {:?}", full.cap, full.counts)))
 }
 
@@ -7271,6 +7283,63 @@ mod account_lease_tests {
     use super::*;
     use crate::account_pool::AccountPool;
 
+    fn onboarding(names: &[&str]) -> crate::claude_config::Onboarding {
+        crate::claude_config::Onboarding {
+            accounts: names
+                .iter()
+                .map(|n| crate::claude_config::ClaudeAccount {
+                    name: (*n).to_string(),
+                    dir: std::path::PathBuf::from(format!("/accounts/{n}")),
+                })
+                .collect(),
+            default_account: names.first().map(|n| (*n).to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// WI-4704 defect A: a wake of a record with no account must not be
+    /// labelled with (or hold a slot on) the least-loaded configured account,
+    /// since no config dir is written for it.
+    #[test]
+    fn a_wake_with_no_recorded_account_takes_no_slot() {
+        let pool = Arc::new(AccountPool::new(["a".to_string(), "b".to_string()], 8));
+        let leases = DashMap::new();
+        let lease = wake_account_lease(
+            &onboarding(&["a", "b"]),
+            &leases,
+            &pool,
+            Uuid::new_v4(),
+            None,
+        )
+        .unwrap();
+        assert!(lease.is_none());
+        assert_eq!(pool.counts()["a"], 0);
+        assert_eq!(pool.counts()["b"], 0);
+    }
+
+    /// WI-4704 defect B: an account that is gone is a 400 naming it and the
+    /// known accounts, not a 429 at capacity.
+    #[test]
+    fn a_wake_on_a_removed_account_is_a_client_error_naming_it() {
+        let pool = Arc::new(AccountPool::new(["a".to_string()], 8));
+        let leases = DashMap::new();
+        let err = wake_account_lease(
+            &onboarding(&["a"]),
+            &leases,
+            &pool,
+            Uuid::new_v4(),
+            Some("gone"),
+        )
+        .unwrap_err();
+        match err {
+            ApiError::BadRequest(m) => {
+                assert!(m.contains("gone") && m.contains('a'), "{m}");
+            }
+            other => panic!("want BadRequest, got {other:?}"),
+        }
+        assert_eq!(pool.counts()["a"], 0);
+    }
+
     /// WI-4519: oversight, pinned-awake and person-started pods run with no
     /// deadline; Vogt workers and agent tasks keep it.
     #[test]
@@ -7359,16 +7428,25 @@ mod account_lease_tests {
         let mut held = Vec::new();
         // Boot wakes the two pinned sessions first.
         for id in &ids[..2] {
-            held.push(wake_account_lease(&leases, &pool, *id, Some("a")).unwrap());
+            held.push(
+                wake_account_lease(&onboarding(&["a"]), &leases, &pool, *id, Some("a"))
+                    .unwrap()
+                    .unwrap(),
+            );
         }
         assert_eq!(pool.counts()["a"], 2);
         // Six further wakes succeed, filling the cap of 8.
         for id in &ids[2..8] {
-            held.push(wake_account_lease(&leases, &pool, *id, Some("a")).unwrap());
+            held.push(
+                wake_account_lease(&onboarding(&["a"]), &leases, &pool, *id, Some("a"))
+                    .unwrap()
+                    .unwrap(),
+            );
         }
         assert_eq!(pool.counts()["a"], 8);
         // The seventh further wake is refused, and the count does not move.
-        let refused = wake_account_lease(&leases, &pool, ids[8], Some("a")).unwrap_err();
+        let refused =
+            wake_account_lease(&onboarding(&["a"]), &leases, &pool, ids[8], Some("a")).unwrap_err();
         assert!(matches!(refused, ApiError::AtCapacity(_)));
         assert_eq!(pool.counts()["a"], 8);
     }
@@ -7384,7 +7462,15 @@ mod account_lease_tests {
         let pool = Arc::new(AccountPool::new(["a".to_string(), "b".to_string()], 1));
         let leases = DashMap::new();
 
-        let lease = wake_account_lease(&leases, &pool, id, account.as_deref()).unwrap();
+        let lease = wake_account_lease(
+            &onboarding(&["a", "b"]),
+            &leases,
+            &pool,
+            id,
+            account.as_deref(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(lease.account(), Some("b"));
         assert_eq!(pool.counts()["b"], 1);
         assert_eq!(pool.counts()["a"], 0);
