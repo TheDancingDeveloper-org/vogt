@@ -731,6 +731,8 @@ mod tests {
                 "codex",
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "-m",
                 "gpt-5.6",
                 "-c",
@@ -786,6 +788,8 @@ mod tests {
                 "/usr/local/bin/codex",
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "-m",
                 "gpt-5.6",
                 "-a",
@@ -997,6 +1001,8 @@ mod tests {
                     id,
                     "-c",
                     "features.daemon_auto_start=false",
+                    "-c",
+                    "features.shell_snapshot=false",
                     "-m",
                     "m1",
                     "-a",
@@ -1024,6 +1030,8 @@ mod tests {
                 id,
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "--search",
                 "-m",
                 "m1",
@@ -1188,6 +1196,8 @@ mod tests {
                 cmd(&[
                     "-c",
                     "features.daemon_auto_start=false",
+                    "-c",
+                    "features.shell_snapshot=false",
                     "-a",
                     "never",
                     "-s",
@@ -1229,6 +1239,8 @@ mod tests {
                 cmd(&[
                     "-c",
                     "features.daemon_auto_start=false",
+                    "-c",
+                    "features.shell_snapshot=false",
                     "-a",
                     "never",
                     "-s",
@@ -1361,6 +1373,8 @@ mod opencode_posture_tests {
                 "codex",
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
@@ -1583,6 +1597,8 @@ mod permission_tests {
                 "codex",
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "-a",
                 "never",
                 "-s",
@@ -1621,6 +1637,8 @@ mod permission_tests {
                 "codex",
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "exec",
                 "-s",
                 "danger-full-access",
@@ -1911,6 +1929,10 @@ url = "http://komodo/mcp"
         assert!(host
             .windows(2)
             .any(|w| w == ["-c", "features.daemon_auto_start=false"]));
+        // WI-4051: Codex must not snapshot the shell environment (tokens).
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "features.shell_snapshot=false"]));
         // One emission per key: a provider that states its limit gets exactly
         // that value, not the deployment's 200k default (WI-3871 review).
         assert_eq!(
