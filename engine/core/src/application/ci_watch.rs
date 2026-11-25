@@ -221,9 +221,101 @@ pub fn index_by_branch<'a>(
     index
 }
 
+/// The label that registers a work item as a known flaky test or job.
+pub const FLAKY_LABEL: &str = "ci:flaky";
+/// Open `ci:flaky` items read per failing branch.
+const MAX_FLAKY_ITEMS: i64 = 200;
+
+/// Lower-case alphanumeric tokens of `text`; `_` joins a token, so a test name
+/// like `a_claude_typed` is one token.
+fn tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `needle` occurs in `haystack` as a whole-token run.
+fn contains_run(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// Which registered flaky items a failure probably is (WI-1335).
+///
+/// `failed_jobs` is the check payload's `failed_jobs` array (built by
+/// `adapters/forge/collectors.rs::failed_jobs` from `ForgeProvider::failed_jobs`):
+/// each entry is `{"name": <job name>, "conclusion": <string|null>,
+/// "url": <string|null>}`. It carries **job names only**: no step names and no
+/// test names, and log parsing is out of scope. So matching is on job names.
+///
+/// `flaky_items` is `(ref, title)` of the open `ci:flaky` items. An item is a
+/// suspect when its title contains a failed job's name, case-insensitively and
+/// as whole tokens. Returns `(ref, matched job name)`, one per item, in the
+/// order of `flaky_items`.
+pub fn flaky_suspects(
+    failed_jobs: &[Value],
+    flaky_items: &[(String, String)],
+) -> Vec<(String, String)> {
+    let names: Vec<(&str, Vec<String>)> = failed_jobs
+        .iter()
+        .filter_map(|job| job.get("name").and_then(Value::as_str))
+        .map(|name| (name, tokens(name)))
+        .collect();
+    let mut found = Vec::new();
+    for (reference, title) in flaky_items {
+        let title_tokens = tokens(title);
+        if let Some((name, _)) = names
+            .iter()
+            .find(|(_, name_tokens)| contains_run(&title_tokens, name_tokens))
+        {
+            found.push((reference.clone(), (*name).to_owned()));
+        }
+    }
+    found
+}
+
+/// Suspects for a failed branch: the failed jobs of its failing runs against
+/// the project's open `ci:flaky` items. Empty unless the branch failed.
+pub fn branch_flaky_suspects(
+    view: &impl ReadView,
+    project_id: &str,
+    ci: &BranchCi,
+) -> Result<Vec<(String, String)>, VogtError> {
+    if ci.state != BranchState::Failed {
+        return Ok(Vec::new());
+    }
+    let jobs: Vec<Value> = ci
+        .runs
+        .iter()
+        .filter(|run| ci.failing.contains(&run.workflow))
+        .filter_map(|run| run.observation.payload.get("failed_jobs"))
+        .filter_map(Value::as_array)
+        .flatten()
+        .cloned()
+        .collect();
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items = view.list_work_items(&crate::storage::interface::WorkFilter {
+        project_id: Some(project_id.to_owned()),
+        label: Some(FLAKY_LABEL.to_owned()),
+        exclude_terminal: true,
+        limit: MAX_FLAKY_ITEMS,
+        ..Default::default()
+    })?;
+    let flaky: Vec<(String, String)> = items
+        .into_iter()
+        .map(|item| (item.reference, item.title))
+        .collect();
+    Ok(flaky_suspects(&jobs, &flaky))
+}
+
 /// The one line typed into a bound session. Plain text, no control characters:
 /// it is data for the agent, not a command.
-pub fn notice_text(bound: &BoundBranch) -> String {
+pub fn notice_text(bound: &BoundBranch, suspects: &[(String, String)]) -> String {
     let ci = &bound.ci;
     let verdict = match ci.state {
         BranchState::Passed => "PASSED".to_owned(),
@@ -243,8 +335,17 @@ pub fn notice_text(bound: &BoundBranch) -> String {
         .and_then(|run| run.observation.source_url.clone());
     let tail = link.map(|link| format!(" — {link}")).unwrap_or_default();
     let short: String = ci.revision.chars().take(12).collect();
+    let flaky = if suspects.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = suspects
+            .iter()
+            .map(|(reference, matched)| format!("{reference} ({matched})"))
+            .collect();
+        format!("; probably flaky: {}", list.join(", "))
+    };
     let line = format!(
-        "[vogt] CI {verdict} on {} @ {short} ({}){detail}{tail}",
+        "[vogt] CI {verdict} on {} @ {short} ({}){detail}{flaky}{tail}",
         bound.branch, bound.work_item_ref
     );
     // Workflow names and URLs come from the forge: strip every character that
@@ -339,21 +440,23 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
             continue;
         }
         let entity = bound.event_entity();
-        let sessions: Vec<String> = {
+        let (sessions, suspects): (Vec<String>, Vec<(String, String)>) = {
             let view = ctx.declared.read()?;
             if !view.list_events(0, 1, Some(entity.as_str()))?.is_empty() {
                 continue;
             }
-            match &bound.work_item_id {
+            let sessions = match &bound.work_item_id {
                 None => Vec::new(),
                 Some(work_item_id) => view
                     .list_sessions(None, Some(work_item_id), false, MAX_SESSIONS, 0)?
                     .into_iter()
                     .map(|session| session.engine_session_id)
                     .collect(),
-            }
+            };
+            let suspects = branch_flaky_suspects(&view, &bound.project_id, &bound.ci)?;
+            (sessions, suspects)
         };
-        let nudged = nudge(ctx, &sessions, &notice_text(&bound))?;
+        let nudged = nudge(ctx, &sessions, &notice_text(&bound, &suspects))?;
         ctx.declared.publish_event(
             CI_BRANCH_CONCLUDED_EVENT,
             "work_item_branch",
@@ -364,6 +467,7 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
                 "revision": bound.ci.revision,
                 "state": state_word(bound.ci.state),
                 "failing": bound.ci.failing,
+                "flaky_suspects": suspects.iter().map(|(reference, _)| reference).collect::<Vec<_>>(),
                 "sessions_notified": nudged,
             }),
             moment_now(ctx),
@@ -558,6 +662,15 @@ mod tests {
         checks: &[(&str, Option<&str>)],
         updated_at: &str,
     ) {
+        seed_with(ctx, checks, updated_at, None);
+    }
+
+    fn seed_with(
+        ctx: &AppContext<StepClock, SequentialIds>,
+        checks: &[(&str, Option<&str>)],
+        updated_at: &str,
+        failed_jobs: Option<Value>,
+    ) {
         let project_id = ctx
             .declared
             .read()
@@ -582,6 +695,7 @@ mod tests {
                     "branch": "wi-1",
                     "event": "pull_request",
                     "updated_at": updated_at,
+                    "failed_jobs": failed_jobs.clone().filter(|_| *conclusion == Some("failure")),
                 }),
                 content_digest: format!("{name}-{conclusion:?}-{updated_at}"),
                 project_id: Some(project_id.clone()),
@@ -736,31 +850,120 @@ mod tests {
 
     #[test]
     fn notice_text_is_one_plain_line() {
-        let text = notice_text(&BoundBranch {
-            work_item_ref: "WI-9".to_owned(),
-            work_item_id: None,
-            project_id: "prj_1".to_owned(),
-            branch: "wi-9".to_owned(),
-            ci: settled_ci(BranchState::Passed, &[]),
-        });
+        let text = notice_text(
+            &BoundBranch {
+                work_item_ref: "WI-9".to_owned(),
+                work_item_id: None,
+                project_id: "prj_1".to_owned(),
+                branch: "wi-9".to_owned(),
+                ci: settled_ci(BranchState::Passed, &[]),
+            },
+            &[],
+        );
         assert!(
             text.starts_with("[vogt] CI PASSED on wi-9 @ aaaaaaaaaaaa (WI-9)"),
             "{text}"
         );
         assert!(!text.contains('\n') && !text.contains('\r'));
 
-        let hostile = notice_text(&BoundBranch {
-            work_item_ref: "WI-9".to_owned(),
-            work_item_id: None,
-            project_id: "prj_1".to_owned(),
-            branch: "wi-9".to_owned(),
-            ci: settled_ci(BranchState::Failed, &["ci\u{1b}[2J\rrm -rf"]),
-        });
+        let hostile = notice_text(
+            &BoundBranch {
+                work_item_ref: "WI-9".to_owned(),
+                work_item_id: None,
+                project_id: "prj_1".to_owned(),
+                branch: "wi-9".to_owned(),
+                ci: settled_ci(BranchState::Failed, &["ci\u{1b}[2J\rrm -rf"]),
+            },
+            &[],
+        );
         assert!(
             !hostile.contains('\u{1b}') && !hostile.contains('\r'),
             "{hostile:?}"
         );
         assert!(hostile.chars().count() <= NOTICE_MAX_CHARS);
+    }
+
+    fn jobs(names: &[&str]) -> Vec<Value> {
+        names
+            .iter()
+            .map(|name| json!({"name": name, "conclusion": "failure", "url": null}))
+            .collect()
+    }
+
+    fn item(reference: &str, title: &str) -> (String, String) {
+        (reference.to_owned(), title.to_owned())
+    }
+
+    #[test]
+    fn a_flaky_item_naming_a_failed_job_is_a_suspect() {
+        let flaky = [
+            item("WI-1309", "Flaky engine test: a_claude_typed_into_a_shell"),
+            item("WI-1305", "Flaky nzb-postproc test: ETXTBSY"),
+        ];
+        assert_eq!(
+            flaky_suspects(&jobs(&["Engine"]), &flaky),
+            vec![("WI-1309".to_owned(), "Engine".to_owned())]
+        );
+        assert!(flaky_suspects(&jobs(&["lint"]), &flaky).is_empty());
+        // whole tokens only: `eng` is not `engine`
+        assert!(flaky_suspects(&jobs(&["eng"]), &flaky).is_empty());
+        assert!(flaky_suspects(&[], &flaky).is_empty());
+    }
+
+    #[test]
+    fn the_notice_names_the_suspects() {
+        let bound = BoundBranch {
+            work_item_ref: "WI-9".to_owned(),
+            work_item_id: None,
+            project_id: "prj_1".to_owned(),
+            branch: "wi-9".to_owned(),
+            ci: settled_ci(BranchState::Failed, &["ci"]),
+        };
+        let text = notice_text(&bound, &[("WI-1309".to_owned(), "engine".to_owned())]);
+        assert!(
+            text.contains("; probably flaky: WI-1309 (engine)"),
+            "{text}"
+        );
+        assert!(!notice_text(&bound, &[]).contains("flaky"));
+    }
+
+    #[test]
+    fn a_failure_in_a_flaky_job_carries_the_suspect_to_the_event_and_notice() {
+        let (seen, engine) = recording_engine();
+        let built = bound_instance("flaky", Some(engine));
+        let ctx = context(&built);
+        crate::application::taxonomy::create_label_op(
+            &built,
+            json!({"name": "ci:flaky", "reason": "test"}),
+        )
+        .unwrap();
+        create_op(
+            &built,
+            json!({"kind": "bug", "title": "Flaky engine test: a_claude_typed", "project": "app", "local_only": true, "labels": ["ci:flaky"], "reason": "test"}),
+        )
+        .unwrap();
+        live_session(ctx, "eng-flaky");
+        let at = stamp(ctx);
+        seed_with(
+            ctx,
+            &[("ci", Some("failure"))],
+            &at,
+            Some(json!([{"name": "engine", "conclusion": "failure", "url": null}])),
+        );
+        assert_eq!(announce_concluded(ctx).unwrap(), 1);
+        let events = concluded_events(&built);
+        assert_eq!(events[0]["flaky_suspects"], json!(["WI-2"]), "{events:?}");
+        let listed = crate::application::services::inbox::inbox_list_op(&built, json!({})).unwrap();
+        let rows = listed.to_string();
+        assert!(rows.contains("\"flaky_suspects\":[\"WI-2\"]"), "{rows}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.contains("probably flaky: WI-2 (engine)")),
+            "{:?}",
+            seen.lock().unwrap()
+        );
     }
 
     #[test]
