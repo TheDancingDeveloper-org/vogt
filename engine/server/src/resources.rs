@@ -235,14 +235,34 @@ impl Sampler {
             .live_sessions()
             .into_iter()
             .filter(|s| s.is_alive())
-            .filter_map(|s| s.pid().map(|pid| (s, pid)))
             .collect();
+        self.round(sessions, &state.agent_auth, &state.bus).await;
+    }
+
+    /// [`run_once`](Self::run_once) over a given set of live sessions.
+    ///
+    /// A session is *measured* when it has a local process tree (a pid). A pod
+    /// session has none (`pid() == None`), so it is not measured, but it still
+    /// gets its pod's memory: every live session with a [`PodLink`] runs the
+    /// warning watch and publishes the memory fields (WI-4752). Such a session
+    /// carries a sample with `processes == 0`, and zero rss and cpu: a measured
+    /// tree always has at least its root, so `processes == 0` means "not
+    /// measured", and an unmeasured sample is left out of the Prometheus
+    /// gauges rather than reported as a real zero.
+    ///
+    /// [`PodLink`]: crate::agent_stream::PodLink
+    pub async fn round(
+        &mut self,
+        sessions: Vec<Arc<crate::pty::Session>>,
+        agent_auth: &crate::agent_stream::AgentAuth,
+        bus: &crate::events::EventBus,
+    ) {
         self.previous
-            .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
+            .retain(|id, _| sessions.iter().any(|s| s.id == *id));
         self.projects
-            .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
+            .retain(|id, _| sessions.iter().any(|s| s.id == *id));
         self.watches
-            .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
+            .retain(|id, _| sessions.iter().any(|s| s.id == *id));
         let Ok(table) = tokio::task::spawn_blocking(read_table).await else {
             return;
         };
@@ -260,53 +280,61 @@ impl Sampler {
         }
         let children = children_of(&table);
         let now = Instant::now();
-        let sampled_at = time::OffsetDateTime::now_utc()
+        let now_utc = time::OffsetDateTime::now_utc();
+        let sampled_at = now_utc
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
         let mut samples = Vec::with_capacity(sessions.len());
         let mut gauges = Vec::with_capacity(sessions.len());
-        for (session, pid) in sessions {
-            let mut measured = measure(
-                &table,
-                &children,
-                pid,
-                self.previous.entry(session.id).or_default(),
-                now,
-                self.page_size,
-                self.ticks_per_sec,
-                self.warn_bytes,
-                sampled_at.clone(),
-            );
-            let pod_memory = state
-                .agent_auth
-                .pod(session.id)
-                .and_then(|l| l.memory_observed());
+        for session in sessions {
+            let measured = session.pid().and_then(|pid| {
+                measure(
+                    &table,
+                    &children,
+                    pid,
+                    self.previous.entry(session.id).or_default(),
+                    now,
+                    self.page_size,
+                    self.ticks_per_sec,
+                    self.warn_bytes,
+                    sampled_at.clone(),
+                )
+            });
+            let pod_memory = agent_auth.pod(session.id).and_then(|l| l.memory_observed());
+            let mut resources = measured.clone();
             if let Some(pod) = &pod_memory {
                 let watch = self.watches.entry(session.id).or_default();
-                for notice in watch.observe(&pod.memory) {
-                    deliver_notice(&session, &notice.text()).await;
+                // Old data raises nothing: it may be a pod that stopped
+                // reporting, not one that is still near its limit.
+                if !crate::pod_memory::is_stale(&pod.observed_at, now_utc) {
+                    for notice in watch.observe(&pod.memory) {
+                        if !deliver_notice(&session, &notice.text()).await {
+                            watch.requeue(notice);
+                        }
+                    }
                 }
-                if let Some(resources) = measured.as_mut() {
-                    crate::pod_memory::apply(resources, Some(pod), watch.warned());
-                }
+                let resources = resources.get_or_insert_with(|| unmeasured(&sampled_at));
+                crate::pod_memory::apply(resources, Some(pod), watch.warned(), now_utc);
             }
-            session.set_resources(measured.clone());
-            if let Some(resources) = measured {
-                let project = self
-                    .projects
-                    .entry(session.id)
-                    .or_insert_with(|| project_of(std::path::Path::new(&session.cwd)))
-                    .clone();
-                gauges.push((
-                    session_labels(
-                        session.id,
-                        session.template(),
-                        session.agent(),
-                        crate::pty::launched_model(&session),
-                        project,
-                    ),
-                    resources.clone(),
-                ));
+            session.set_resources(resources.clone());
+            if let Some(resources) = resources {
+                if measured.is_some() {
+                    let project = self
+                        .projects
+                        .entry(session.id)
+                        .or_insert_with(|| project_of(std::path::Path::new(&session.cwd)))
+                        .clone();
+                    gauges.push((
+                        session_labels(
+                            session.id,
+                            session.template(),
+                            session.agent(),
+                            crate::pty::launched_model(&session),
+                            project,
+                        ),
+                        resources.clone(),
+                    ));
+                }
                 samples.push(SessionResourcesSample {
                     id: session.id,
                     resources,
@@ -315,20 +343,54 @@ impl Sampler {
         }
         publish_session_gauges(&gauges);
         if !samples.is_empty() {
-            state.bus.publish(ServerEvent::SessionResources { samples });
+            bus.publish(ServerEvent::SessionResources { samples });
         }
     }
 }
 
+/// The sample of a session with no local process tree (a pod session): zero
+/// rss, cpu and processes. `processes == 0` is how a consumer tells it from a
+/// measurement, which always counts at least the tree's root.
+fn unmeasured(sampled_at: &str) -> SessionResources {
+    SessionResources {
+        rss_bytes: 0,
+        cpu_pct: 0.0,
+        processes: 0,
+        sampled_at: sampled_at.to_string(),
+        over_threshold: false,
+        memory_current: None,
+        memory_max: None,
+        memory_peak: None,
+        oom_kill: None,
+        observed_at: None,
+        memory_warning: false,
+    }
+}
+
 /// Tell a session's agent about its pod's memory by typing the notice into its
-/// prompt, as the overseer wake does. A held-back line (a dialog is open) is
-/// logged, not retried: the watch's latch has already fired for this crossing.
-async fn deliver_notice(session: &Arc<crate::pty::Session>, text: &str) {
+/// prompt, as the overseer wake does. Returns whether the notice is settled:
+/// it went out, or the session is not an agent and is never sent one (typing a
+/// line and Enter into a shell would run it). A line held back by a dialog or
+/// a failed write returns `false`, and the caller offers it again next round.
+async fn deliver_notice(session: &Arc<crate::pty::Session>, text: &str) -> bool {
+    if session.agent().is_none() {
+        return true;
+    }
     match crate::autopilot::type_line(session, text, "pod memory notice").await {
-        Ok(crate::enter_guard::EnterOutcome::Sent) => {}
-        Ok(_) => tracing::warn!(session = %session.id, "pod memory notice held back by a dialog"),
+        Ok(crate::enter_guard::EnterOutcome::Sent) => true,
+        // The text is in the composer and could not be erased: retyping it
+        // would double it, so the notice counts as given.
+        Ok(outcome @ crate::enter_guard::EnterOutcome::Stranded(_)) => {
+            tracing::warn!(session = %session.id, ?outcome, "pod memory notice left in the composer");
+            true
+        }
+        Ok(outcome) => {
+            tracing::debug!(session = %session.id, ?outcome, "pod memory notice held back; will retry");
+            false
+        }
         Err(e) => {
-            tracing::warn!(session = %session.id, error = %e, "could not send a pod memory notice")
+            tracing::warn!(session = %session.id, error = %e, "could not send a pod memory notice; will retry");
+            false
         }
     }
 }
@@ -571,6 +633,167 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    // ---- WI-4752: the pod-memory path through the sampler -----------------
+
+    use crate::agent_stream::AgentAuth;
+    use crate::enter_guard::tests::{dialog_output, recording_session_running};
+    use std::sync::Mutex as StdMutex;
+    use vogt_session_agent::CgroupMemory;
+
+    const GIB: u64 = 1 << 30;
+
+    fn memory(current: u64, max: Option<u64>) -> CgroupMemory {
+        CgroupMemory {
+            memory_current: Some(current),
+            memory_max: max,
+            memory_peak: None,
+            oom_kill: None,
+        }
+    }
+
+    /// The session, what was typed into it, and the pipe that keeps it alive
+    /// (plus its pod link).
+    type PodSession = (
+        Arc<crate::pty::Session>,
+        Arc<StdMutex<Vec<u8>>>,
+        crate::enter_guard::tests::Output,
+        Arc<crate::agent_stream::PodLink>,
+    );
+
+    /// A pid-less (pod-style) session whose pod link reports `memory`.
+    /// Returns what was typed into the session.
+    fn pod_session(
+        auth: &AgentAuth,
+        command: Option<&str>,
+        reading: Option<CgroupMemory>,
+    ) -> PodSession {
+        let writes = Arc::new(StdMutex::new(Vec::new()));
+        let (session, output) =
+            recording_session_running(Arc::clone(&writes), command.map(|c| vec![c.to_string()]));
+        assert_eq!(session.pid(), None, "a pod session has no local pid");
+        let (link, _reader) = auth.register_pod(session.id);
+        if let Some(reading) = reading {
+            link.note_memory_at(Some(reading), now_rfc3339());
+        }
+        (session, writes, output, link)
+    }
+
+    fn now_rfc3339() -> String {
+        time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    }
+
+    fn typed(writes: &StdMutex<Vec<u8>>) -> String {
+        String::from_utf8_lossy(&writes.lock().unwrap()).into_owned()
+    }
+
+    /// The blocker: a session with no pid and a pod link with memory publishes
+    /// the memory fields, and one crossing of 80% types exactly one notice.
+    /// Before the fix the sampler dropped the session at its pid filter.
+    #[tokio::test]
+    async fn a_pod_session_without_a_pid_publishes_memory_and_is_warned_once() {
+        let auth = AgentAuth::default();
+        let bus = crate::events::EventBus::default();
+        let mut sampler = Sampler::new(None);
+        let (session, writes, _output, _link) =
+            pod_session(&auth, Some("claude"), Some(memory(9 * GIB, Some(10 * GIB))));
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        let resources = session
+            .summary()
+            .resources
+            .expect("a pod session publishes");
+        assert_eq!(resources.memory_current, Some(9 * GIB));
+        assert_eq!(resources.memory_max, Some(10 * GIB));
+        assert!(resources.observed_at.is_some());
+        assert!(resources.memory_warning);
+        // Not measured: zero processes marks it, and it is outside the gauges.
+        assert_eq!(resources.processes, 0);
+        assert_eq!(resources.rss_bytes, 0);
+        let first = typed(&writes);
+        assert_eq!(first.matches("Pod memory is at").count(), 1, "{first}");
+        // A second round above 80%: no second notice.
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), first);
+        assert!(session.summary().resources.unwrap().memory_warning);
+    }
+
+    /// A shell session in a pod is never typed into.
+    #[tokio::test]
+    async fn a_shell_session_in_a_pod_gets_no_notice_line() {
+        let auth = AgentAuth::default();
+        let bus = crate::events::EventBus::default();
+        let mut sampler = Sampler::new(None);
+        let (session, writes, _output, _link) =
+            pod_session(&auth, None, Some(memory(9 * GIB, Some(10 * GIB))));
+        assert_eq!(session.agent(), None);
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), "");
+        // The GUI still hears of it.
+        assert!(session.summary().resources.unwrap().memory_warning);
+    }
+
+    /// A held-back line (a dialog is open) does not use up the crossing: the
+    /// next round sends it once the screen is clear, and only once.
+    #[tokio::test]
+    async fn a_held_back_notice_is_retried_and_then_sent_once() {
+        let auth = AgentAuth::default();
+        let bus = crate::events::EventBus::default();
+        let mut sampler = Sampler::new(None);
+        let (session, writes, output, _link) =
+            pod_session(&auth, Some("claude"), Some(memory(9 * GIB, Some(10 * GIB))));
+        output.send(dialog_output()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), "", "nothing typed over a dialog");
+        // The flag does not wait on delivery.
+        assert!(session.summary().resources.unwrap().memory_warning);
+        output.send(b"\x1b[2J\x1b[H> ".to_vec()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        let sent = typed(&writes);
+        assert_eq!(sent.matches("Pod memory is at").count(), 1, "{sent}");
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), sent);
+    }
+
+    /// An unknown limit publishes the reading and warns nobody.
+    #[tokio::test]
+    async fn an_unknown_limit_publishes_without_a_notice() {
+        let auth = AgentAuth::default();
+        let bus = crate::events::EventBus::default();
+        let mut sampler = Sampler::new(None);
+        let (session, writes, _output, _link) =
+            pod_session(&auth, Some("claude"), Some(memory(900 * GIB, None)));
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), "");
+        let resources = session.summary().resources.unwrap();
+        assert_eq!(resources.memory_current, Some(900 * GIB));
+        assert!(!resources.memory_warning);
+    }
+
+    /// A reading older than the staleness bound raises no flag and no notice.
+    #[tokio::test]
+    async fn a_stale_reading_clears_the_flag_and_warns_nobody() {
+        let auth = AgentAuth::default();
+        let bus = crate::events::EventBus::default();
+        let mut sampler = Sampler::new(None);
+        let (session, writes, _output, link) = pod_session(&auth, Some("claude"), None);
+        let old = (time::OffsetDateTime::now_utc()
+            - crate::pod_memory::STALE_AFTER
+            - std::time::Duration::from_secs(5))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+        link.note_memory_at(Some(memory(9 * GIB, Some(10 * GIB))), old.clone());
+        sampler.round(vec![Arc::clone(&session)], &auth, &bus).await;
+        assert_eq!(typed(&writes), "");
+        let resources = session.summary().resources.unwrap();
+        assert!(!resources.memory_warning);
+        // The old reading is still exposed, with its age.
+        assert_eq!(resources.memory_current, Some(9 * GIB));
+        assert_eq!(resources.observed_at.as_deref(), Some(old.as_str()));
     }
 
     #[test]
