@@ -448,6 +448,7 @@ fn a_dead_engine_hides_no_linked_sessions() {
             stall_after_minutes: 10,
             include_hidden: false,
             fields: None,
+            started_by_session: None,
         },
     )
     .unwrap();
@@ -1092,6 +1093,7 @@ fn digest_params() -> ListSessionsParams {
         stall_after_minutes: 10,
         include_hidden: false,
         fields: None,
+        started_by_session: None,
     }
 }
 
@@ -1384,12 +1386,17 @@ fn full_mode_with_fields_slims_each_row_to_id_and_the_named_fields() {
     let mut params = digest_params();
     params.mode = "full".to_string();
     let whole = serde_json::to_value(list_sessions(ctx, &params).unwrap()).unwrap();
-    // Default output is unchanged: no fields, every column.
+    // No fields: every column but the long launch `command` (WI-4725).
+    let mut expected = whole.clone();
+    expected["sessions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("command");
     let mut untouched = whole.clone();
     super::sessions::slim_full_rows(&mut untouched, None);
-    assert_eq!(untouched, whole);
+    assert_eq!(untouched, expected);
     super::sessions::slim_full_rows(&mut untouched, Some(&[]));
-    assert_eq!(untouched, whole);
+    assert_eq!(untouched, expected);
     let mut slim = whole.clone();
     super::sessions::slim_full_rows(
         &mut slim,
@@ -2096,4 +2103,61 @@ fn a_starters_read_can_name_the_work_item_without_asking_the_engine() {
     assert_eq!(find("eng-a")["work_item"], "WI-9");
     assert!(find("eng-b")["work_item"].is_null());
     assert!(find("eng-a").get("started_by_session").is_none());
+}
+
+/// WI-4725: `started_by_session` keeps only that starter's sessions on every
+/// path: full and digest, with and without `states`, by engine id or `ses_…`
+/// id, and never an unlinked row.
+#[test]
+fn started_by_session_filters_every_list_path() {
+    let body = r#"{"sessions":[
+        {"id":"eng-parent","name":"p","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-child","name":"c","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-other","name":"o","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-shell","name":"s","cwd":"/w","activity":"idle","alive":true}]}"#;
+    let script = script_with((0..8).map(|_| (200, body.to_string())).collect());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    seed_child_session(&built, "eng-parent", None, None);
+    seed_child_session(&built, "eng-child", Some("oversight"), Some("eng-parent"));
+    seed_child_session(&built, "eng-other", Some("oversight"), Some("eng-else"));
+    for starter in ["eng-parent", "ses_eng-parent"] {
+        for mode in ["full", "digest"] {
+            for states in [json!(null), json!([])] {
+                let listed = list_sessions_op(
+                    &built,
+                    json!({"mode": mode, "started_by_session": starter, "states": states}),
+                )
+                .unwrap();
+                let rows = if mode == "full" {
+                    listed["sessions"].as_array().unwrap()
+                } else {
+                    listed["digests"].as_array().unwrap()
+                };
+                let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+                assert_eq!(ids, vec!["ses_eng-child"], "{mode} {starter} {listed}");
+                assert_eq!(listed["total"], 1, "{mode} {starter} {listed}");
+            }
+        }
+    }
+}
+
+/// WI-4725: a full row leaves out the long launch `command` unless `fields`
+/// names it.
+#[test]
+fn full_rows_drop_command_unless_asked_for() {
+    let body = r#"{"sessions":[{"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true,"command":"claude --very-long-launch-line"}]}"#;
+    let script = script_with(vec![(200, body.to_string()), (200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let plain = list_sessions_op(&built, json!({"mode": "full"})).unwrap();
+    assert!(
+        plain["sessions"][0].get("command").is_none(),
+        "{}",
+        plain["sessions"][0]
+    );
+    let asked = list_sessions_op(&built, json!({"mode": "full", "fields": ["command"]})).unwrap();
+    assert_eq!(
+        asked["sessions"][0]["command"],
+        "claude --very-long-launch-line"
+    );
 }
