@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# curl through the pod's tailnet sidecar (WI-4716): tcurl https://node-e:8120/...
+# curl through the tailnet SOCKS5 (WI-4716, WI-4721): tcurl https://node-e:8120/...
 # DNS happens at the proxy (socks5h), so tailnet names resolve. Only this
-# command is proxied; nothing sets a global proxy.
+# command is proxied; nothing sets a global proxy. The proxy is
+# VOGT_TAILNET_SOCKS5, default the engine's vogt-dev-engine.vogt-dev.svc:1055.
 set -eu
-proxy="${VOGT_TAILNET_SOCKS5:-127.0.0.1:1055}"
+proxy="${VOGT_TAILNET_SOCKS5:-vogt-dev-engine.vogt-dev.svc:1055}"
 exec curl --proxy "socks5h://${proxy}" "$@"

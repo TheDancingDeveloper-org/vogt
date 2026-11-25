@@ -13,7 +13,8 @@ import threading
 from typing import NoReturn
 
 HOST, PORT = sys.argv[1], int(sys.argv[2])
-PROXY = (sys.argv[3], int(sys.argv[4])) if len(sys.argv) > 4 else ("127.0.0.1", 1055)
+DEFAULT_PROXY = ("vogt-dev-engine.vogt-dev.svc", 1055)
+PROXY = (sys.argv[3], int(sys.argv[4])) if len(sys.argv) > 4 else DEFAULT_PROXY
 
 
 def die(msg: str) -> NoReturn:
