@@ -425,6 +425,15 @@ fn fetch_base_ref(checkout: &Path, base_ref: &str) -> Result<String> {
             "base ref {base_ref:?} is not a branch on origin"
         )));
     }
+    // A checkout with no `origin` has nothing to cut from. Refuse by name
+    // rather than surface git's raw fetch error, and never fall back to the
+    // local ref (WI-1630) or the shared checkout (WI-2238).
+    if git_output(checkout, &["remote", "get-url", "origin"]).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "could not cut a worktree: {} has no `origin` remote to fetch base ref {base_ref:?} from. Add one (git remote add origin <url>) or start the session with worktree=false",
+            checkout.display()
+        )));
+    }
     let remote_ref = format!("origin/{source}");
     // An explicit refspec. `git fetch origin <branch>` with a matching local
     // branch updates that local branch, not `refs/remotes/origin/<branch>`,
@@ -2493,6 +2502,30 @@ mod tests {
         .is_err());
         // The stale local ref is untouched, and was not what got cut.
         assert_eq!(git_output(&repo, &["rev-parse", "topic"]).unwrap(), local);
+    }
+
+    #[test]
+    fn a_checkout_with_no_origin_is_refused_with_a_hint_not_a_raw_fetch_error() {
+        let _guard = EnvLock::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        git(&repo, &["remote", "remove", "origin"]);
+
+        let refused = create_worktree(&repo, "wi-2238-worker", "main").unwrap_err();
+
+        let text = refused.to_string();
+        assert!(text.contains("has no `origin` remote"), "{text}");
+        assert!(text.contains("worktree=false"), "{text}");
+        assert!(
+            !text.contains("does not appear to be a git repository"),
+            "{text}"
+        );
+        assert!(!tmp.path().join("wi-2238-worker").exists());
+        assert!(git_output(
+            &repo,
+            &["rev-parse", "--verify", "refs/heads/wi-2238-worker"]
+        )
+        .is_err());
     }
 
     #[test]
