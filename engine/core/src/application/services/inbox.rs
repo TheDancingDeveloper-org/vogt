@@ -914,7 +914,14 @@ where
                     | decisions::BranchState::Failed
                     | decisions::BranchState::Cancelled
             ) {
-                entries.push(bound_branch_entry(ctx, &overlay, &branch, &ci, &projects));
+                let suspects = crate::application::ci_watch::branch_flaky_suspects(
+                    view,
+                    &overlay.project_id,
+                    &ci,
+                )?;
+                entries.push(bound_branch_entry(
+                    ctx, &overlay, &branch, &ci, &projects, &suspects,
+                ));
             }
             // WI-1334: one entry per hung run; it goes when the run concludes.
             for hung in &ci.hung {
@@ -1381,6 +1388,7 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
     branch: &str,
     ci: &decisions::BranchCi,
     projects: &BTreeMap<String, Project>,
+    suspects: &[(String, String)],
 ) -> Value {
     let project = projects.get(&overlay.project_id);
     let newest = ci
@@ -1447,7 +1455,11 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
             json!({"subject_key": newest.observation.subject_key}),
         ),
         actor: &actors::system_actor(),
-        extra: json!({}),
+        extra: if suspects.is_empty() {
+            json!({})
+        } else {
+            json!({"flaky_suspects": suspects.iter().map(|(reference, _)| reference).collect::<Vec<_>>()})
+        },
     })
 }
 
