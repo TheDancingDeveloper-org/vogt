@@ -1540,6 +1540,12 @@ pub struct EngineArchivedSession {
     pub ended_at: Option<String>,
     #[serde(deserialize_with = "lenient::opt_int")]
     pub exit_code: Option<i64>,
+    /// The agent CLI's own conversation id, kept after the session ends.
+    #[serde(deserialize_with = "lenient::opt_str")]
+    pub conversation_id: Option<String>,
+    /// The template a resume of that conversation starts (WI-962).
+    #[serde(deserialize_with = "lenient::opt_str")]
+    pub resume_template: Option<String>,
 }
 
 /// One row of the engine's session-history listing.
