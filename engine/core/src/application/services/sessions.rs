@@ -6543,6 +6543,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_input_write_leaves_one_audit_row_and_never_the_typed_text() {
+        // WI-834: typing into a PTY is code execution, so each `session.input`
+        // is one audit row (actor, session, reason, byte count, key names)
+        // and neither the audit nor the event rows may hold the text, which
+        // may be a password.
+        const SECRET: &str = "hunter2-correct-horse";
+        let (_dir, built, _seen) = context("audit", agent("agent:worker"), None, |_| {}, vec![]);
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            input(
+                ctx,
+                &InputParams {
+                    id: "ses_1".to_string(),
+                    text: Some(SECRET.to_string()),
+                    keys: Some(vec!["tab".to_string()]),
+                    submit: true,
+                    reason: "steering".to_string(),
+                    confirm: false,
+                    wake_timeout_s: 120,
+                },
+            )
+            .unwrap();
+            let view = ctx.declared.read().unwrap();
+            let rows = view
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: Some("session.input".to_string()),
+                    entity_id: None,
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 1, "exactly one audit row per write: {rows:?}");
+            let row = &rows[0];
+            assert_eq!(row.entity_kind, "session");
+            assert_eq!(row.entity_id, "ses_1");
+            assert_eq!(row.reason, "steering");
+            assert_eq!(row.actor_identity_ref, "agent:worker");
+            assert!(
+                !format!("{row:?}").contains(SECRET),
+                "audit row holds the text: {row:?}"
+            );
+            let events = view.list_events(0, 100, None).unwrap();
+            let input_events: Vec<_> = events
+                .iter()
+                .filter(|event| event.kind == "session.input")
+                .collect();
+            assert_eq!(input_events.len(), 1, "{events:?}");
+            let summary = &input_events[0].summary;
+            assert_eq!(summary["bytes"], SECRET.len());
+            assert_eq!(summary["keys"], json!(["tab"]));
+            assert_eq!(summary["submit"], true);
+            assert!(
+                !events.iter().any(|e| format!("{e:?}").contains(SECRET)),
+                "an event holds the text: {events:?}"
+            );
+        });
+    }
+
     fn wait_at(outcome: &str, activity: Option<&str>, ready: Option<bool>) -> EngineWait {
         EngineWait {
             outcome: outcome.to_string(),
