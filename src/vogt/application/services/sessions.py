@@ -4797,8 +4797,13 @@ def _resolve_purpose(
     (the overrides), and whether the profile asks for a read-only session.
     The profile is the deployment's (`dispatch.profiles`, written by a
     person, over the code defaults), never the caller's own preference. A
-    start with no purpose is returned unchanged.
+    start with no purpose is returned unchanged, except a review (`review_of`
+    set): with no purpose given it runs as `review`, so the session gets the
+    review profile and the purpose the verdict gate reads. A purpose the
+    caller names is never replaced.
     """
+    if params.purpose is None and params.review_of is not None:
+        params = params.model_copy(update={"purpose": "review"})
     if params.purpose is None:
         return params, (), False
     with ctx.declared.read() as view:
