@@ -23,8 +23,8 @@ Python remains the reference contract during the overlap. Pod templates run
 `engine/session-agent` in a separate Kubernetes pod; local templates still
 run a PTY beside the engine. A pod has its own graft clone, not the engine's
 shared workspace. Read the pod sections in `docs/ENGINE.md` before relying
-on host paths. Deliver through graft on this line, not the historical
-integration-branch instructions below (process reconciliation: WI-3377).
+on host paths. Deliver through graft on this line (see the landing bullet
+below and `docs/CONTRIBUTING.md`).
 Before `g land`, run `scripts/pre-land-check.sh`; add `--rust` when the change
 touches `engine/`. It runs the rust-2 CI gates a local test loop misses
 (`cargo deny`, the disposition ledger, engine/MCP parity, ruff, mypy and the
@@ -358,11 +358,13 @@ does not need an APK rebuild.
   defaults. Exposure and identity values such as a public URL or non-loopback
   bind address must be stated, not guessed. Read `docs/DEPLOYMENT.md` before
   changing Compose defaults.
-- Landing is through the merge queue (`docs/ci.md`): push a branch and open
-  a PR; the PR runs only fast, path-scoped checks, so don't expect full CI on
-  it and don't re-run the full suite by hand. `land-pr` enqueues the PR and
-  waits on the queue's `merge_group` runs, where the full suite runs. Rebase
-  only when the queue reports a conflict.
+- A worker lands on the graft line `rust-2` with `g land` (`docs/CONTRIBUTING.md`,
+  "Workflow") and stops: it pushes no branch, opens no pull request and does
+  not wait for or poll CI. Oversight cuts the batch pull request to `main`
+  (`graft-mirror pr-batch`). That pull request runs only fast, path-scoped
+  checks; `land-pr` enqueues it, and the merge queue's `merge_group` runs
+  carry the full suite (`docs/ci.md`). Required checks stay small and
+  deterministic; don't re-run the full suite by hand.
 - CI intentionally runs on self-hosted runners. A queued job is a runner
   capacity/availability question, never a reason to change `runs-on`. Fork
   limitations and local equivalents are documented in
@@ -379,8 +381,9 @@ does not need an APK rebuild.
   honestly.
 - Generated files, wire-contract docs, user docs, manifests, and lockfiles are
   updated when their source changes.
-- Relevant surface gates pass, and the PR records the exact commands run plus
-  any intentionally skipped external or live validation.
+- Relevant surface gates pass, and the land message (or, for the batch or a
+  fork pull request, the PR) records the exact commands run plus any
+  intentionally skipped external or live validation.
 - `git diff --check`, `git status`, and the final diff show only intended
   changes. A worker lands on the graft line `rust-2` with `g land` and opens
   no pull request. A pull request to `main` (the batch pull request, or
