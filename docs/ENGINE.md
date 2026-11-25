@@ -494,6 +494,20 @@ Rotation is a new token for the same actor stored under the same secret name,
 then `token.revoke` of the old one; sessions pick it up at their next spawn of
 the server.
 
+**The dev-lane fence and its opt-in (WI-4489, WI-4601).** An engine with
+`ENGINE_LANE=dev` never hands out `vogt-prod`: it drops the vogt-prod URL at
+load (logging that it did), gives no pod a `vogt-prod` entry, and the broker
+refuses `VOGT_PROD_TOKEN` (403) to every session. Setting
+`ENGINE_ALLOW_DEV_PROD_BRIDGE=1` (default off) lifts that fence on purpose:
+the URL is kept and the token is brokered under the same rules as any other
+lane, so only an oversight or full-set session gets it and a worker still
+never does. The engine logs one startup warning naming the override while it
+is active (the line carries no URL or token). The setting is ignored on any
+other lane. Security note: with the opt-in a compromised dev session holding
+the bridge token can act on production with that token's scopes, so issue it
+as above (`read,work.write`, no `admin`, short expiry), keep worker sessions
+on the worker set, and turn the setting off when the bridge is not needed.
+
 **`git-forgejo`.** For git itself against a Gitea/Forgejo host, the image
 installs `git-forgejo` on PATH (so `git forgejo …` works too). It reads
 `FORGEJO_TOKEN` and `FORGEJO_URL` (falling back to `GITEA_HOST`), and hands git

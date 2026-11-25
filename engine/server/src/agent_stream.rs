@@ -1525,8 +1525,8 @@ pub async fn bootstrap(
         });
     // WI-4489: and only to a full-set session; a worker never gets it, so its
     // token is not fetched around a worker's agent either. A dev lane hands
-    // it to nobody.
-    if launch.mcp_set != crate::mcp_set::McpSet::Full || state.sessions.is_dev_lane() {
+    // it to nobody unless ENGINE_ALLOW_DEV_PROD_BRIDGE opts it in (WI-4601).
+    if launch.mcp_set != crate::mcp_set::McpSet::Full || state.sessions.fences_vogt_prod() {
         breadcrumbs.forget(crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
     }
     let vogt_prod_bearer = state.sessions.vogt_prod_configured()

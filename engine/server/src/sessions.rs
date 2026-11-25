@@ -966,7 +966,7 @@ impl SessionRegistry {
             .cfg
             .vogt_prod_mcp_url
             .as_deref()
-            .filter(|_| vogt_prod_bearer && !self.cfg.is_dev_lane())
+            .filter(|_| vogt_prod_bearer && !self.cfg.fences_vogt_prod())
         {
             endpoints = crate::session_endpoints::with_vogt_prod(endpoints, origin);
         }
@@ -980,8 +980,9 @@ impl SessionRegistry {
     /// session whose set is unknown, is refused, so hiding the name from its
     /// breadcrumbs is not the only thing between a worker and `vogt-prod`.
     pub fn may_fetch_vogt_prod(&self, id: Uuid) -> bool {
-        // A dev lane never reaches production, whoever asks (WI-4489).
-        !self.cfg.is_dev_lane()
+        // A dev lane never reaches production, whoever asks (WI-4489),
+        // unless the engine opted in with ENGINE_ALLOW_DEV_PROD_BRIDGE (WI-4601).
+        !self.cfg.fences_vogt_prod()
             && self.summary_of(id).is_some_and(|s| {
                 s.role == SessionRole::Oversight
                     || s.mcp_set.as_deref() == Some(crate::mcp_set::McpSet::Full.name())
@@ -1027,15 +1028,15 @@ impl SessionRegistry {
         )))
     }
 
-    /// Whether this engine serves the dev lane, which never reaches
-    /// production (WI-4489).
-    pub fn is_dev_lane(&self) -> bool {
-        self.cfg.is_dev_lane()
+    /// Whether this engine keeps every session away from production: a dev
+    /// lane (WI-4489) without the WI-4601 opt-in.
+    pub fn fences_vogt_prod(&self) -> bool {
+        self.cfg.fences_vogt_prod()
     }
 
     /// Whether a remote Vogt is configured for pod sessions (WI-4289).
     pub fn vogt_prod_configured(&self) -> bool {
-        self.cfg.vogt_prod_mcp_url.is_some() && !self.cfg.is_dev_lane()
+        self.cfg.vogt_prod_mcp_url.is_some() && !self.cfg.fences_vogt_prod()
     }
 
     /// Start a session whose process runs in a pod: register the engine's half

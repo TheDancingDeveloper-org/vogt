@@ -677,6 +677,12 @@ pub struct Config {
     /// `vogt_prod_mcp_url` is dropped at load, and the broker refuses
     /// `VOGT_PROD_TOKEN` to every session, whatever else is configured.
     pub lane: Option<String>,
+    /// Explicit opt-in that lets a `dev` lane keep the vogt-prod bridge
+    /// (WI-4601): `ENGINE_ALLOW_DEV_PROD_BRIDGE`, default off. Set, the
+    /// `vogt-prod` URL is kept and `VOGT_PROD_TOKEN` can be brokered on the
+    /// dev lane under the same full-set/oversight rules as any other lane.
+    /// Unset, WI-4489's fence applies unchanged.
+    pub allow_dev_prod_bridge: bool,
     /// Optional crw MCP URL (path included) for pod sessions (WI-4489). The
     /// host default is a tailnet address a pod cannot reach, so unset means
     /// no crw entry in a pod.
@@ -850,6 +856,7 @@ struct FileConfig {
     cadastre_mcp_url: Option<String>,
     vogt_prod_mcp_url: Option<String>,
     lane: Option<String>,
+    allow_dev_prod_bridge: Option<bool>,
     crw_mcp_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
@@ -1496,6 +1503,11 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_LANE").ok())
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty()),
+        allow_dev_prod_bridge: bool_env_over_file(
+            "ENGINE_ALLOW_DEV_PROD_BRIDGE",
+            from_file.allow_dev_prod_bridge,
+        )?
+        .unwrap_or(false),
         crw_mcp_url: validate_mcp_url(
             "ENGINE_CRW_MCP_URL",
             from_file
@@ -1604,9 +1616,15 @@ pub fn load(
         dirs_home().as_deref(),
         &config.state_dir,
     )?;
-    if config.is_dev_lane() && config.vogt_prod_mcp_url.take().is_some() {
+    if config.fences_vogt_prod() && config.vogt_prod_mcp_url.take().is_some() {
         tracing::warn!(
             "ENGINE_LANE=dev: the vogt-prod MCP URL is ignored; a dev lane never reaches production"
+        );
+    }
+    if config.is_dev_lane() && config.allow_dev_prod_bridge {
+        tracing::warn!(
+            "ENGINE_LANE=dev with ENGINE_ALLOW_DEV_PROD_BRIDGE=1: the WI-4489 fence is overridden; \
+             full-set and oversight sessions on this dev lane may reach vogt-prod"
         );
     }
     Ok(config)
@@ -1616,6 +1634,13 @@ impl Config {
     /// Whether this engine serves the dev lane (WI-4489).
     pub fn is_dev_lane(&self) -> bool {
         self.lane.as_deref() == Some("dev")
+    }
+
+    /// Whether this engine keeps every session away from vogt-prod: a dev
+    /// lane (WI-4489), unless `ENGINE_ALLOW_DEV_PROD_BRIDGE` opts it back in
+    /// (WI-4601).
+    pub fn fences_vogt_prod(&self) -> bool {
+        self.is_dev_lane() && !self.allow_dev_prod_bridge
     }
 }
 

@@ -1197,6 +1197,48 @@ async fn a_dev_lane_never_hands_out_vogt_prod() {
     assert_eq!(r.status(), 403);
 }
 
+/// WI-4601: with ENGINE_ALLOW_DEV_PROD_BRIDGE the dev lane keeps the
+/// bridge. A full-set pod gets the vogt-prod entry and the broker hands it
+/// VOGT_PROD_TOKEN, as on any other lane.
+#[tokio::test]
+async fn a_dev_lane_with_the_opt_in_hands_out_vogt_prod() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = fake_broker_helper(dir.path());
+    let mut h = harness_cfg(false, None, move |cfg| {
+        cfg.lane = Some("dev".into());
+        cfg.allow_dev_prod_bridge = true;
+        cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+        cfg.agent_auth_helper = helper;
+        cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+            "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let id = h
+        .start_body(json!({"name": "full", "template": "pod", "mcp_set": "full"}))
+        .await;
+    let (_, token) = h.created.recv().await.unwrap();
+    let boot: Value = h
+        .bootstrap_as(id, &token, "claude")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        boot["mcp_config"]["mcpServers"].get("vogt-prod").is_some(),
+        "{boot}"
+    );
+    let broker = h.state.sessions.secret_broker();
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/agent-auth/fetch/VOGT_PROD_TOKEN", h.base))
+        .bearer_auth(broker.issue(id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
 /// WI-4489: a bootstrap whose launch details are gone fails closed, on
 /// the worker set, even for a full-set start.
 #[tokio::test]
