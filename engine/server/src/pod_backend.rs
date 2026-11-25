@@ -4,6 +4,7 @@ use crate::{
     error::{ApiError, Result},
     session_backend::SessionBackend,
     session_cache::{self, CacheProvisioner, HttpCacheProvisioner},
+    session_tailnet::{self, HttpTailnetMinter, TailnetKey, TailnetMinter},
 };
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
@@ -45,6 +46,10 @@ pub struct PodTemplatePolicy {
     /// (`activeDeadlineSeconds`). Unset keeps the deployment default.
     #[serde(default)]
     pub active_deadline_seconds: Option<i64>,
+    /// Whether this template's pods get a tailnet sidecar of their own
+    /// (WI-4715). Takes effect only while `ENGINE_POD_TAILNET` is on.
+    #[serde(default)]
+    pub tailnet: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -187,6 +192,12 @@ pub struct PodConfig {
     /// stable for a deployment and distinct between deployments.
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
+    /// Per-pod tailnet identity (`ENGINE_POD_TAILNET=1`, WI-4715): a template
+    /// whose policy sets `tailnet: true` gets a tailscale sidecar with a key
+    /// the engine mints for that pod. Unset keeps the pre-feature spec. Holds
+    /// no credential; see [`crate::session_tailnet`].
+    #[serde(default)]
+    pub tailnet: Option<crate::session_tailnet::PodTailnet>,
 }
 /// The read-only workspace tree every session pod gets (WI-3373) and the
 /// writable per-pod clone beneath it (WI-3374). Off unless
@@ -776,6 +787,7 @@ impl Default for PodConfig {
             orphan_ttl: default_orphan_ttl(),
             workspace: None,
             engine_id: default_engine_id(),
+            tailnet: None,
         }
     }
 }
@@ -1079,6 +1091,32 @@ impl PodConfig {
                      must be a positive number of seconds"
                 )));
             }
+        }
+        let tailnet_enabled = match text("ENGINE_POD_TAILNET").as_deref() {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(other) => {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_TAILNET must be true or false, got {other:?}"
+                )))
+            }
+        };
+        if tailnet_enabled {
+            let mut tailnet = crate::session_tailnet::PodTailnet::default();
+            if let Some(image) = text("ENGINE_POD_TAILNET_IMAGE").filter(|v| !v.is_empty()) {
+                tailnet.image = image;
+            }
+            if let Some(url) = text("ENGINE_POD_TAILNET_API_URL").filter(|v| !v.is_empty()) {
+                if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
+                    return Err(ApiError::Config(
+                        "ENGINE_POD_TAILNET_API_URL must be an https URL \
+                         (plain http needs ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true)"
+                            .into(),
+                    ));
+                }
+                tailnet.api_url = url.trim_end_matches('/').to_string();
+            }
+            cfg.tailnet = Some(tailnet);
         }
         if let Some(url) = &cfg.cache_provisioner_url {
             if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
@@ -1995,6 +2033,16 @@ pub fn pod_template(
                     active_deadline_seconds
                         .map(|s| (DEADLINE_ANNOTATION.to_string(), s.to_string())),
                 )
+                // The sidecar itself is added at create, and only once the
+                // engine holds a key for it (WI-4715).
+                .chain(
+                    (cfg.tailnet.is_some() && policy.is_some_and(|p| p.tailnet)).then(|| {
+                        (
+                            crate::session_tailnet::TAILNET_ANNOTATION.to_string(),
+                            crate::session_tailnet::TAILNET_REQUESTED.to_string(),
+                        )
+                    }),
+                )
                 .collect(),
             ),
             ..Default::default()
@@ -2314,13 +2362,36 @@ pub struct PodBackendFactory {
     /// Pod uid to the kache allocation it holds, so teardown can release it.
     /// Filled at create and from listed pods' labels (an adopted pod).
     allocations: Arc<dashmap::DashMap<String, String>>,
+    /// Mints each tailnet pod's auth key (WI-4715); `None` when the
+    /// deployment has the flag off or no OAuth secret.
+    tailnet: Option<Arc<dyn TailnetMinter>>,
 }
 impl PodBackendFactory {
     pub async fn new(cfg: PodConfig) -> Result<Self> {
         let client = cfg.client().await?;
         let cache = HttpCacheProvisioner::from_config(&cfg)?
             .map(|p| Arc::new(p) as Arc<dyn CacheProvisioner>);
-        Ok(Self::from_parts(Arc::new(cfg), client, cache))
+        let tailnet = match &cfg.tailnet {
+            Some(tailnet) => {
+                let minter =
+                    HttpTailnetMinter::from_lookup(tailnet, |name| std::env::var(name).ok())?;
+                if minter.is_none() {
+                    tracing::warn!(
+                        "ENGINE_POD_TAILNET is on but {} is not set; tailnet pods start \
+                         without their sidecar",
+                        session_tailnet::OAUTH_SECRET_ENV
+                    );
+                }
+                minter.map(|m| Arc::new(m) as Arc<dyn TailnetMinter>)
+            }
+            None => None,
+        };
+        Ok(Self::from_parts(Arc::new(cfg), client, cache).with_tailnet(tailnet))
+    }
+    /// The factory with `minter` minting its tailnet pods' keys.
+    pub fn with_tailnet(mut self, minter: Option<Arc<dyn TailnetMinter>>) -> Self {
+        self.tailnet = minter;
+        self
     }
     pub fn from_parts(
         cfg: Arc<PodConfig>,
@@ -2332,6 +2403,52 @@ impl PodBackendFactory {
             client,
             cache,
             allocations: Arc::default(),
+            tailnet: None,
+        }
+    }
+    /// Mint the pod's tailnet key and give the pod its sidecar, when the
+    /// template asked for one. A mint that fails never fails the session: the
+    /// pod starts without the sidecar, marked `unavailable`, and the session's
+    /// output and the audit log say why (the reason carries no secret).
+    async fn prepare_tailnet(&self, id: Uuid, pod: &mut Pod) -> Option<(TailnetKey, String)> {
+        if !session_tailnet::requested(pod) {
+            return None;
+        }
+        let minted = match (&self.cfg.tailnet, &self.tailnet) {
+            (Some(cfg), Some(minter)) => minter.mint(id).await.map(|key| (cfg, key)),
+            (None, _) => Err(ApiError::Config("ENGINE_POD_TAILNET is off".into())),
+            (Some(_), None) => Err(ApiError::Config(format!(
+                "{} is not set",
+                session_tailnet::OAUTH_SECRET_ENV
+            ))),
+        };
+        match minted {
+            Ok((cfg, key)) => {
+                let name = session_tailnet::tailnet_secret_name(id);
+                session_tailnet::attach(pod, cfg, id, &name);
+                tracing::info!(
+                    target: "vogt::audit", session_id = %id, key_id = %key.id,
+                    node = %session_tailnet::node_hostname(id),
+                    "minted the session pod's tailnet key"
+                );
+                Some((key, name))
+            }
+            Err(e) => {
+                session_tailnet::mark(pod, session_tailnet::TAILNET_UNAVAILABLE);
+                note_tailnet_unavailable(id, &e.to_string());
+                None
+            }
+        }
+    }
+    /// Revoke a key whose pod will never use it; it would expire on its own,
+    /// so a failure is only logged.
+    async fn revoke_tailnet(&self, id: Uuid, key: &TailnetKey) {
+        let Some(minter) = &self.tailnet else { return };
+        if let Err(e) = minter.revoke(&key.id).await {
+            tracing::warn!(
+                target: "vogt::audit", session_id = %id, key_id = %key.id, error = %e,
+                "could not revoke the unused tailnet key; it expires on its own"
+            );
         }
     }
     /// Release a kache allocation; a failure is logged, the provisioner's
@@ -2411,6 +2528,7 @@ impl PodBackendFactory {
             }
             None => None,
         };
+        let tailnet = self.prepare_tailnet(id, &mut pod).await;
         let auth = crate::agent_stream::global();
         auth.issue(id, token).await;
         let created = match self.create(pod).await {
@@ -2419,6 +2537,9 @@ impl PodBackendFactory {
                 auth.withdraw(id).await;
                 if let Some(alloc) = &allocation {
                     self.release_cache(id, &alloc.allocation_id).await;
+                }
+                if let Some((key, _)) = &tailnet {
+                    self.revoke_tailnet(id, key).await;
                 }
                 return Err(e);
             }
@@ -2439,6 +2560,15 @@ impl PodBackendFactory {
                 .map(|_| ())
                 .map_err(|e| format!("creating session cache secret: {e}"));
         }
+        if let (Ok(()), Some((key, name))) = (&made, &tailnet) {
+            let secret = session_tailnet::tailnet_secret(&self.cfg, id, name, key, &created);
+            // The error names the Secret, never its data.
+            made = api
+                .create(&PostParams::default(), &secret)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("creating session tailnet secret: {e}"));
+        }
         if let Err(e) = made {
             // No pod will ever present the bootstrap credential.
             auth.withdraw(id).await;
@@ -2452,6 +2582,9 @@ impl PodBackendFactory {
             }
             if let Some(alloc) = &allocation {
                 self.release_cache(id, &alloc.allocation_id).await;
+            }
+            if let Some((key, _)) = &tailnet {
+                self.revoke_tailnet(id, key).await;
             }
             return Err(ApiError::Internal(e));
         }
@@ -2624,6 +2757,25 @@ where
 /// other refusal, an RBAC 403 or an admission 422, is the engine's own fault:
 /// it is logged in full and reaches the caller as a generic error that names
 /// neither the service account nor the namespace.
+/// Record on the session that its pod starts without a tailnet: the audit
+/// log, and the session's own output when its stream is registered. `why`
+/// names the failure (an HTTP status, a missing setting), never a secret.
+fn note_tailnet_unavailable(id: Uuid, why: &str) {
+    tracing::warn!(
+        target: "vogt::audit",
+        session = %id,
+        reason = why,
+        "session tailnet key unavailable; the pod starts without its tailnet sidecar"
+    );
+    if let Some(link) = crate::agent_stream::global().pod(id) {
+        let note = format!(
+            "\r\nsession tailnet unavailable: {why}; this pod has no tailnet sidecar, \
+             so tailnet ssh and curl will fail in this session\r\n"
+        );
+        let _ = link.ingest(link.next_offset(), note.as_bytes());
+    }
+}
+
 fn creation_error(e: kube::Error) -> ApiError {
     match &e {
         kube::Error::Api(status)
