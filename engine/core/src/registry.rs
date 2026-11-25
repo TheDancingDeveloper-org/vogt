@@ -397,6 +397,26 @@ impl Operation {
         ctx: Option<&crate::application::context::Built>,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, VogtError> {
+        // Defaults and bounds come from the recorded pydantic schema, so every
+        // transport applies them before a service sees the parameters. The CLI
+        // and HTTP validate earlier, for their own error shapes, and call
+        // `run_prepared`; MCP and direct callers come through here. An operation
+        // whose service is not ported still reports that, rather than a schema
+        // error about parameters it never reads.
+        let params = match (service_for(self.name), self.handler) {
+            (None, Handler::NotPorted) => params,
+            _ => validate::prepare(self.name, params)?,
+        };
+        self.run_prepared(ctx, params)
+    }
+
+    /// Run with parameters `validate::prepare` has already accepted. The
+    /// caller owns that: nothing here checks it again.
+    pub fn run_prepared(
+        &self,
+        ctx: Option<&crate::application::context::Built>,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, VogtError> {
         // Test-only: the HTTP dispatch test holds a request inside the blocking
         // section to prove it does not pin a tokio worker. Production never
         // sets the variable.
@@ -406,16 +426,6 @@ impl Operation {
                 std::thread::sleep(std::time::Duration::from_millis(millis));
             }
         }
-        // Defaults and bounds come from the recorded pydantic schema, so every
-        // transport applies them before a service sees the parameters. The CLI
-        // validates first and reports a usage error; this catches HTTP and MCP,
-        // which have no earlier check. An operation whose service is not ported
-        // still reports that, rather than a schema error about parameters it
-        // never reads.
-        let params = match (service_for(self.name), self.handler) {
-            (None, Handler::NotPorted) => params,
-            _ => validate::prepare(self.name, params)?,
-        };
         match self.handler {
             Handler::RegistryDump => Ok(dump()),
             Handler::NotPorted => match (service_for(self.name), ctx) {

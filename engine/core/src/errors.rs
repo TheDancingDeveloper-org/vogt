@@ -39,6 +39,10 @@ pub enum VogtError {
     },
     EngineOnly(String),
     InvalidRequest(String),
+    /// A parameter-validation failure (`invalid_request`, 400) that carries the
+    /// structured report beside its text, so the transports read the report off
+    /// the error itself rather than from ambient state (WI-4620).
+    InvalidArguments(Box<ValidationReport>),
     InstallClosed(String),
     LoginThrottled(String),
     InvalidCursor(String),
@@ -160,6 +164,7 @@ impl VogtError {
     pub fn message(&self) -> &str {
         match self {
             Self::Escalated { message, .. } => message,
+            Self::InvalidArguments(report) => &report.text,
             Self::NotInitialized(m)
             | Self::AlreadyInitialized(m)
             | Self::NotFound(m)
@@ -234,7 +239,7 @@ impl VogtError {
             Self::ReportRefused(_) => "report_refused",
             Self::PersonRequired(_) | Self::Escalated { .. } => "person_required",
             Self::EngineOnly(_) => "engine_only",
-            Self::InvalidRequest(_) => "invalid_request",
+            Self::InvalidRequest(_) | Self::InvalidArguments(_) => "invalid_request",
             Self::InstallClosed(_) => "install_closed",
             Self::LoginThrottled(_) => "login_throttled",
             Self::InvalidCursor(_) => "invalid_cursor",
@@ -318,6 +323,7 @@ impl VogtError {
             | Self::Escalated { .. }
             | Self::EngineOnly(_) => 403,
             Self::InvalidRequest(_)
+            | Self::InvalidArguments(_)
             | Self::InvalidCursor(_)
             | Self::ForgeAccountsNotConfigured(_)
             | Self::LinkRefused(_)
@@ -383,7 +389,7 @@ impl Loc {
 /// One rejected field, in the shape pydantic's `error` dict carries and
 /// FastAPI's 422 `detail` repeats: where, the error code, the message, and the
 /// value that was refused.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldError {
     pub loc: Vec<Loc>,
     pub error_type: String,
@@ -416,37 +422,21 @@ impl FieldError {
 
 /// A validation failure as data. `text` is the CLI message, unchanged. `errors`
 /// is what the HTTP and MCP renderers read, so neither has to parse that text.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReport {
     pub text: String,
     pub errors: Vec<FieldError>,
 }
 
-thread_local! {
-    static VALIDATION: std::cell::RefCell<Option<ValidationReport>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Remember the report for the validation error that is about to be returned.
-///
-/// `VogtError::InvalidRequest` carries only a string, and twenty-six sites build
-/// one, so the structured half travels beside it rather than inside it. The
-/// validator sets it and the transport reads it in the same call.
-pub fn record_validation(report: ValidationReport) {
-    VALIDATION.with(|slot| *slot.borrow_mut() = Some(report));
-}
-
-/// The report recorded for this error, if it is the validation failure just
-/// produced. A mismatch means the slot holds an older failure, and reading it
-/// would describe the wrong request, so it is dropped instead.
-pub fn take_validation(error: &VogtError) -> Option<ValidationReport> {
-    let VogtError::InvalidRequest(message) = error else {
-        return None;
-    };
-    VALIDATION.with(|slot| match slot.borrow_mut().take() {
-        Some(report) if report.text == *message => Some(report),
-        _ => None,
-    })
+impl VogtError {
+    /// The structured report a validation failure carries, if this is one. It
+    /// travels in the error, so it cannot be mistaken for another request's.
+    pub fn validation_report(&self) -> Option<&ValidationReport> {
+        match self {
+            Self::InvalidArguments(report) => Some(report),
+            _ => None,
+        }
+    }
 }
 
 /// Every `(code, http_status)` pair, in the order `errors.py` declares them.
