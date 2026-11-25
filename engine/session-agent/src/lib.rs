@@ -1083,6 +1083,24 @@ fn memory_files(root: &Path) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
+/// Whether the engine's reply to a bundle file POST is final for those bytes.
+/// A rate limit, a server fault and a 401 are not: a 401 can be a transient
+/// token miss (a registry race), and recording the marker would lose a
+/// refreshed credential until the file changed again. The file is retried at
+/// the next flush or at exit, never in a loop. The first 401 is logged once
+/// per process (status only, never a body or header) so a persistent one
+/// does not flood the log.
+fn bundle_reply_final(status: reqwest::StatusCode) -> bool {
+    static WARNED_401: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if status.as_u16() == 401 {
+        if !WARNED_401.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("session-agent: the engine answered 401 to a bundle write-back; it is retried at the next flush");
+        }
+        return false;
+    }
+    !(status.as_u16() == 429 || status.is_server_error())
+}
+
 /// Upload project memory when the deployment enabled it. Keyed by project,
 /// not by the pod's path or the leased account (WI-3371): the next session on
 /// the same project, on any account, reads it back.
@@ -1130,8 +1148,7 @@ async fn flush_memory(
             .send()
             .await
         {
-            let status = reply.status();
-            if !(status.as_u16() == 429 || status.is_server_error()) {
+            if bundle_reply_final(reply.status()) {
                 seen.insert(path, marker);
             }
         }
@@ -1208,8 +1225,7 @@ async fn flush_bundle(
                 .send()
                 .await
             {
-                let status = reply.status();
-                if !(status.as_u16() == 429 || status.is_server_error()) {
+                if bundle_reply_final(reply.status()) {
                     seen.insert(file.path, marker);
                 }
             }
@@ -3347,6 +3363,108 @@ mod tests {
             }
         });
         (format!("http://{address}"), bodies)
+    }
+
+    /// A fake engine that answers each bundle POST with the next status in
+    /// `statuses` (the last repeats) and counts the requests.
+    async fn scripted_bundle_status(
+        statuses: Vec<u16>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let at = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let status = statuses[at.min(statuses.len() - 1)];
+                let reply = "{\"ok\":true}";
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        (format!("http://{address}"), calls)
+    }
+
+    fn credentials_config(url: String, dir: &Path) -> Config {
+        let mut config = kill_config(url);
+        config.claude_config_dir = Some(dir.to_path_buf());
+        config.account = Some("acct".into());
+        config.conversation_id = None;
+        config.codex_home = None;
+        config
+    }
+
+    // WI-4709: a 401 (a transient token miss) must not mark the refreshed
+    // credential as seen; the next flush posts it again.
+    #[tokio::test]
+    async fn a_401_then_success_stores_the_credential_on_the_next_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"{\"fake\":\"cred\"}").unwrap();
+        let (url, calls) = scripted_bundle_status(vec![401, 200]).await;
+        let config = credentials_config(url, dir.path());
+        let tls = tls_config().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut offsets = std::collections::HashMap::new();
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(seen.is_empty(), "a 401 must not record the marker");
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(seen.len(), 1, "the 200 records the marker");
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a stored credential is not re-sent"
+        );
+    }
+
+    // WI-4709: a persistent 401 is one POST per flush, never a loop, and
+    // never records the marker.
+    #[tokio::test]
+    async fn a_persistent_401_posts_once_per_flush_and_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"{\"fake\":\"cred\"}").unwrap();
+        let (url, calls) = scripted_bundle_status(vec![401]).await;
+        let config = credentials_config(url, dir.path());
+        let tls = tls_config().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut offsets = std::collections::HashMap::new();
+        for flush in 1..=3 {
+            flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), flush);
+            assert!(seen.is_empty());
+        }
     }
 
     // WI-3868: a Codex pod has no Claude root or account; its own rollout must
