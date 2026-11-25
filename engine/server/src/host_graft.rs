@@ -83,9 +83,72 @@ impl HostGraftCredential {
 
     /// Withdraw the local copy first, then ask graft to revoke the token.
     pub async fn revoke(self) -> Result<(), SourceError> {
-        self.remove_delivered();
-        self.provider.revoke_credential(&self.minted).await
+        self.into_remote_revoke().revoke().await
     }
+
+    /// Take the delivered copy away now and keep only what is needed to
+    /// revoke the token at graft later (WI-4216).
+    ///
+    /// Call this synchronously where the run ends, then hand the result to a
+    /// task. Two things must not happen late: removing the delivered file, and
+    /// reading the provider's copy. A wake mints under the same paths (they
+    /// are keyed by session), so a task that did either would delete or revoke
+    /// the new run's token. The provider's copy is moved aside here, so the
+    /// task revokes the old run's token and nothing else.
+    pub fn into_remote_revoke(self) -> RemoteRevoke {
+        self.remove_delivered();
+        let minted = set_aside(&self.minted).unwrap_or(self.minted);
+        RemoteRevoke {
+            provider: self.provider,
+            minted,
+        }
+    }
+}
+
+/// What is left of a host credential once its local copy is gone: the remote
+/// revoke only. It never touches the delivered path.
+pub struct RemoteRevoke {
+    provider: Arc<dyn SourceProvider>,
+    minted: CredentialHandle,
+}
+
+impl RemoteRevoke {
+    pub async fn revoke(self) -> Result<(), SourceError> {
+        let result = self.provider.revoke_credential(&self.minted).await;
+        // The set-aside directory is empty once the provider has consumed the
+        // copy; a copy it kept (no minter) leaves it in place.
+        if let Some(dir) = self.minted.path.parent() {
+            if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(SET_ASIDE_PREFIX))
+            {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        result
+    }
+}
+
+const SET_ASIDE_PREFIX: &str = ".revoking-";
+
+/// Move the provider's copy under a directory only this revoke uses, keeping
+/// its file name (a provider reads the session id from it).
+fn set_aside(minted: &CredentialHandle) -> Option<CredentialHandle> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let name = minted.path.file_name()?;
+    let dir = minted
+        .path
+        .parent()?
+        .join(format!("{SET_ASIDE_PREFIX}{}", uuid::Uuid::new_v4()));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    let path = dir.join(name);
+    if std::fs::rename(&minted.path, &path).is_err() {
+        let _ = std::fs::remove_dir(&dir);
+        return None;
+    }
+    Some(CredentialHandle { path })
 }
 
 /// The config directory inherited by host children.
@@ -147,6 +210,9 @@ mod tests {
         root: PathBuf,
         requests: Mutex<Vec<CredentialRequest>>,
         revoked: Mutex<usize>,
+        /// The token each revoke found in the copy it was handed.
+        revoked_tokens: Mutex<Vec<String>>,
+        mints: Mutex<usize>,
     }
 
     impl FakeProvider {
@@ -155,6 +221,8 @@ mod tests {
                 root: root.to_owned(),
                 requests: Mutex::new(Vec::new()),
                 revoked: Mutex::new(0),
+                revoked_tokens: Mutex::new(Vec::new()),
+                mints: Mutex::new(0),
             }
         }
     }
@@ -179,7 +247,14 @@ mod tests {
             Box::pin(async move {
                 self.requests.lock().unwrap().push(request.clone());
                 let path = self.root.join(request.session.to_string());
-                std::fs::write(&path, "minted-secret").unwrap();
+                // The first mint is "minted-secret"; a wake's is a new value.
+                let mut mints = self.mints.lock().unwrap();
+                *mints += 1;
+                let token = match *mints {
+                    1 => "minted-secret".to_owned(),
+                    n => format!("minted-secret-{n}"),
+                };
+                std::fs::write(&path, token).unwrap();
                 Ok(CredentialHandle { path })
             })
         }
@@ -189,6 +264,9 @@ mod tests {
         ) -> crate::source_provider::SourceFuture<'a, ()> {
             Box::pin(async move {
                 *self.revoked.lock().unwrap() += 1;
+                if let Ok(token) = std::fs::read_to_string(&credential.path) {
+                    self.revoked_tokens.lock().unwrap().push(token);
+                }
                 let _ = std::fs::remove_file(&credential.path);
                 Ok(())
             })
@@ -279,6 +357,67 @@ mod tests {
         credential.revoke().await.unwrap();
         assert!(!delivered.exists());
         assert_eq!(*provider.revoked.lock().unwrap(), 1);
+    }
+
+    /// A wake that follows a stop quickly mints under the same paths before
+    /// the stop's revoke task runs. That late revoke must neither delete the
+    /// new delivered file nor revoke the new token (WI-4216). Before the fix
+    /// the task called `revoke()`, which removed the delivered path again and
+    /// whose provider read the shared copy, so this fails on both counts.
+    #[tokio::test]
+    async fn a_late_revoke_of_the_old_run_leaves_the_new_runs_token_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(FakeProvider::new(tmp.path()));
+        let request = CredentialRequest {
+            session: Uuid::new_v4(),
+            session_ref: Some("ses_WAKE".into()),
+            work_item: None,
+            budget: None,
+            oversight: false,
+        };
+        let home = tmp.path().join("config");
+        let first = HostGraftCredential::provision(provider.clone(), &source(), &request, &home)
+            .await
+            .unwrap();
+        let delivered = first.path().to_owned();
+
+        // The stop: the exit hook takes the files away and spawns the task.
+        let late = first.into_remote_revoke();
+        assert!(!delivered.exists());
+
+        // The wake mints a new token before the task has run.
+        let second = HostGraftCredential::provision(provider.clone(), &source(), &request, &home)
+            .await
+            .unwrap();
+        assert_eq!(second.path(), delivered);
+
+        // The late task now runs.
+        late.revoke().await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&delivered).unwrap(),
+            "minted-secret-2",
+            "the new run's delivered token was removed"
+        );
+        assert_eq!(
+            *provider.revoked_tokens.lock().unwrap(),
+            vec!["minted-secret".to_owned()],
+            "only the old run's token may be revoked"
+        );
+        assert!(
+            provider.root.join(request.session.to_string()).is_file(),
+            "the new run's provider copy was consumed"
+        );
+        let leftovers = std::fs::read_dir(&provider.root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(SET_ASIDE_PREFIX)
+            })
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]
