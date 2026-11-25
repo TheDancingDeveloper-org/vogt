@@ -1300,6 +1300,108 @@ const GRADLE_OPTS: &str = "-Dorg.gradle.daemon.idletimeout=1800000 \
 -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g \
 -Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\"";
 
+/// Tool caps derived from a pod's memory limit (WI-4748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolCaps {
+    cargo_jobs: u64,
+    gradle_mib: u64,
+    kotlin_mib: u64,
+    jvm_mib: u64,
+}
+
+/// Bytes of a Kubernetes memory quantity (`1Gi`, `6144Mi`, `2G`, `500000`);
+/// `None` for anything else, including a milli-suffix or zero.
+fn memory_bytes(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, factor) = [
+        ("Ti", 1u64 << 40),
+        ("Gi", 1 << 30),
+        ("Mi", 1 << 20),
+        ("Ki", 1 << 10),
+        ("T", 1_000_000_000_000),
+        ("G", 1_000_000_000),
+        ("M", 1_000_000),
+        ("K", 1_000),
+        ("k", 1_000),
+    ]
+    .into_iter()
+    .find_map(|(suffix, f)| raw.strip_suffix(suffix).map(|d| (d, f)))
+    .unwrap_or((raw, 1));
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(factor)?;
+    (bytes > 0).then_some(bytes)
+}
+
+/// Splits 70% of the pod memory limit between the build tools, so a heavy
+/// build cannot push the pod over its limit and get OOM-killed.
+///
+/// Shares of the limit: Gradle daemon heap 28%, Kotlin daemon heap 17%, any
+/// other JVM (`JAVA_TOOL_OPTIONS`, e.g. Soot) 10%, cargo 15% at an estimated
+/// 512 MiB per job, rounded down, at least one job. Each heap is at least
+/// 128 MiB. The caps add up to at most 70% of the limit from about 3.5 GiB
+/// upward; a smaller pod keeps one cargo job and the 128 MiB floors, so it can
+/// exceed 70%.
+///
+/// | limit | cargo jobs | Gradle | Kotlin | other JVM | sum (jobs at 512 MiB) |
+/// |-------|-----------|--------|--------|-----------|-----------------------|
+/// | 1Gi   | 1         | 286m   | 174m   | 128m      | 1100m (107%, floors)  |
+/// | 6Gi   | 1         | 1720m  | 1044m  | 614m      | 3890m (63%)           |
+/// | 8Gi   | 2         | 2293m  | 1392m  | 819m      | 5528m (67%)           |
+fn derive_tool_caps(limit_bytes: u64) -> ToolCaps {
+    const MIB: u64 = 1 << 20;
+    let mib = limit_bytes / MIB;
+    let heap = |percent: u64| (mib * percent / 100).max(128);
+    ToolCaps {
+        cargo_jobs: (mib * 15 / 100 / 512).max(1),
+        gradle_mib: heap(28),
+        kotlin_mib: heap(17),
+        jvm_mib: heap(10),
+    }
+}
+
+/// `GRADLE_OPTS` with the Gradle and Kotlin heaps taken from `caps`.
+fn gradle_opts_for(caps: &ToolCaps) -> String {
+    format!(
+        "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx{}m \
+-Dorg.gradle.jvmargs=\"-Xmx{}m -XX:MaxMetaspaceSize=1G\"",
+        caps.kotlin_mib, caps.gradle_mib
+    )
+}
+
+/// The memory limit the pod gets: the deployment default with the template
+/// policy's map merged over it, as `pod_template` builds the container.
+fn effective_memory_limit(cfg: &PodConfig, policy: Option<&PodTemplatePolicy>) -> Option<u64> {
+    let limits = merge_resources(
+        &cfg.resource_limits,
+        policy.and_then(|p| p.resource_limits.as_ref()),
+    );
+    memory_bytes(&limits.get("memory")?.0)
+}
+
+/// Adds the derived caps to `env`, leaving every name already set (by the
+/// operator or the template) alone. No limit, or one that does not parse,
+/// keeps the fixed `GRADLE_OPTS` and sets nothing else.
+fn push_tool_cap_env(env: &mut Vec<EnvVar>, limit_bytes: Option<u64>) {
+    let caps = limit_bytes.map(derive_tool_caps);
+    let mut set = |name: &str, value: String| {
+        if !env.iter().any(|e| e.name == name) {
+            env.push(EnvVar {
+                name: name.into(),
+                value: Some(value),
+                ..Default::default()
+            });
+        }
+    };
+    match caps {
+        Some(caps) => {
+            set("GRADLE_OPTS", gradle_opts_for(&caps));
+            set("CARGO_BUILD_JOBS", caps.cargo_jobs.to_string());
+            set("JAVA_TOOL_OPTIONS", format!("-Xmx{}m", caps.jvm_mib));
+        }
+        None => set("GRADLE_OPTS", GRADLE_OPTS.into()),
+    }
+}
+
 /// Volumes in `pod` that a session can write and another session's pod can
 /// also mount: any claim, host path, NFS or CSI source without both the
 /// volume and the mount marked read-only. `emptyDir`, Secret, ConfigMap,
@@ -1814,11 +1916,8 @@ pub fn pod_template(
         value: Some("1".into()),
         ..Default::default()
     });
-    env.push(EnvVar {
-        name: "GRADLE_OPTS".into(),
-        value: Some(GRADLE_OPTS.into()),
-        ..Default::default()
-    });
+    let policy = cfg.template_policies.get(&template.name);
+    push_tool_cap_env(&mut env, effective_memory_limit(cfg, policy));
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1863,7 +1962,6 @@ pub fn pod_template(
             ..Default::default()
         });
     }
-    let policy = cfg.template_policies.get(&template.name);
     // Each cache object is optional: an empty name leaves it out.
     let mut env_from = Vec::new();
     if !cfg.cache_env_config_map.is_empty() {
@@ -5004,6 +5102,114 @@ mod tests {
         assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
     }
 
+    /// The pod env of a template named `Pod` under `cfg` with `extra` carried.
+    fn cap_env(cfg: &PodConfig, extra: &[(String, String)]) -> BTreeMap<String, String> {
+        let mut template = SessionTemplate::default_templates_on("pod")
+            .into_iter()
+            .next()
+            .unwrap();
+        template.name = "Pod".into();
+        template.command = None;
+        let pod = pod_template(
+            cfg,
+            &template,
+            Uuid::nil(),
+            &default_source(cfg),
+            extra,
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+        );
+        pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.value.unwrap_or_default()))
+            .collect()
+    }
+
+    fn cfg_with_memory(memory: &str) -> PodConfig {
+        with_policy(&format!(
+            r#"{{"Pod":{{"resource_limits":{{"memory":"{memory}"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn tool_caps_follow_the_template_memory_limit() {
+        let six = cap_env(&cfg_with_memory("6Gi"), &[]);
+        assert_eq!(six["CARGO_BUILD_JOBS"], "1");
+        assert_eq!(six["JAVA_TOOL_OPTIONS"], "-Xmx614m");
+        assert!(
+            six["GRADLE_OPTS"].contains("-Xmx1720m"),
+            "{}",
+            six["GRADLE_OPTS"]
+        );
+        assert!(six["GRADLE_OPTS"].contains("kotlin.daemon.jvmargs=-Xmx1044m"));
+        let eight = cap_env(&cfg_with_memory("8Gi"), &[]);
+        assert_eq!(eight["CARGO_BUILD_JOBS"], "2");
+        assert_eq!(eight["JAVA_TOOL_OPTIONS"], "-Xmx819m");
+        assert!(eight["GRADLE_OPTS"].contains("-Xmx2293m"));
+        // The deployment default (1Gi) is derived too, down to the floors.
+        let one = cap_env(&PodConfig::default(), &[]);
+        assert_eq!(one["CARGO_BUILD_JOBS"], "1");
+        assert_eq!(one["JAVA_TOOL_OPTIONS"], "-Xmx128m");
+        assert!(one["GRADLE_OPTS"].contains("-Xmx286m"));
+    }
+
+    #[test]
+    fn an_unparsable_limit_keeps_the_fixed_gradle_opts_and_sets_nothing_else() {
+        let env = cap_env(&cfg_with_memory("lots"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        let mut no_memory = PodConfig::default();
+        no_memory.resource_limits.remove("memory");
+        let env = cap_env(&no_memory, &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn an_explicit_value_is_never_overridden() {
+        let extra = [
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+            ("JAVA_TOOL_OPTIONS".to_string(), "-Xmx9g".to_string()),
+            ("GRADLE_OPTS".to_string(), "-Dmine=1".to_string()),
+        ];
+        let env = cap_env(&cfg_with_memory("6Gi"), &extra);
+        assert_eq!(env["CARGO_BUILD_JOBS"], "4");
+        assert_eq!(env["JAVA_TOOL_OPTIONS"], "-Xmx9g");
+        assert_eq!(env["GRADLE_OPTS"], "-Dmine=1");
+    }
+
+    #[test]
+    fn derived_caps_stay_within_70_percent_from_4gi_up() {
+        const MIB: u64 = 1 << 20;
+        for gib in [4u64, 5, 6, 8, 12, 16, 32, 64] {
+            let limit = gib << 30;
+            let c = derive_tool_caps(limit);
+            let total = (c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512) * MIB;
+            assert!(total * 100 <= limit * 70, "{gib}Gi: {total} of {limit}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_parse_or_are_refused() {
+        assert_eq!(memory_bytes("6Gi"), Some(6 << 30));
+        assert_eq!(memory_bytes("512Mi"), Some(512 << 20));
+        assert_eq!(memory_bytes("2G"), Some(2_000_000_000));
+        assert_eq!(memory_bytes("1048576"), Some(1 << 20));
+        for bad in ["", "0", "lots", "1.5Gi", "-1Gi", "500m"] {
+            assert_eq!(memory_bytes(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn the_agent_container_carries_gradle_daemon_limits_outside_home() {
         // WI-898: the `session-home` emptyDir hides `/home/vogt/.gradle`, so
@@ -5018,11 +5224,12 @@ mod tests {
             .and_then(|e| e.value.as_deref())
             .expect("GRADLE_OPTS");
         assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
-        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
+        // The 1Gi default limit derives Kotlin 174m (17%) and Gradle 286m (28%).
+        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx174m"));
         // The Flutter templates set `org.gradle.jvmargs=-Xmx8G ...` in the
         // project's gradle.properties; a system property outranks that file.
         assert!(
-            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\""),
+            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx286m -XX:MaxMetaspaceSize=1G\""),
             "{opts}"
         );
         // The home mount is what hides the image's gradle.properties.
