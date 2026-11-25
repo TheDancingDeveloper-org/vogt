@@ -793,7 +793,7 @@ impl SessionRegistry {
             target: "vogt::audit",
             event = "session.pod.deadline_ended",
             session = %id,
-            name = %name,
+            name = ?name,
             "a session pod was stopped at its active deadline"
         );
         if let Some(sink) = self.deadline_ended_sink.get() {
@@ -7693,6 +7693,47 @@ mod host_placement_tests {
         assert!(pinned.is_alive());
         assert!(!worker.is_alive());
         assert_eq!(*raised.lock(), vec![worker.id]);
+        stop_all(&sessions);
+    }
+
+    /// WI-4409: a worker's free-text name is logged as a Debug field, so a
+    /// newline in it is escaped and cannot forge a second audit line.
+    #[tokio::test]
+    async fn a_newline_in_a_deadline_name_cannot_forge_an_audit_line() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let worker = sessions.create(spec("w", None)).unwrap();
+        *worker.name.lock() = "w\nlevel=WARN session.pod.deadline_ended forged".into();
+
+        let out = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let out = out.clone();
+                move || out.clone()
+            })
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            sessions.report_deadline_ended(worker.id);
+        });
+
+        let text = String::from_utf8(out.0.lock().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{text:?}");
+        assert!(lines[0].contains(r#"name="w\nlevel=WARN"#), "{text:?}");
         stop_all(&sessions);
     }
 
