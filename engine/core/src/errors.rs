@@ -6,11 +6,17 @@
 //! parent's status unless it sets its own, which is how `InvalidParams` is 422
 //! while every other `InvalidRequest` is 400.
 
-#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::fmt;
 
 /// One deliberate failure. The string is the message, `str(exc)` in Python.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "AlreadyInitialized, ImportParityRefused and MigrationLocked keep the Python error table; nothing constructs them yet"
+    )
+)]
 pub enum VogtError {
     NotInitialized(String),
     AlreadyInitialized(String),
@@ -351,6 +357,7 @@ impl VogtError {
     }
 
     /// The body `adapters/http/app.py` writes for a `VogtError`.
+    #[cfg(test)]
     pub fn http_body(&self) -> String {
         serde_json::json!({
             "error": {"code": self.code(), "message": self.message()}
@@ -441,6 +448,7 @@ impl VogtError {
 
 /// Every `(code, http_status)` pair, in the order `errors.py` declares them.
 /// The base `VogtError` (`error`, 500) is never raised on its own.
+#[cfg(test)]
 pub fn error_table() -> &'static [(&'static str, u16)] {
     &[
         ("not_initialized", 409),
