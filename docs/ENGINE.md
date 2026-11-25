@@ -1924,6 +1924,9 @@ normalised to `\n`.
   `/input` directly bypasses that row and leaves only the engine's
   `vogt::audit` "mutating request" log line (token name, method, path,
   status). Use the core's operation unless it cannot do what is needed.
+  The core's own system writes (the CI notice, the context-rotation ask) leave
+  the same row, with `system: true` and a `source`. `project.write` as well as
+  `work.write` maps to `sessions` here, so either can call `/input` directly.
 - **Any `sessions` holder can type into any session**, including one a
   person is using. There is no per-session grant (`API.md`, "Who may read
   and type into sessions"). The one exception is a permission prompt.

@@ -26,9 +26,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::adapters::engine::EngineClient;
 use crate::adapters::forge::KIND_CHECK;
 use crate::application::context::AppContext;
+use crate::application::services::sessions::audit_system_input;
 use crate::config::VogtConfig;
 use crate::core::{Clock, IdFactory, Moment, Observation, WorkOverlay, TERMINAL_STATES};
 use crate::decisions::{self, BranchCi, BranchState, HungPhase, HungRun, HungThresholds};
@@ -353,12 +353,7 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
                     .collect(),
             }
         };
-        let nudged = nudge(
-            ctx.engine.as_ref(),
-            ctx.config.ci_watch_notify_sessions,
-            &sessions,
-            &notice_text(&bound),
-        )?;
+        let nudged = nudge(ctx, &sessions, &notice_text(&bound))?;
         ctx.declared.publish_event(
             CI_BRANCH_CONCLUDED_EVENT,
             "work_item_branch",
@@ -401,12 +396,7 @@ fn announce_hung<C: Clock + 'static, I: IdFactory + 'static>(
                     .collect(),
             }
         };
-        let nudged = nudge(
-            ctx.engine.as_ref(),
-            ctx.config.ci_watch_notify_sessions,
-            &sessions,
-            &hung_notice_text(bound, hung),
-        )?;
+        let nudged = nudge(ctx, &sessions, &hung_notice_text(bound, hung))?;
         ctx.declared.publish_event(
             CI_RUN_HUNG_EVENT,
             "ci_run",
@@ -433,24 +423,44 @@ fn announce_hung<C: Clock + 'static, I: IdFactory + 'static>(
 /// Type the notice and then Enter into each session. A session at a permission
 /// prompt refuses the input (WI-983): that is a person's answer to give, so the
 /// session hears about the conclusion the next time it reads the Inbox.
-fn nudge(
-    engine: Option<&EngineClient>,
-    notify: bool,
+fn nudge<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
     engine_ids: &[String],
     text: &str,
 ) -> Result<usize, VogtError> {
-    let Some(engine) = engine.filter(|_| notify) else {
+    let Some(engine) = ctx
+        .engine
+        .as_ref()
+        .filter(|_| ctx.config.ci_watch_notify_sessions)
+    else {
         return Ok(0);
     };
     let mut sent = 0;
     for engine_id in engine_ids {
         // The text, then the Enter that submits it. The Enter is sent only when
-        // the text was taken.
-        let delivered = || -> Result<bool, VogtError> {
-            Ok(engine.send_input(engine_id, text, false, false, None)?
-                && engine.send_input(engine_id, "", true, false, None)?)
+        // the text was taken. Text that was typed is audited even when the
+        // Enter was refused: it is on the terminal either way.
+        let mut typed = false;
+        let mut delivered = || -> Result<bool, VogtError> {
+            typed = engine.send_input(engine_id, text, false, false, None)?;
+            Ok(typed && engine.send_input(engine_id, "", true, false, None)?)
         };
-        match delivered() {
+        let result = delivered();
+        if typed {
+            // The audit never holds the text. A failed audit is logged, not
+            // retried: retyping the notice would be worse than the gap.
+            if let Err(error) = audit_system_input(
+                ctx,
+                engine_id,
+                "ci_watch",
+                "CI conclusion notice typed into a session bound to the branch",
+                text.len(),
+                matches!(result, Ok(true)),
+            ) {
+                tracing::warn!(target: "vogt.ci_watch", session = %engine_id, error = %error.message(), "could not audit a CI notice typed into a session");
+            }
+        }
+        match result {
             Ok(true) => sent += 1,
             Ok(false) => {}
             Err(VogtError::PersonRequired(_)) => {
@@ -781,6 +791,72 @@ mod tests {
 
         assert_eq!(announce_concluded(ctx).unwrap(), 0, "once per conclusion");
         assert_eq!(concluded_events(&built).len(), 1);
+    }
+
+    #[test]
+    fn a_nudge_typed_into_a_session_leaves_one_audit_row_and_never_the_text() {
+        // WI-834: the notice is text on a PTY, so it is audited like any
+        // `session.input`: session, byte count, submit; never the text.
+        let (seen, engine) = recording_engine();
+        let built = bound_instance("nudge-audit", Some(engine));
+        let ctx = context(&built);
+        live_session(ctx, "eng-nudge");
+        let at = stamp(ctx);
+        seed(
+            ctx,
+            &[("ci", Some("failure")), ("lint", Some("success"))],
+            &at,
+        );
+        assert_eq!(announce_concluded(ctx).unwrap(), 1);
+        let typed = seen.lock().unwrap()[0].clone();
+        assert!(typed.contains("[vogt] CI FAILED on wi-1"), "{typed}");
+
+        let view = ctx.declared.read().unwrap();
+        let rows = view
+            .list_audit(&crate::storage::interface::AuditQuery {
+                limit: 20,
+                offset: 0,
+                actor_id: None,
+                operation: Some("session.input".to_string()),
+                entity_id: None,
+                project_id: None,
+                since: None,
+                until: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one audit row per nudged session: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.entity_kind, "session");
+        let session = view
+            .session_by_engine_id("eng-nudge")
+            .unwrap()
+            .expect("the session is linked");
+        assert_eq!(row.entity_id, session.id);
+        let events = view.list_events(0, 500, None).unwrap();
+        let input: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "session.input")
+            .collect();
+        assert_eq!(input.len(), 1, "{events:?}");
+        assert_eq!(input[0].summary["bytes"], notice_len(&typed));
+        assert_eq!(input[0].summary["submit"], true);
+        assert_eq!(input[0].summary["source"], "ci_watch");
+        assert_eq!(input[0].summary["keys"], json!([]));
+        assert!(
+            !format!("{rows:?}").contains("CI FAILED")
+                && !events.iter().any(|e| {
+                    e.kind == "session.input" && format!("{e:?}").contains("CI FAILED")
+                }),
+            "an audit row or its event holds the typed text"
+        );
+    }
+
+    /// The `text` byte length in a recorded `POST .../input` line.
+    fn notice_len(line: &str) -> usize {
+        let body = line.split_once("\r\n\r\n").map_or(line, |(_, body)| body);
+        let start = body.find('{').expect("a JSON body");
+        let value: Value = serde_json::from_str(&body[start..]).expect("JSON body");
+        value["text"].as_str().expect("text").len()
     }
 
     #[test]
