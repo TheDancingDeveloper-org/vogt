@@ -792,6 +792,16 @@ form, and every `session.input` is audited. Calling the engine directly is
 the fallback for what they do not wrap. The recipe is in
 [Driving a session](#driving-a-session) below.
 
+`session.start`'s `resume` takes either the agent CLI's own conversation id
+(the `conversation_id` of a `session.history_list` row; its `resume_template`
+names the template to start it with) or the id of a session Vogt or the engine
+knows (`ses_…` or engine UUID). vogt-core resolves the latter before it asks
+the engine, which only ever sees conversation ids: it sends that session's
+recorded `conversation_id` and, when the caller named no `template`, its
+`resume_template`. A session with no recorded conversation, or a `template`
+that conflicts with its `resume_template`, is refused (`invalid_request`).
+A value that names no known session is passed through unchanged.
+
 #### Reaching the engine from a session
 
 Every session the engine spawns has `VOGT_ENGINE_URL` in its environment: the
