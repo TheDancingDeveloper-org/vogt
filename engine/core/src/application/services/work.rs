@@ -2007,7 +2007,7 @@ const SESSIONS_NEWEST_STOPPED: usize = 3;
 /// until it is adopted. Branches and the git story are derived reads and come
 /// back for either. The default is lean: the item, its newest comments, its
 /// relations and its delivery. `include=all` is the full shape.
-fn get_work<C: Clock, I: IdFactory>(
+fn get_work<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: GetParams,
 ) -> Result<Value, VogtError> {
@@ -2088,7 +2088,7 @@ fn get_work<C: Clock, I: IdFactory>(
     }
     if include.all {
         out.insert("walked".into(), json!([]));
-        out.insert("live_sessions".into(), json!([]));
+        out.insert("live_sessions".into(), json!(live_sessions_of(ctx, &item)));
         // Always present, null when no transition recorded a claim. Python's
         // WorkResult serializes the field even when it is None; omitting the
         // key fails a client that decodes the schema.
@@ -2297,6 +2297,44 @@ fn require_verification(
 
 /// Sessions bound to a declared item. An upstream item has no declared id, so
 /// it has no sessions; the live engine half is not joined here.
+/// The sessions still bound to `item` and alive or hibernated, as the full
+/// session rows the web's `liveSessionsWarning` reads (WI-998, WI-4746).
+/// Python's `_warn_live_sessions` defines "live" the same way. A warning,
+/// never a refusal: an engine that cannot be asked, or a failed read, yields
+/// no rows rather than failing a write that already happened.
+fn live_sessions_of<C, I>(ctx: &AppContext<C, I>, item: &WorkItem) -> Vec<Value>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if item.id.is_empty() {
+        return Vec::new();
+    }
+    let params = super::sessions::ListSessionsParams {
+        project: None,
+        work_item: Some(item.reference.clone()),
+        include_stopped: false,
+        limit: 200,
+        offset: 0,
+        order: "started".to_string(),
+        mode: "full".to_string(),
+        states: None,
+        stall_after_minutes: 10,
+        include_hidden: false,
+        fields: None,
+        started_by_session: None,
+    };
+    let Ok(listed) = super::sessions::list_sessions(ctx, &params) else {
+        return Vec::new();
+    };
+    listed
+        .sessions
+        .into_iter()
+        .filter(|row| row.alive == Some(true) || row.activity.as_deref() == Some("hibernated"))
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .collect()
+}
+
 fn sessions_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     view: &impl crate::storage::interface::ReadView,
@@ -3050,6 +3088,12 @@ where
             },
         )?;
     }
+    // Only a move into a finished state warns (WI-998); nothing is unbound.
+    let live = if TERMINAL_STATES.contains(&current.state.as_str()) {
+        live_sessions_of(ctx, &current)
+    } else {
+        Vec::new()
+    };
     Ok(json!({
         "item": current,
         "comments": [],
@@ -3057,7 +3101,7 @@ where
         "branches": [],
         "git": null,
         "walked": if walk { path } else { Vec::<String>::new() },
-        "live_sessions": [],
+        "live_sessions": live,
     }))
 }
 
