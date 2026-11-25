@@ -377,7 +377,7 @@ pub struct ListWorkParams {
     /// Include done and wont_do items.
     #[serde(default)]
     pub include_finished: bool,
-    /// Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). One extra grouped read for the whole page. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    /// Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
     #[serde(default)]
     pub with_sessions: bool,
     /// `summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.

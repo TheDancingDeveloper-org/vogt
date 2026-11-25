@@ -591,7 +591,7 @@ pub trait ReadView {
     ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
 
     /// The sessions Vogt has not stopped that are bound to any of `work_item_ids`,
-    /// in ONE query (WI-4751). Newest first. Whether a row is still alive is the
+    /// in one query per chunk of ids (WI-4751, WI-4753; a page of any size works). Newest first. Whether a row is still alive is the
     /// engine's to say; the caller joins that.
     fn unstopped_sessions_for_items(
         &self,
