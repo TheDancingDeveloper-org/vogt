@@ -142,10 +142,17 @@ def _missing_reply_detail(ctx: Context, identifier: str) -> str:
     message. Read the terminal and session state so the acceptance report
     keeps those two failures distinct.
     """
-    screen = ctx.client.tool(
-        "session_screen", {"id": identifier, "scrollback_lines": 80}
-    )
-    text = "\n".join(str(line) for line in screen.get("lines") or [])
+    # The screen is best-effort evidence: if the engine cannot render it, keep
+    # the transcript and session-state reads below rather than failing the
+    # whole reply lookup.
+    text = ""
+    try:
+        screen = ctx.client.tool(
+            "session_screen", {"id": identifier, "scrollback_lines": 80}
+        )
+        text = "\n".join(str(line) for line in screen.get("lines") or [])
+    except (HttpStatusError, ToolError):
+        pass
     # A TUI repaint can erase the completed failure from the rendered grid.
     # The engine's ANSI-stripped history is the durable copy of what was
     # printed, and is already redacted at the product boundary.
