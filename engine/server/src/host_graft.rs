@@ -97,7 +97,15 @@ impl HostGraftCredential {
     /// task revokes the old run's token and nothing else.
     pub fn into_remote_revoke(self) -> RemoteRevoke {
         self.remove_delivered();
-        let minted = set_aside(&self.minted).unwrap_or(self.minted);
+        // If the copy cannot be set aside, the only path left is the shared
+        // one a wake rewrites. Revoking through it could revoke the new run's
+        // token, so skip the remote revoke; the token's TTL is the backstop.
+        let minted = set_aside(&self.minted);
+        if minted.is_none() {
+            tracing::warn!(
+                "host graft credential could not be set aside; skipping its remote revoke"
+            );
+        }
         RemoteRevoke {
             provider: self.provider,
             minted,
@@ -109,20 +117,28 @@ impl HostGraftCredential {
 /// revoke only. It never touches the delivered path.
 pub struct RemoteRevoke {
     provider: Arc<dyn SourceProvider>,
-    minted: CredentialHandle,
+    /// `None` when the copy could not be set aside: nothing is revoked.
+    minted: Option<CredentialHandle>,
 }
 
 impl RemoteRevoke {
     pub async fn revoke(self) -> Result<(), SourceError> {
-        let result = self.provider.revoke_credential(&self.minted).await;
-        // The set-aside directory is empty once the provider has consumed the
-        // copy; a copy it kept (no minter) leaves it in place.
-        if let Some(dir) = self.minted.path.parent() {
+        let Some(minted) = self.minted else {
+            return Ok(());
+        };
+        let result = self.provider.revoke_credential(&minted).await;
+        // The provider has had its chance to revoke at graft. A copy it kept
+        // (no minter) would sit in this directory where the token sweep does
+        // not look, so delete it here; the token is dead after its TTL. Then
+        // remove the set-aside directory. Never rename it back to the shared
+        // name: that is the race this type exists to avoid.
+        if let Some(dir) = minted.path.parent() {
             if dir
                 .file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with(SET_ASIDE_PREFIX))
             {
+                let _ = std::fs::remove_file(&minted.path);
                 let _ = std::fs::remove_dir(dir);
             }
         }
@@ -418,6 +434,121 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    /// A provider with no minter keeps the file it is asked to revoke. The
+    /// set-aside copy must not be stranded where the token sweep never looks.
+    struct KeepingProvider(FakeProvider);
+
+    impl SourceProvider for KeepingProvider {
+        fn kind(&self) -> SourceKind {
+            SourceKind::Graft
+        }
+        fn checkout(
+            &self,
+            s: &SourceDescriptor,
+            p: &Path,
+            c: Option<&CredentialHandle>,
+        ) -> Result<(), SourceError> {
+            self.0.checkout(s, p, c)
+        }
+        fn mint_credential<'a>(
+            &'a self,
+            s: &'a SourceDescriptor,
+            r: &'a CredentialRequest,
+        ) -> crate::source_provider::SourceFuture<'a, CredentialHandle> {
+            self.0.mint_credential(s, r)
+        }
+        fn revoke_credential<'a>(
+            &'a self,
+            _: &'a CredentialHandle,
+        ) -> crate::source_provider::SourceFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn status(&self, p: &Path) -> Result<SourceStatus, SourceError> {
+            self.0.status(p)
+        }
+        fn diff(&self, p: &Path) -> Result<String, SourceError> {
+            self.0.diff(p)
+        }
+        fn log(&self, p: &Path, n: usize) -> Result<Vec<SourceLogEntry>, SourceError> {
+            self.0.log(p, n)
+        }
+        fn save_unlanded(&self, p: &Path, m: &str) -> Result<SavedWork, SourceError> {
+            self.0.save_unlanded(p, m)
+        }
+        fn land(
+            &self,
+            s: &SourceDescriptor,
+            p: &Path,
+            r: &crate::source_provider::LandRequest,
+        ) -> Result<LandOutcome, SourceError> {
+            self.0.land(s, p, r)
+        }
+        fn report_landed(
+            &self,
+            s: &SourceDescriptor,
+            r: &str,
+        ) -> Result<Vec<SourceLogEntry>, SourceError> {
+            self.0.report_landed(s, r)
+        }
+    }
+
+    fn request(session_ref: &str) -> CredentialRequest {
+        CredentialRequest {
+            session: Uuid::new_v4(),
+            session_ref: Some(session_ref.into()),
+            work_item: None,
+            budget: None,
+            oversight: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoke_whose_provider_keeps_the_file_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(KeepingProvider(FakeProvider::new(tmp.path())));
+        let credential = HostGraftCredential::provision(
+            provider.clone(),
+            &source(),
+            &request("ses_KEEP"),
+            &tmp.path().join("config"),
+        )
+        .await
+        .unwrap();
+        credential.revoke().await.unwrap();
+        let left: Vec<_> = std::fs::read_dir(&provider.0.root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with(SET_ASIDE_PREFIX))
+            .collect();
+        assert!(left.is_empty(), "stranded: {left:?}");
+    }
+
+    #[tokio::test]
+    async fn when_set_aside_fails_the_remote_revoke_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(FakeProvider::new(tmp.path()));
+        let req = request("ses_FAIL");
+        let home = tmp.path().join("config");
+        let first = HostGraftCredential::provision(provider.clone(), &source(), &req, &home)
+            .await
+            .unwrap();
+        // The provider's copy vanishes, so the rename fails.
+        std::fs::remove_file(&first.minted.path).unwrap();
+        let late = first.into_remote_revoke();
+        // A wake writes the shared path.
+        let second = HostGraftCredential::provision(provider.clone(), &source(), &req, &home)
+            .await
+            .unwrap();
+        late.revoke().await.unwrap();
+        assert_eq!(*provider.revoked.lock().unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(provider.root.join(req.session.to_string())).unwrap(),
+            "minted-secret-2"
+        );
+        drop(second);
     }
 
     #[test]
