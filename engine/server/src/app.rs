@@ -688,6 +688,11 @@ fn broker_routes() -> Router<Arc<AppState>> {
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
         .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
+        // A forge token for `git` from a `git:<host>` grant (WI-1331).
+        .route(
+            secret_broker::GIT_CREDENTIAL_ROUTE,
+            get(secret_broker::git_credential),
+        )
 }
 
 fn ws_routes() -> Router<Arc<AppState>> {

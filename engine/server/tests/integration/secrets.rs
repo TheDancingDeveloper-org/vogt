@@ -925,6 +925,156 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
     assert_eq!(late.status(), 409, "no grant for an exited session");
 }
 
+/// WI-1331: `GET /api/agent-auth/git-credential?host=` serves a `git:<host>`
+/// grant's token to its own session, spends a `once` grant, and refuses the
+/// rest: no token, a stranger's token, a wrong host, and a project outside the
+/// manifest all fail without a value.
+#[tokio::test]
+async fn the_git_credential_route_serves_a_git_grant_once_and_refuses_the_rest() {
+    const STACK: &str = "stack-secret-for-git-credential-1234567890";
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let helper = tmp.path().join("git-helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'forge-token-of-%s' \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    cfg.agent_auth_helper = helper;
+    cfg.vogt_core_token = Some(STACK.into());
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let operator = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let core = reqwest::Client::builder()
+        .default_headers(auth_for(STACK))
+        .build()
+        .unwrap();
+    let plain = reqwest::Client::new();
+    let target = create_session_id(&operator, &base, "pusher").await;
+    let other = create_session_id(&operator, &base, "bystander").await;
+    let target_token = state
+        .sessions
+        .secret_broker()
+        .issue(target.parse().unwrap());
+    let other_token = state.sessions.secret_broker().issue(other.parse().unwrap());
+    let ask = |token: Option<&str>, host: &str| {
+        let mut request = plain.get(format!("{base}/api/agent-auth/git-credential?host={host}"));
+        if let Some(token) = token {
+            request = request.bearer_auth(token.to_string());
+        }
+        request.send()
+    };
+    let in_an_hour = (OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let apply = |id: &str, reason: &str, uses: &str| {
+        core.post(format!("{base}/api/sessions/{target}/grants"))
+            .json(&json!({
+                "grant_id": id,
+                "var": format!("GIT_{id}"),
+                "project_id": "proj",
+                "secret_name": "forge-pat",
+                "uses": uses,
+                "expires_at": in_an_hour,
+                "reason": reason,
+            }))
+            .send()
+    };
+
+    // Unauthenticated and unknown callers learn nothing.
+    assert_eq!(ask(None, "github.com").await.unwrap().status(), 401);
+    assert_eq!(
+        ask(Some("not-a-token"), "github.com")
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    // No grant yet: 404 naming how to ask for one.
+    let none = ask(Some(&target_token), "github.com").await.unwrap();
+    assert_eq!(none.status(), 404);
+    assert!(none
+        .text()
+        .await
+        .unwrap()
+        .contains("session_grant_request reason=git:github.com"));
+
+    apply("g1", "git:GitHub.com push the scratch branch", "once")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // A wrong host, a prefix of a longer host, and another session: 404.
+    assert_eq!(
+        ask(Some(&target_token), "forge.example.com")
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        ask(Some(&target_token), "github.co")
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        ask(Some(&other_token), "github.com")
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    // The first ask is answered and spends the `once` grant.
+    let got = ask(Some(&target_token), "GITHUB.com").await.unwrap();
+    assert_eq!(got.status(), 200);
+    let body: Value = got.json().await.unwrap();
+    assert_eq!(body["username"], "x-access-token");
+    assert_eq!(body["token"], "forge-token-of-GIT_g1");
+    assert_eq!(
+        ask(Some(&target_token), "github.com")
+            .await
+            .unwrap()
+            .status(),
+        404,
+        "a once grant is spent by the first prompt"
+    );
+
+    // A ttl grant for another host answers repeatedly as user `git`; a grant
+    // whose reason is not a git one never does.
+    apply("g2", "git:forge.example.com mirror", "ttl")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    apply("g3", "the worker needs a key", "ttl")
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    for _ in 0..2 {
+        let got = ask(Some(&target_token), "forge.example.com").await.unwrap();
+        assert_eq!(got.status(), 200);
+        assert_eq!(got.json::<Value>().await.unwrap()["username"], "git");
+    }
+    assert_eq!(
+        ask(Some(&target_token), "other.example.com")
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    // A host that is not a plain hostname is refused before any lookup.
+    assert_eq!(
+        ask(Some(&target_token), "a%20b").await.unwrap().status(),
+        400
+    );
+}
+
 #[tokio::test]
 async fn a_session_is_handed_the_token_the_broker_honours() {
     // End to end through the real spawn: the token that lands in the child's
