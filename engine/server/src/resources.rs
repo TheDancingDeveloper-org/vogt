@@ -170,6 +170,12 @@ pub fn measure(
         processes: pids.len() as u32,
         sampled_at,
         over_threshold: warn_bytes.is_some_and(|w| rss_bytes >= w),
+        memory_current: None,
+        memory_max: None,
+        memory_peak: None,
+        oom_kill: None,
+        observed_at: None,
+        memory_warning: false,
     })
 }
 
@@ -202,6 +208,8 @@ pub struct Sampler {
     previous: HashMap<Uuid, Previous>,
     /// Each live session's `project` label, worked out once from its cwd.
     projects: HashMap<Uuid, Option<String>>,
+    /// Each live session's pod-memory warning state (WI-4752).
+    watches: HashMap<Uuid, crate::pod_memory::MemoryWatch>,
     page_size: u64,
     ticks_per_sec: u64,
     warn_bytes: Option<u64>,
@@ -212,6 +220,7 @@ impl Sampler {
         Self {
             previous: HashMap::new(),
             projects: HashMap::new(),
+            watches: HashMap::new(),
             page_size: sysconf(libc::_SC_PAGESIZE, 4096),
             ticks_per_sec: sysconf(libc::_SC_CLK_TCK, 100),
             warn_bytes,
@@ -231,6 +240,8 @@ impl Sampler {
         self.previous
             .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
         self.projects
+            .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
+        self.watches
             .retain(|id, _| sessions.iter().any(|(s, _)| s.id == *id));
         let Ok(table) = tokio::task::spawn_blocking(read_table).await else {
             return;
@@ -255,7 +266,7 @@ impl Sampler {
         let mut samples = Vec::with_capacity(sessions.len());
         let mut gauges = Vec::with_capacity(sessions.len());
         for (session, pid) in sessions {
-            let measured = measure(
+            let mut measured = measure(
                 &table,
                 &children,
                 pid,
@@ -266,6 +277,19 @@ impl Sampler {
                 self.warn_bytes,
                 sampled_at.clone(),
             );
+            let pod_memory = state
+                .agent_auth
+                .pod(session.id)
+                .and_then(|l| l.memory_observed());
+            if let Some(pod) = &pod_memory {
+                let watch = self.watches.entry(session.id).or_default();
+                for notice in watch.observe(&pod.memory) {
+                    deliver_notice(&session, &notice.text()).await;
+                }
+                if let Some(resources) = measured.as_mut() {
+                    crate::pod_memory::apply(resources, Some(pod), watch.warned());
+                }
+            }
             session.set_resources(measured.clone());
             if let Some(resources) = measured {
                 let project = self
@@ -292,6 +316,19 @@ impl Sampler {
         publish_session_gauges(&gauges);
         if !samples.is_empty() {
             state.bus.publish(ServerEvent::SessionResources { samples });
+        }
+    }
+}
+
+/// Tell a session's agent about its pod's memory by typing the notice into its
+/// prompt, as the overseer wake does. A held-back line (a dialog is open) is
+/// logged, not retried: the watch's latch has already fired for this crossing.
+async fn deliver_notice(session: &Arc<crate::pty::Session>, text: &str) {
+    match crate::autopilot::type_line(session, text, "pod memory notice").await {
+        Ok(crate::enter_guard::EnterOutcome::Sent) => {}
+        Ok(_) => tracing::warn!(session = %session.id, "pod memory notice held back by a dialog"),
+        Err(e) => {
+            tracing::warn!(session = %session.id, error = %e, "could not send a pod memory notice")
         }
     }
 }
@@ -544,6 +581,12 @@ mod tests {
             processes: 3,
             sampled_at: String::new(),
             over_threshold: false,
+            memory_current: None,
+            memory_max: None,
+            memory_peak: None,
+            oom_kill: None,
+            observed_at: None,
+            memory_warning: false,
         };
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();

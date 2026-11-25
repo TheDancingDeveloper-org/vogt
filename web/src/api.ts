@@ -139,6 +139,17 @@ export interface SessionResources {
   sampled_at: string;
   /** At or over the deployment's ENGINE_SESSION_RSS_WARN. */
   over_threshold?: boolean;
+  /** Pod cgroup memory from the pod agent's heartbeat (WI-4752); absent for host sessions. */
+  memory_current?: number;
+  /** The pod's limit; absent when unlimited or unknown. */
+  memory_max?: number;
+  memory_peak?: number;
+  /** Processes the OOM killer has killed in the pod. */
+  oom_kill?: number;
+  /** When the engine received the memory reading (RFC 3339); it can be older than `sampled_at`. */
+  observed_at?: string;
+  /** Pod memory reached 80% of its limit and has not dropped below 70%. */
+  memory_warning?: boolean;
 }
 
 /** An agent CLI and its own id for a conversation (engine `AgentConversation`). */

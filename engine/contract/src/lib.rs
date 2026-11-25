@@ -583,6 +583,27 @@ pub struct SessionResources {
     /// `rss_bytes` is at or over the deployment's `ENGINE_SESSION_RSS_WARN`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub over_threshold: bool,
+    /// The pod's cgroup memory in use, from the pod agent's latest heartbeat
+    /// that carried it (WI-4752). The four memory fields are absent for a
+    /// host session and for an agent that does not report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current: Option<u64>,
+    /// The pod's memory limit; absent when unlimited (`max`) or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_peak: Option<u64>,
+    /// Processes the kernel's OOM killer has killed in the pod's cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kill: Option<u64>,
+    /// RFC 3339: when the engine received that memory reading. Compare it with
+    /// `sampled_at`: a heartbeat without memory keeps the last reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    /// Pod memory reached 80% of `memory_max` and has not dropped below 70%
+    /// since: the engine has told the agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_warning: bool,
 }
 
 /// One session's entry in a `session-resources` event.
