@@ -83,6 +83,22 @@ pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
     files
 }
 
+/// `$CODEX_HOME` (empty counts as unset), else `$HOME/.codex` (empty `$HOME`
+/// counts as unset). An empty value must not become `PathBuf("")`, which joins
+/// to cwd-relative paths.
+fn codex_home_from_env(
+    codex_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    codex_home
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|h| !h.is_empty())
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
+}
+
 /// A file's modification time in milliseconds since the epoch: the version a
 /// `.claude.json` write carries.
 fn file_version(path: &Path) -> Option<u64> {
@@ -720,11 +736,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_BUFFER_BYTES),
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-            codex_home: std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
-                }),
+            codex_home: codex_home_from_env(
+                std::env::var_os("CODEX_HOME"),
+                std::env::var_os("HOME"),
+            ),
             workspace_root: std::env::var_os("VOGT_WORKSPACE_ROOT")
                 .filter(|root| !root.is_empty())
                 .map(PathBuf::from),
@@ -2677,6 +2692,22 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_home_env_ignores_empty_values() {
+        use std::ffi::OsString;
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(codex_home_from_env(os(""), os("")), None);
+        assert_eq!(
+            codex_home_from_env(os(""), os("/h")),
+            Some(PathBuf::from("/h/.codex"))
+        );
+        assert_eq!(
+            codex_home_from_env(os("/c"), os("/h")),
+            Some(PathBuf::from("/c"))
+        );
+        assert_eq!(codex_home_from_env(None, None), None);
+    }
+
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     /// A child whose signals are all refused, as an AppArmor signal rule does.
