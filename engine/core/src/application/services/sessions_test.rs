@@ -915,6 +915,27 @@ fn session_start_audit(built: &Built) -> serde_json::Value {
         .summary
 }
 
+/// WI-4707: a worktree the caller asked for is not marked droppable, so a pod
+/// still refuses it.
+#[test]
+fn a_callers_own_worktree_is_not_marked_droppable() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "implement");
+    params.worktree = Some(true);
+    start_session(ctx, &params).unwrap();
+    let asked = script.seen.lock().unwrap().join("\n");
+    assert!(asked.contains(r#""base_ref":"main""#), "{asked}");
+    assert!(asked.contains(r#""if_supported":false"#), "{asked}");
+}
+
 #[test]
 fn a_profile_sets_budget_worktree_and_repo_map_and_the_audit_records_them() {
     let script = script_with(vec![(
@@ -932,6 +953,8 @@ fn a_profile_sets_budget_worktree_and_repo_map_and_the_audit_records_them() {
     assert!(asked.contains(r#""turns":120"#), "{asked}");
     assert!(asked.contains(r#""wall_clock_minutes":90"#), "{asked}");
     assert!(asked.contains(r#""base_ref":"main""#), "{asked}");
+    // WI-4707: the profile's worktree is a default the engine may drop on a pod.
+    assert!(asked.contains(r#""if_supported":true"#), "{asked}");
     let audit = session_start_audit(&built);
     assert_eq!(audit["purpose"], "implement");
     assert_eq!(audit["overrides"], serde_json::json!([]));
