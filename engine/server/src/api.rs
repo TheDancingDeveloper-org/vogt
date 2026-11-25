@@ -1909,6 +1909,9 @@ pub struct OperationalStatus {
     /// The workspace volume (WI-1304). `needs_attention` once used space
     /// passes `ENGINE_DISK_WARN_PERCENT` (85 by default).
     pub disk: DiskStatus,
+    /// The nightly worktree build-output sweep (WI-1773): its mode and the
+    /// bytes its last run reclaimed (or, in dry-run, would reclaim).
+    pub worktree_sweep: crate::worktree_sweep::WorktreeSweepStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -2040,6 +2043,7 @@ pub async fn operational_status(
             workspace_root: state.config.workspace_root.display().to_string(),
         },
         disk: disk_status(&state.config.workspace_root, state.config.disk_warn_percent),
+        worktree_sweep: state.worktree_sweep.status(),
     }))
 }
 
