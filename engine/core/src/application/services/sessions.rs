@@ -708,6 +708,7 @@ impl<'de> serde::Deserialize<'de> for HibernateParams {
                 reason: require_string(params, "reason")?,
                 allow_shell: optional_bool(params, "allow_shell")?.unwrap_or(false),
                 cold_wake_opt_out: optional_bool(params, "cold_wake_opt_out")?,
+                superseded_by: optional_string(params, "superseded_by")?,
             })
         })
     }
@@ -1262,6 +1263,8 @@ pub struct HibernateParams {
     pub allow_shell: bool,
     /// Change the session's cold-wake opt-out (WI-2037); unset keeps it.
     pub cold_wake_opt_out: Option<bool>,
+    /// The session taking over this one's work, in either id form.
+    pub superseded_by: Option<String>,
 }
 
 // -- result models, field order matching application/models.py ---------------
@@ -3770,6 +3773,10 @@ where
     let engine = engine_of(ctx)?;
     let found = resolve_target(ctx, &params.id)?;
     let engine_id = found.engine_session_id.clone();
+    let successor = match params.superseded_by.as_deref() {
+        Some(text) if !text.is_empty() => Some(resolve_target(ctx, text)?.engine_session_id),
+        _ => None,
+    };
     if found
         .session
         .as_ref()
@@ -3781,7 +3788,7 @@ where
         )));
     }
     let hibernated = engine
-        .hibernate_session(&engine_id, Some(&reason), params.allow_shell, None)?
+        .hibernate_session(&engine_id, Some(&reason), params.allow_shell, successor.as_deref())?
         .ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the engine has no session {}, or predates hibernation (no POST /api/sessions/{{id}}/hibernate)",
@@ -6921,6 +6928,7 @@ mod tests {
                     reason: "freeing memory".to_string(),
                     allow_shell: false,
                     cold_wake_opt_out: None,
+                    superseded_by: None,
                 },
             )
             .unwrap();
@@ -6937,6 +6945,98 @@ mod tests {
             .unwrap()
             .iter()
             .any(|(_, path, _)| path.ends_with("/hibernate")));
+    }
+
+    fn hibernate_with_successor(successor: &str) -> (Result<(), VogtError>, Vec<String>) {
+        let (_dir, built, seen) = context(
+            "hibernate_successor",
+            person(),
+            None,
+            |_| {},
+            vec![live("eng-1")],
+        );
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.start", "test", |txn, actor| {
+                txn.insert_session(&CodingSession {
+                    id: "ses_2".to_string(),
+                    engine_session_id: "eng-2".to_string(),
+                    project_id: "prj_1".to_string(),
+                    work_item_id: None,
+                    actor_id: actor.id.clone(),
+                    cwd: "/work".to_string(),
+                    template: None,
+                    model: None,
+                    effort: None,
+                    reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
+                    started_at: Moment::from_unix(1_700_000_000, 0),
+                    stopped_at: None,
+                })?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "session",
+                    "ses_2",
+                    json!({}),
+                    "session.started",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+        });
+        let outcome = with_ctx!(&built, |ctx| hibernate(
+            ctx,
+            &HibernateParams {
+                id: "ses_1".to_string(),
+                reason: "handing on".to_string(),
+                allow_shell: false,
+                cold_wake_opt_out: None,
+                superseded_by: Some(successor.to_string()),
+            },
+        )
+        .map(|_| ()));
+        let bodies = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, path, _)| path.ends_with("/hibernate"))
+            .map(|(_, _, body)| body.clone())
+            .collect();
+        (outcome, bodies)
+    }
+
+    #[test]
+    fn hibernate_sends_the_successors_engine_id_for_a_ses_id() {
+        let (outcome, bodies) = hibernate_with_successor("ses_2");
+        outcome.unwrap();
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        assert!(
+            bodies[0].contains(r#""superseded_by":"eng-2""#),
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn hibernate_passes_a_successor_engine_uuid_through() {
+        let (outcome, bodies) = hibernate_with_successor("eng-2");
+        outcome.unwrap();
+        assert!(
+            bodies[0].contains(r#""superseded_by":"eng-2""#),
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn hibernate_refuses_an_unknown_successor_before_the_engine_call() {
+        let (outcome, bodies) = hibernate_with_successor("ses_nope");
+        match outcome {
+            Err(VogtError::NotFound(message)) => assert!(message.contains("ses_nope")),
+            other => panic!("{other:?}"),
+        }
+        assert!(bodies.is_empty(), "{bodies:?}");
     }
 
     #[test]
