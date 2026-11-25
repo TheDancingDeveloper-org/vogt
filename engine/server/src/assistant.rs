@@ -3125,6 +3125,7 @@ mod tests {
             cadastre_mcp_url: None,
             vogt_prod_mcp_url: None,
             lane: None,
+            allow_dev_prod_bridge: false,
             crw_mcp_url: None,
             ws_query_token_allowed: false,
             ws_ping_interval: std::time::Duration::from_secs(20),

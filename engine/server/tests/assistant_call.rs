@@ -259,6 +259,7 @@ fn test_config(stub: &str) -> Config {
         cadastre_mcp_url: None,
         vogt_prod_mcp_url: None,
         lane: None,
+        allow_dev_prod_bridge: false,
         crw_mcp_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
