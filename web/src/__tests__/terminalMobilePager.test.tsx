@@ -31,6 +31,7 @@ vi.mock("../Terminal", () => ({
       </div>
     );
   },
+  sessionLinkFor: vi.fn(async () => null),
 }));
 
 function session(
