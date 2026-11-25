@@ -1196,6 +1196,12 @@ export interface SessionSweepRow {
       cpu_pct: number;
       processes: number;
       over_threshold?: boolean;
+      memory_current?: number;
+      memory_max?: number;
+      memory_peak?: number;
+      oom_kill?: number;
+      observed_at?: string;
+      memory_warning?: boolean;
     } | null;
   };
   screen_tail: string[];

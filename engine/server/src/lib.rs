@@ -58,6 +58,7 @@ pub mod oversight_answer;
 pub mod oversight_wake;
 pub mod person_gate;
 pub mod pod_backend;
+pub mod pod_memory;
 pub mod pod_reconcile;
 pub mod pod_salvage;
 pub mod policy;

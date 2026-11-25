@@ -184,7 +184,7 @@ pub struct PodLink {
     last_heartbeat: parking_lot::Mutex<Instant>,
     /// The pod's cgroup memory from the latest heartbeat that carried it
     /// (WI-4749). An older agent never sends one.
-    memory: parking_lot::Mutex<Option<CgroupMemory>>,
+    memory: parking_lot::Mutex<Option<PodMemory>>,
     /// When the current agent's socket was lost, while it is not connected.
     disconnected_at: parking_lot::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
@@ -202,6 +202,19 @@ pub struct PodLink {
     /// The session's output log. Set by [`Self::keep_log`] before the reader
     /// takes output; each durable offset is checkpointed beside it.
     log: parking_lot::Mutex<Option<std::path::PathBuf>>,
+}
+
+/// A pod's cgroup memory and when the engine received it (RFC 3339).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodMemory {
+    pub memory: CgroupMemory,
+    pub observed_at: String,
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Output queued for the session reader: the stream offset just past the
@@ -356,13 +369,27 @@ impl PodLink {
 
     /// The pod's latest reported cgroup memory, if its agent sends it.
     pub fn memory(&self) -> Option<CgroupMemory> {
+        self.memory.lock().as_ref().map(|m| m.memory.clone())
+    }
+
+    /// The latest cgroup memory with when it was observed (WI-4752). A
+    /// heartbeat without memory keeps the last value, so `observed_at` is the
+    /// only way to tell a stale reading from a fresh one.
+    pub fn memory_observed(&self) -> Option<PodMemory> {
         self.memory.lock().clone()
     }
 
     fn note_memory(&self, memory: Option<CgroupMemory>) {
-        if memory.is_some() {
+        self.note_memory_at(memory, now_rfc3339());
+    }
+
+    fn note_memory_at(&self, memory: Option<CgroupMemory>, observed_at: String) {
+        if let Some(memory) = memory {
             tracing::debug!(?memory, "pod cgroup memory");
-            *self.memory.lock() = memory;
+            *self.memory.lock() = Some(PodMemory {
+                memory,
+                observed_at,
+            });
         }
     }
 
@@ -2413,6 +2440,30 @@ mod tests {
         });
         agent.drain().await;
         assert_eq!(link.memory(), Some(memory));
+    }
+
+    /// WI-4752: the observed-at stamp is set with the value, replaced by a
+    /// newer reading, and kept (not refreshed) by a heartbeat without memory.
+    #[test]
+    fn memory_observed_at_is_set_and_kept() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let link = PodLink::new(sender);
+        assert_eq!(link.memory_observed(), None);
+        let memory = CgroupMemory {
+            memory_current: Some(7),
+            ..Default::default()
+        };
+        link.note_memory_at(Some(memory.clone()), "2026-01-01T00:00:00Z".into());
+        let first = link.memory_observed().unwrap();
+        assert_eq!(first.observed_at, "2026-01-01T00:00:00Z");
+        assert_eq!(first.memory, memory);
+        link.note_memory_at(None, "2026-01-01T00:00:30Z".into());
+        assert_eq!(link.memory_observed(), Some(first));
+        link.note_memory_at(Some(memory), "2026-01-01T00:01:00Z".into());
+        assert_eq!(
+            link.memory_observed().unwrap().observed_at,
+            "2026-01-01T00:01:00Z"
+        );
     }
 
     #[test]
