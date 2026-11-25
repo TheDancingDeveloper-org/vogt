@@ -1277,15 +1277,28 @@ const PRIVATE_CACHE_ENV: &[(&str, &str)] = &[
 
 /// Gradle/Kotlin daemon hygiene (WI-898), carried in the pod spec because the
 /// `session-home` emptyDir hides anything the image put under `/home/vogt`
-/// (a `~/.gradle/gradle.properties` would never be seen). `GRADLE_OPTS` holds
-/// JVM arguments for the Gradle client, which also sets daemon properties:
-/// `-Dorg.gradle.daemon.idletimeout` ends an idle daemon after 30 minutes
-/// instead of the 3 hour default, and `-Dorg.gradle.project.<name>` (Gradle
-/// build-environment docs) sets the project property
-/// `kotlin.daemon.jvmargs`, the Kotlin Gradle plugin's property for the
-/// Kotlin compile daemon's JVM arguments, capping its heap at 3 GiB.
+/// (a `~/.gradle/gradle.properties` would never be seen). Sources: Gradle
+/// "Configuring the build environment" docs.
+///
+/// - `org.gradle.daemon.idletimeout` (ms) ends an idle daemon after 30
+///   minutes instead of the 3 hour default.
+/// - `org.gradle.jvmargs` sets the daemon's JVM arguments. The docs say
+///   `GRADLE_OPTS` can pass it as a system property, and that system
+///   properties outrank a project's `gradle.properties`. That is how the pod
+///   caps the `-Xmx8G -XX:MaxMetaspaceSize=4G` the Flutter templates
+///   (aus-price-scanner, farmeggs) ship, which this repo does not control.
+///   It also lifts a smaller project value (mobile/ uses `-Xmx1536m`) to 4G;
+///   that is a ceiling, not a reservation.
+/// - `-Dorg.gradle.project.<name>` is the documented system-property form of
+///   project property `<name>`; `kotlin.daemon.jvmargs` is the Kotlin Gradle
+///   plugin's property for the Kotlin compile daemon (otherwise it inherits
+///   the Gradle daemon's heap), capped at 3 GiB.
+///
+/// Not run against a real Gradle here (none in the build pod): confirm in a
+/// deployed pod with `jps -v` after a build.
 const GRADLE_OPTS: &str = "-Dorg.gradle.daemon.idletimeout=1800000 \
--Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g";
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g \
+-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\"";
 
 /// Volumes in `pod` that a session can write and another session's pod can
 /// also mount: any claim, host path, NFS or CSI source without both the
@@ -5006,6 +5019,12 @@ mod tests {
             .expect("GRADLE_OPTS");
         assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
         assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
+        // The Flutter templates set `org.gradle.jvmargs=-Xmx8G ...` in the
+        // project's gradle.properties; a system property outranks that file.
+        assert!(
+            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\""),
+            "{opts}"
+        );
         // The home mount is what hides the image's gradle.properties.
         assert!(spec.containers[0]
             .volume_mounts
