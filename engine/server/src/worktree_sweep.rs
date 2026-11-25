@@ -9,13 +9,23 @@
 //! cleanup's own fail-closed checks would refuse (a tracked file, a symlink, a
 //! main checkout, a directory with no `Cargo.toml` beside its `target`).
 //!
+//! The schedule survives restarts. The time of the last sweep is kept in
+//! `<state_dir>/worktree-sweep-last` (unix seconds). After boot the first
+//! sweep runs once a short settle delay has passed (`ENGINE_WORKTREE_SWEEP_
+//! DELAY_SECONDS`, default 10 minutes, so it does not compete with startup and
+//! adoption of pod sessions) when the last sweep is missing or at least an
+//! interval old (`ENGINE_WORKTREE_SWEEP_INTERVAL_SECONDS`, default 24 hours);
+//! a recent one waits out the rest of the interval. Then it runs every
+//! interval. An engine redeployed more than once a day therefore still sweeps.
+//!
 //! `ENGINE_WORKTREE_SWEEP` picks the mode. `dry-run` (the default) walks and
 //! sizes everything and deletes nothing, so the first deploy only reports what
 //! would be reclaimed. `on` removes it. `off` does not run the sweep. An
 //! unreadable value turns it off. Every sweep writes one audit line
 //! (`event=worktree.sweep`) and keeps its report for `GET /api/status`.
 
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,8 +37,145 @@ use crate::{app::AppState, worktree_clean};
 /// The environment variable that picks the sweep mode.
 pub const SWEEP_ENV: &str = "ENGINE_WORKTREE_SWEEP";
 
-/// How often the sweep runs, counted from boot.
+/// How often the sweep runs, counted from the last sweep.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Environment variable overriding [`SWEEP_INTERVAL`], in seconds.
+pub const INTERVAL_ENV: &str = "ENGINE_WORKTREE_SWEEP_INTERVAL_SECONDS";
+
+/// How long after boot the first due sweep waits, so it does not compete with
+/// startup and the adoption of pod sessions.
+pub const SETTLE_DELAY: Duration = Duration::from_secs(10 * 60);
+
+/// Environment variable overriding [`SETTLE_DELAY`], in seconds.
+pub const DELAY_ENV: &str = "ENGINE_WORKTREE_SWEEP_DELAY_SECONDS";
+
+/// The shortest interval accepted, so a typo cannot make the sweep spin.
+const MIN_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// File in the state dir holding the unix time of the last sweep.
+const LAST_RUN_FILE: &str = "worktree-sweep-last";
+
+/// When the sweep runs: a settle delay after boot, then every interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Schedule {
+    pub interval: Duration,
+    pub settle: Duration,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            interval: SWEEP_INTERVAL,
+            settle: SETTLE_DELAY,
+        }
+    }
+}
+
+impl Schedule {
+    /// Read the two knobs. A value that is not a whole number of seconds, or
+    /// an interval under an hour, is logged and replaced by the default.
+    pub fn from_env() -> Self {
+        let mut schedule = Self::default();
+        if let Some(v) = std::env::var(INTERVAL_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            match v.trim().parse::<u64>().map(Duration::from_secs) {
+                Ok(d) if d >= MIN_INTERVAL => schedule.interval = d,
+                _ => tracing::warn!(
+                    "{INTERVAL_ENV} must be at least 3600 seconds, not {v:?}; using the default"
+                ),
+            }
+        }
+        if let Some(v) = std::env::var(DELAY_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            match v.trim().parse::<u64>() {
+                Ok(secs) => schedule.settle = Duration::from_secs(secs),
+                Err(_) => {
+                    tracing::warn!(
+                        "{DELAY_ENV} must be whole seconds, not {v:?}; using the default"
+                    )
+                }
+            }
+        }
+        schedule
+    }
+
+    /// How long to wait after boot before the first sweep. A missing last run,
+    /// one a full interval old, or one stamped in the future (a clock that
+    /// went back) is due after the settle delay. A recent one waits out the
+    /// rest of its interval, and never less than the settle delay.
+    pub fn first_wait(&self, last_run: Option<i64>, now: i64) -> Duration {
+        let Some(last) = last_run.filter(|last| *last <= now) else {
+            return self.settle;
+        };
+        let age = Duration::from_secs((now - last) as u64);
+        if age >= self.interval {
+            self.settle
+        } else {
+            (self.interval - age).max(self.settle)
+        }
+    }
+}
+
+fn last_run_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(LAST_RUN_FILE)
+}
+
+/// The unix time the last sweep finished, if one was recorded and readable.
+pub fn load_last_run(state_dir: &Path) -> Option<i64> {
+    std::fs::read_to_string(last_run_path(state_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Record that a sweep finished at `now` (unix seconds). Written through a
+/// temporary file and a rename so a crash leaves the old value, not half of one.
+pub fn record_last_run(state_dir: &Path, now: i64) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = last_run_path(state_dir);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, now.to_string())?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Drive the schedule: wait the first interval worked out from the recorded
+/// last run, then run, record and wait a full interval, for ever (or for
+/// `max_runs` runs, which tests use). `now` is wall-clock unix seconds and
+/// `sleep` the wait, both injected so tests use a fake clock.
+pub async fn drive_schedule<S, Fut, R, RFut>(
+    schedule: Schedule,
+    state_dir: &Path,
+    now: impl Fn() -> i64,
+    sleep: S,
+    mut run: R,
+    max_runs: Option<usize>,
+) where
+    S: Fn(Duration) -> Fut,
+    Fut: Future<Output = ()>,
+    R: FnMut() -> RFut,
+    RFut: Future<Output = ()>,
+{
+    let mut wait = schedule.first_wait(load_last_run(state_dir), now());
+    let mut runs = 0usize;
+    loop {
+        sleep(wait).await;
+        run().await;
+        if let Err(e) = record_last_run(state_dir, now()) {
+            tracing::warn!(error = %e, "could not record the worktree sweep time");
+        }
+        runs += 1;
+        if max_runs.is_some_and(|max| runs >= max) {
+            return;
+        }
+        wait = schedule.interval;
+    }
+}
 
 /// How many directories below the workspace root a session checkout may sit.
 const MAX_DEPTH: usize = 4;
@@ -217,20 +364,33 @@ pub async fn run_sweep(state: Arc<AppState>, apply: bool) -> SweepReport {
     report
 }
 
-/// Run the sweep once a day for the life of the process. Off does not spawn
-/// anything. The first run is a day after boot, so a restart does not walk
-/// the whole workspace at once.
+/// Run the sweep on its schedule for the life of the process. Off does not
+/// spawn anything. The first sweep is due a short settle delay after boot when
+/// the last one is missing or a day old, so a restart neither walks the whole
+/// workspace at once nor, by restarting often, postpones it for ever.
 pub fn spawn_nightly_sweep(state: Arc<AppState>) {
     let mode = state.worktree_sweep.mode();
     if mode == SweepMode::Off {
         return;
     }
+    let schedule = Schedule::from_env();
+    let state_dir = state.config.state_dir.clone();
     let task_state = Arc::clone(&state);
     Arc::clone(&state.boot_tasks).spawn("worktree-sweep", async move {
-        loop {
-            tokio::time::sleep(SWEEP_INTERVAL).await;
-            run_sweep(Arc::clone(&task_state), mode == SweepMode::On).await;
-        }
+        drive_schedule(
+            schedule,
+            &state_dir,
+            || time::OffsetDateTime::now_utc().unix_timestamp(),
+            tokio::time::sleep,
+            || {
+                let state = Arc::clone(&task_state);
+                async move {
+                    run_sweep(state, mode == SweepMode::On).await;
+                }
+            },
+            None,
+        )
+        .await;
     });
 }
 
@@ -376,5 +536,109 @@ mod tests {
         );
         assert!(linked.exists(), "the worktree itself is never removed");
         assert_eq!(report.cleaned, vec![linked.to_string_lossy().into_owned()]);
+    }
+
+    /// A fake clock: `sleep` advances it, so the schedule can be walked
+    /// through days in microseconds.
+    struct FakeClock(std::cell::Cell<i64>);
+
+    impl FakeClock {
+        fn now(&self) -> i64 {
+            self.0.get()
+        }
+        async fn sleep(&self, d: Duration) {
+            self.0.set(self.0.get() + d.as_secs() as i64);
+        }
+    }
+
+    const H: i64 = 3600;
+
+    /// Boot at `now` with `last` recorded; return the clock times at which
+    /// sweeps ran over `runs` runs.
+    fn run_times(last: Option<i64>, now: i64, runs: usize) -> Vec<i64> {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(last) = last {
+            record_last_run(dir.path(), last).unwrap();
+        }
+        let clock = FakeClock(std::cell::Cell::new(now));
+        let times = std::cell::RefCell::new(Vec::new());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(drive_schedule(
+            Schedule::default(),
+            dir.path(),
+            || clock.now(),
+            |d| clock.sleep(d),
+            || {
+                times.borrow_mut().push(clock.now());
+                std::future::ready(())
+            },
+            Some(runs),
+        ));
+        times.into_inner()
+    }
+
+    #[test]
+    fn a_restart_two_hours_after_the_last_run_does_not_sweep_again() {
+        let now = 1_000_000;
+        let times = run_times(Some(now - 2 * H), now, 2);
+        // Nothing runs at boot or after the settle delay: the first sweep is
+        // 22 hours out, the next a full day after that.
+        assert_eq!(times, vec![now + 22 * H, now + 46 * H]);
+    }
+
+    #[test]
+    fn a_boot_with_the_last_run_25_hours_ago_sweeps_after_the_short_delay() {
+        let now = 1_000_000;
+        let times = run_times(Some(now - 25 * H), now, 2);
+        assert_eq!(
+            times,
+            vec![now + SETTLE_DELAY.as_secs() as i64, now + 600 + 24 * H]
+        );
+    }
+
+    #[test]
+    fn a_missing_timestamp_sweeps_once_after_the_short_delay_and_records_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_last_run(dir.path()), None);
+        let now = 1_000_000;
+        let times = run_times(None, now, 1);
+        assert_eq!(times, vec![now + 600]);
+
+        let clock = FakeClock(std::cell::Cell::new(now));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(drive_schedule(
+            Schedule::default(),
+            dir.path(),
+            || clock.now(),
+            |d| clock.sleep(d),
+            || std::future::ready(()),
+            Some(1),
+        ));
+        // Recorded, so the next boot does not sweep a second time at once.
+        assert_eq!(load_last_run(dir.path()), Some(now + 600));
+        assert_eq!(
+            Schedule::default().first_wait(load_last_run(dir.path()), now + 700),
+            Duration::from_secs(24 * 3600 - 100)
+        );
+    }
+
+    #[test]
+    fn a_future_or_unreadable_timestamp_counts_as_missing() {
+        let s = Schedule::default();
+        assert_eq!(s.first_wait(Some(2_000_000), 1_000_000), s.settle);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LAST_RUN_FILE), "garbage").unwrap();
+        assert_eq!(load_last_run(dir.path()), None);
+    }
+
+    #[test]
+    fn a_nearly_due_sweep_still_waits_the_settle_delay() {
+        let s = Schedule::default();
+        let now = 1_000_000;
+        assert_eq!(s.first_wait(Some(now - 24 * H + 5), now), s.settle);
     }
 }
