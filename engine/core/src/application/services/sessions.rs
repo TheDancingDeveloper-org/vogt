@@ -1487,6 +1487,12 @@ pub struct SessionResources {
     pub processes: i64,
     pub sampled_at: String,
     pub over_threshold: bool,
+    pub memory_current: Option<i64>,
+    pub memory_max: Option<i64>,
+    pub memory_peak: Option<i64>,
+    pub oom_kill: Option<i64>,
+    pub observed_at: Option<String>,
+    pub memory_warning: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5258,6 +5264,12 @@ fn resources_of(resources: &EngineResources) -> SessionResources {
         processes: resources.processes,
         sampled_at: resources.sampled_at.clone(),
         over_threshold: resources.over_threshold,
+        memory_current: resources.memory_current,
+        memory_max: resources.memory_max,
+        memory_peak: resources.memory_peak,
+        oom_kill: resources.oom_kill,
+        observed_at: resources.observed_at.clone(),
+        memory_warning: resources.memory_warning,
     }
 }
 
