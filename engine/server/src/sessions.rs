@@ -7730,11 +7730,14 @@ mod host_placement_tests {
             sessions.report_deadline_ended(worker.id);
         });
 
-        let text = String::from_utf8(out.0.lock().clone()).unwrap();
+        // Stop the pods before asserting: a failed assertion unwinds past
+        // any later cleanup, and a live pod then keeps the runtime from
+        // shutting down, so a regression would hang instead of failing.
+        stop_all(&sessions);
+        let text = String::from_utf8_lossy(&out.0.lock()).into_owned();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1, "{text:?}");
         assert!(lines[0].contains(r#"name="w\nlevel=WARN"#), "{text:?}");
-        stop_all(&sessions);
     }
 
     /// A worker's name is free text and may be uncleaned (a record restored
