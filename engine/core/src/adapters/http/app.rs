@@ -809,7 +809,7 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
             }
         }
         operation
-            .run(built.as_ref(), params)
+            .run_prepared(built.as_ref(), params)
             .map(|value| Dispatch::Ran { value, etag })
     })
     .await
@@ -1133,7 +1133,7 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
     // part of `loc` is a string, index included (`app.py:143`). The first part is
     // where the value came from, which the validator does not know. A failure
     // that carries no structured report falls back to the whole-body entry.
-    let detail = match crate::errors::take_validation(error) {
+    let detail = match error.validation_report() {
         Some(report) => report
             .errors
             .iter()
@@ -1772,6 +1772,41 @@ mod tests {
         );
         let fine = runtime.block_on(blocking(|| 7u8));
         assert_eq!(fine.ok(), Some(7));
+    }
+
+    /// Two validation failures on one thread each render their own report, in
+    /// whatever order they are rendered, and a failure that is never rendered
+    /// leaves nothing behind for the next one (WI-4620). The report used to sit
+    /// in a thread-local, so the first of these came back as the generic
+    /// whole-body entry once the second had overwritten the slot.
+    #[test]
+    fn two_failures_on_one_thread_each_render_their_own_report() {
+        fn detail(error: &VogtError) -> serde_json::Value {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let response = invalid_arguments(error, "body");
+            let bytes = runtime
+                .block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            body["error"]["detail"].clone()
+        }
+        std::thread::spawn(|| {
+            let missing = validate::prepare("work.get", serde_json::json!({})).unwrap_err();
+            let extra =
+                validate::prepare("work.get", serde_json::json!({"ref": "WI-1", "bogus": 1}))
+                    .unwrap_err();
+            // Rendered newest first, so the older report must survive the newer.
+            let extra_detail = detail(&extra);
+            let missing_detail = detail(&missing);
+            assert_eq!(extra_detail[0]["loc"], serde_json::json!(["body", "bogus"]));
+            assert_eq!(extra_detail[0]["type"], "extra_forbidden");
+            assert_eq!(missing_detail[0]["loc"], serde_json::json!(["body", "ref"]));
+            assert_eq!(missing_detail[0]["type"], "missing");
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
