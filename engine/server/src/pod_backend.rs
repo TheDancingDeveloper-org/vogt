@@ -1309,8 +1309,11 @@ struct ToolCaps {
     jvm_mib: u64,
 }
 
-/// Bytes of a Kubernetes memory quantity (`1Gi`, `6144Mi`, `2G`, `500000`);
-/// `None` for anything else, including a milli-suffix or zero.
+/// Bytes of a Kubernetes memory quantity (`1Gi`, `6144Mi`, `2G`, `500000`).
+/// `None` for anything else: zero, a milli-suffix, a decimal (`1.5Gi`), an
+/// exponent form (`1e9`), the `E`/`P`/`Pi`/`Ei` suffixes, or a value that
+/// overflows `u64`. A pod whose limit is refused keeps today's fixed
+/// `GRADLE_OPTS` and gets no derived caps.
 fn memory_bytes(raw: &str) -> Option<u64> {
     let raw = raw.trim();
     let (digits, factor) = [
@@ -1331,31 +1334,54 @@ fn memory_bytes(raw: &str) -> Option<u64> {
     (bytes > 0).then_some(bytes)
 }
 
+/// Whole CPUs of a Kubernetes CPU quantity (`2`, `1500m`, `0.5`), rounded
+/// down and at least 1; `None` when it does not parse or is not positive.
+fn cpu_limit_cores(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let cores = match raw.strip_suffix('m') {
+        Some(milli) => milli.parse::<f64>().ok()? / 1000.0,
+        None => raw.parse::<f64>().ok()?,
+    };
+    (cores.is_finite() && cores > 0.0).then(|| (cores.floor() as u64).max(1))
+}
+
 /// Splits 70% of the pod memory limit between the build tools, so a heavy
 /// build cannot push the pod over its limit and get OOM-killed.
 ///
 /// Shares of the limit: Gradle daemon heap 28%, Kotlin daemon heap 17%, any
 /// other JVM (`JAVA_TOOL_OPTIONS`, e.g. Soot) 10%, cargo 15% at an estimated
-/// 512 MiB per job, rounded down, at least one job. Each heap is at least
-/// 128 MiB. The caps add up to at most 70% of the limit from about 3.5 GiB
-/// upward; a smaller pod keeps one cargo job and the 128 MiB floors, so it can
-/// exceed 70%.
+/// 512 MiB per job, rounded down, at least one job and, when `cpu_cores` is
+/// known, at most that many jobs. Each heap is at least 128 MiB.
+///
+/// The 70% counts the three heaps and the cargo jobs only. Gradle's
+/// `MaxMetaspaceSize=1G` and JVM native memory are not counted.
+///
+/// Returns `None` when the heaps and jobs would not fit in 70% of the limit
+/// (below about 3.4 GiB, where the one-job minimum and the floors dominate):
+/// the caller then keeps today's fixed `GRADLE_OPTS` ceilings and sets no
+/// `JAVA_TOOL_OPTIONS` or `CARGO_BUILD_JOBS`, as for an unparsable limit.
 ///
 /// | limit | cargo jobs | Gradle | Kotlin | other JVM | sum (jobs at 512 MiB) |
 /// |-------|-----------|--------|--------|-----------|-----------------------|
-/// | 1Gi   | 1         | 286m   | 174m   | 128m      | 1100m (107%, floors)  |
+/// | 1Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
+/// | 2Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
 /// | 6Gi   | 1         | 1720m  | 1044m  | 614m      | 3890m (63%)           |
 /// | 8Gi   | 2         | 2293m  | 1392m  | 819m      | 5528m (67%)           |
-fn derive_tool_caps(limit_bytes: u64) -> ToolCaps {
+///
+/// With a 1-CPU limit the 8Gi row gets 1 job.
+fn derive_tool_caps(limit_bytes: u64, cpu_cores: Option<u64>) -> Option<ToolCaps> {
     const MIB: u64 = 1 << 20;
     let mib = limit_bytes / MIB;
     let heap = |percent: u64| (mib * percent / 100).max(128);
-    ToolCaps {
-        cargo_jobs: (mib * 15 / 100 / 512).max(1),
+    let by_memory = (mib * 15 / 100 / 512).max(1);
+    let caps = ToolCaps {
+        cargo_jobs: cpu_cores.map_or(by_memory, |c| by_memory.min(c.max(1))),
         gradle_mib: heap(28),
         kotlin_mib: heap(17),
         jvm_mib: heap(10),
-    }
+    };
+    let total = caps.gradle_mib + caps.kotlin_mib + caps.jvm_mib + caps.cargo_jobs * 512;
+    (total * 100 <= mib * 70).then_some(caps)
 }
 
 /// `GRADLE_OPTS` with the Gradle and Kotlin heaps taken from `caps`.
@@ -1368,21 +1394,30 @@ fn gradle_opts_for(caps: &ToolCaps) -> String {
     )
 }
 
-/// The memory limit the pod gets: the deployment default with the template
-/// policy's map merged over it, as `pod_template` builds the container.
-fn effective_memory_limit(cfg: &PodConfig, policy: Option<&PodTemplatePolicy>) -> Option<u64> {
+/// The memory and CPU limits the pod gets: the deployment default with the
+/// template policy's map merged over it, as `pod_template` builds the
+/// container.
+fn effective_limits(
+    cfg: &PodConfig,
+    policy: Option<&PodTemplatePolicy>,
+) -> (Option<u64>, Option<u64>) {
     let limits = merge_resources(
         &cfg.resource_limits,
         policy.and_then(|p| p.resource_limits.as_ref()),
     );
-    memory_bytes(&limits.get("memory")?.0)
+    (
+        limits.get("memory").and_then(|q| memory_bytes(&q.0)),
+        limits.get("cpu").and_then(|q| cpu_limit_cores(&q.0)),
+    )
 }
 
 /// Adds the derived caps to `env`, leaving every name already set (by the
-/// operator or the template) alone. No limit, or one that does not parse,
-/// keeps the fixed `GRADLE_OPTS` and sets nothing else.
-fn push_tool_cap_env(env: &mut Vec<EnvVar>, limit_bytes: Option<u64>) {
-    let caps = limit_bytes.map(derive_tool_caps);
+/// operator or the template) alone. No limit, one that does not parse, or one
+/// too small for the caps to fit in 70% keeps the fixed `GRADLE_OPTS` and sets
+/// nothing else.
+fn push_tool_cap_env(env: &mut Vec<EnvVar>, limits: (Option<u64>, Option<u64>)) {
+    let (limit_bytes, cpu_cores) = limits;
+    let caps = limit_bytes.and_then(|l| derive_tool_caps(l, cpu_cores));
     let mut set = |name: &str, value: String| {
         if !env.iter().any(|e| e.name == name) {
             env.push(EnvVar {
@@ -1917,7 +1952,7 @@ pub fn pod_template(
         ..Default::default()
     });
     let policy = cfg.template_policies.get(&template.name);
-    push_tool_cap_env(&mut env, effective_memory_limit(cfg, policy));
+    push_tool_cap_env(&mut env, effective_limits(cfg, policy));
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -5134,10 +5169,24 @@ mod tests {
     }
 
     fn cfg_with_memory(memory: &str) -> PodConfig {
+        cfg_with_limits(memory, "4")
+    }
+
+    fn cfg_with_limits(memory: &str, cpu: &str) -> PodConfig {
         with_policy(&format!(
-            r#"{{"Pod":{{"resource_limits":{{"memory":"{memory}"}}}}}}"#
+            r#"{{"Pod":{{"resource_limits":{{"memory":"{memory}","cpu":"{cpu}"}}}}}}"#
         ))
         .unwrap()
+    }
+
+    /// The smallest limit in MiB from which every larger one (to 64Gi)
+    /// derives; rounding makes a few limits just below it derive by luck.
+    fn derive_threshold_mib() -> u64 {
+        (1..=65536u64)
+            .rev()
+            .find(|m| derive_tool_caps(m << 20, None).is_none())
+            .unwrap()
+            + 1
     }
 
     #[test]
@@ -5155,11 +5204,77 @@ mod tests {
         assert_eq!(eight["CARGO_BUILD_JOBS"], "2");
         assert_eq!(eight["JAVA_TOOL_OPTIONS"], "-Xmx819m");
         assert!(eight["GRADLE_OPTS"].contains("-Xmx2293m"));
-        // The deployment default (1Gi) is derived too, down to the floors.
+        // The deployment default (1Gi) is below the threshold: today's fixed
+        // ceilings, no other caps.
         let one = cap_env(&PodConfig::default(), &[]);
-        assert_eq!(one["CARGO_BUILD_JOBS"], "1");
-        assert_eq!(one["JAVA_TOOL_OPTIONS"], "-Xmx128m");
-        assert!(one["GRADLE_OPTS"].contains("-Xmx286m"));
+        assert_eq!(one["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!one.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!one.contains_key("JAVA_TOOL_OPTIONS"));
+    }
+
+    #[test]
+    fn a_pod_too_small_for_the_caps_to_fit_keeps_the_fixed_gradle_opts() {
+        // 2Gi: three heaps (55%) plus one 512 MiB job is 80% of the limit.
+        let env = cap_env(&cfg_with_memory("2Gi"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_eq!(derive_tool_caps(2 << 30, None), None);
+    }
+
+    #[test]
+    fn caps_derive_exactly_from_the_threshold_and_the_bound_holds_there() {
+        let t = derive_threshold_mib();
+        // About 3.4 GiB: between 3Gi and 3.5Gi.
+        assert!((3 * 1024..=3584).contains(&t), "{t}");
+        assert_eq!(derive_tool_caps((t - 1) << 20, None), None);
+        for mib in [t, t + 1, t + 100] {
+            let c = derive_tool_caps(mib << 20, None).expect("derived");
+            let total = c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512;
+            assert!(total * 100 <= mib * 70, "{mib}MiB: {total}");
+        }
+        // Just above the threshold the pod env is derived.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t + 1)), &[]);
+        assert!(env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_ne!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        // And just below it, the fallback.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t - 1)), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn cargo_jobs_are_capped_by_the_cpu_limit() {
+        // 8Gi derives 2 jobs from memory; a 1-CPU limit lowers it to 1.
+        let one_cpu = cap_env(&cfg_with_limits("8Gi", "1"), &[]);
+        assert_eq!(one_cpu["CARGO_BUILD_JOBS"], "1");
+        // 32Gi derives 9 jobs from memory; 500m rounds up to 1, 4 CPUs allow 4.
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "500m"), &[])["CARGO_BUILD_JOBS"],
+            "1"
+        );
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "4"), &[])["CARGO_BUILD_JOBS"],
+            "4"
+        );
+        // A CPU limit above the memory-derived jobs changes nothing.
+        assert_eq!(
+            cap_env(&cfg_with_limits("8Gi", "64"), &[])["CARGO_BUILD_JOBS"],
+            "2"
+        );
+        assert_eq!(derive_tool_caps(32 << 30, None).unwrap().cargo_jobs, 9);
+    }
+
+    #[test]
+    fn cpu_quantities_parse_or_are_refused() {
+        assert_eq!(cpu_limit_cores("2"), Some(2));
+        assert_eq!(cpu_limit_cores("1500m"), Some(1));
+        assert_eq!(cpu_limit_cores("500m"), Some(1));
+        assert_eq!(cpu_limit_cores("0.5"), Some(1));
+        for bad in ["", "0", "-1", "lots", "NaN"] {
+            assert_eq!(cpu_limit_cores(bad), None, "{bad}");
+        }
     }
 
     #[test]
@@ -5193,7 +5308,7 @@ mod tests {
         const MIB: u64 = 1 << 20;
         for gib in [4u64, 5, 6, 8, 12, 16, 32, 64] {
             let limit = gib << 30;
-            let c = derive_tool_caps(limit);
+            let c = derive_tool_caps(limit, None).expect("derived");
             let total = (c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512) * MIB;
             assert!(total * 100 <= limit * 70, "{gib}Gi: {total} of {limit}");
         }
@@ -5205,8 +5320,21 @@ mod tests {
         assert_eq!(memory_bytes("512Mi"), Some(512 << 20));
         assert_eq!(memory_bytes("2G"), Some(2_000_000_000));
         assert_eq!(memory_bytes("1048576"), Some(1 << 20));
-        for bad in ["", "0", "lots", "1.5Gi", "-1Gi", "500m"] {
+        for bad in [
+            "", "0", "lots", "1.5Gi", "-1Gi", "500m", "1e9", "2Ei", "1P", "1Pi",
+        ] {
             assert_eq!(memory_bytes(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_that_overflow_or_are_zero_are_refused() {
+        // 2^24 Ti * 2^40 overflows u64; checked_mul refuses it.
+        assert_eq!(memory_bytes("16777216Ti"), None);
+        assert_eq!(memory_bytes("18446744073709551615Ki"), None);
+        assert_eq!(memory_bytes("18446744073709551615"), Some(u64::MAX));
+        for zero in ["0", "0Gi", "0Mi", "00"] {
+            assert_eq!(memory_bytes(zero), None, "{zero}");
         }
     }
 
@@ -5224,12 +5352,13 @@ mod tests {
             .and_then(|e| e.value.as_deref())
             .expect("GRADLE_OPTS");
         assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
-        // The 1Gi default limit derives Kotlin 174m (17%) and Gradle 286m (28%).
-        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx174m"));
+        // The 1Gi default limit is below the derive threshold, so the fixed
+        // ceilings stay: Kotlin 3g and Gradle 4G.
+        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
         // The Flutter templates set `org.gradle.jvmargs=-Xmx8G ...` in the
         // project's gradle.properties; a system property outranks that file.
         assert!(
-            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx286m -XX:MaxMetaspaceSize=1G\""),
+            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\""),
             "{opts}"
         );
         // The home mount is what hides the image's gradle.properties.
