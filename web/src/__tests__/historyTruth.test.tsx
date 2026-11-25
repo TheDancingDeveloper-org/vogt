@@ -255,6 +255,27 @@ describe("History read truth", () => {
     expect(screen.getAllByText("recovered", { selector: "mark" })[0]).toBeVisible();
   });
 
+  it("renders hibernated rows as Hibernated, never 'exit null' (WI-4567)", async () => {
+    const asleep = { ...archive(3), exit_code: null, end_reason: "hibernated" };
+    vi.spyOn(api, "operationalStatus").mockResolvedValue(status(2));
+    vi.spyOn(api, "listHistorySessions").mockResolvedValue([asleep]);
+    vi.spyOn(api, "getHistorySession").mockResolvedValue(asleep);
+    vi.spyOn(api, "getHistorySessionLog").mockResolvedValue({
+      session_id: asleep.id, text: "", bytes: 0, total_bytes: 0, truncated: false,
+    });
+    await setLiveSessions([liveSummary({ id: "live-h", name: "live-asleep", activity: "hibernated", exit_code: 137 })]);
+
+    renderHistory();
+
+    const archived = (await screen.findAllByText("archive-3"))[0]!.closest("button")!;
+    expect(within(archived).getAllByText("Hibernated")).toHaveLength(2);
+    expect(within(archived).queryByText("Exited")).not.toBeInTheDocument();
+    const live = screen.getAllByText("live-asleep")[0]!.closest("button")!;
+    expect(within(live).queryByText("Exit 137")).not.toBeInTheDocument();
+    expect(within(live).getAllByText("Hibernated")).toHaveLength(2);
+    expect(document.body.textContent).not.toMatch(/exit (null|undefined)/i);
+  });
+
   // History is the one place that lists every session. A running shell
   // from the live registry is unioned into the archived list, badged live, and
   // its replay tails the on-disk log with no archive DB record.
