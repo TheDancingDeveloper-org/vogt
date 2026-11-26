@@ -534,7 +534,6 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
                     activity_idle_after_ms: 200,
                     secret_broker: None,
                     agent_auth_manifest: None,
-                    tier: None,
                     on_exit: None,
                 },
                 vogt_engine_server::events::EventBus::new(64),

@@ -337,7 +337,6 @@ pub(crate) mod tests {
             activity_idle_after_ms: 1000,
             secret_broker: None,
             agent_auth_manifest: None,
-            tier: None,
             on_exit: None,
         };
         let spawned = crate::pty::spawn_remote(

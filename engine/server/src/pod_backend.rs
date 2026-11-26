@@ -555,10 +555,6 @@ fn default_heartbeat_timeout() -> Duration {
 }
 /// The label that marks which engine deployment owns a session pod.
 pub const ENGINE_LABEL: &str = "vogt.engine";
-/// The pod label a tier session carries, and its value (WI-4814). The label
-/// is engine-owned: a caller's `spec.env` can never add it.
-pub const TIER_LABEL: &str = "vogt.dev/tier";
-pub const ESTATE_ADMIN_LABEL_VALUE: &str = "estate-admin";
 pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
 fn default_engine_id() -> String {
     DEFAULT_ENGINE_ID.into()
@@ -1564,35 +1560,6 @@ pub fn is_shell_template(template: &SessionTemplate) -> bool {
     template.tags.iter().any(|tag| tag == "shell")
 }
 
-/// The tier's Infisical identity, mapped onto the ordinary `INFISICAL_CLIENT_*`
-/// names for a tier pod (WI-4814). The API URL and environment come from the
-/// engine's shared identity; the client id and secret come from the tier-only
-/// engine variables. Values are placed in the pod's spec env by
-/// [`pod_template`] only for a tier spawn under tier-scoped passthrough.
-fn tier_identity_env_pairs() -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    for source in ["INFISICAL_API_URL", "ENGINE_INFISICAL_ENV"] {
-        if let Some(value) = std::env::var_os(source) {
-            env.push((source.to_string(), value.to_string_lossy().into_owned()));
-        }
-    }
-    for (source, target) in [
-        (
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
-            "INFISICAL_CLIENT_ID",
-        ),
-        (
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
-            "INFISICAL_CLIENT_SECRET",
-        ),
-    ] {
-        if let Some(value) = std::env::var_os(source) {
-            env.push((target.to_string(), value.to_string_lossy().into_owned()));
-        }
-    }
-    env
-}
-
 fn pod_env(
     cfg: &PodConfig,
     source: &SourceDescriptor,
@@ -1921,7 +1888,6 @@ pub fn pod_template(
     permission_mode: Option<&str>,
     codex_approval_policy: &str,
     command: &[String],
-    tier: Option<&str>,
 ) -> Pod {
     let mut labels = BTreeMap::from([
         ("vogt.session".into(), id.to_string()),
@@ -1934,9 +1900,6 @@ pub fn pod_template(
     ]);
     if let Some(account) = account {
         labels.insert("vogt.account".into(), account.into());
-    }
-    if tier.is_some() {
-        labels.insert(TIER_LABEL.into(), ESTATE_ADMIN_LABEL_VALUE.into());
     }
     let image = template
         .env
@@ -1951,26 +1914,6 @@ pub fn pod_template(
         permission_mode,
         codex_approval_policy,
     );
-    if let Some(tier) = tier {
-        env.push(EnvVar {
-            name: crate::pty::AGENT_AUTH_TIER_ENV.into(),
-            value: Some(tier.into()),
-            ..Default::default()
-        });
-        // `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier` hands the tier
-        // identity to tier spawns only (WI-4814). A pod does not inherit the
-        // engine's process environment, so the mapped identity is put in its
-        // spec env explicitly.
-        if crate::pty::tier_identity_passthrough_enabled() {
-            for (name, value) in tier_identity_env_pairs() {
-                env.push(EnvVar {
-                    name,
-                    value: Some(value),
-                    ..Default::default()
-                });
-            }
-        }
-    }
     if let Some(model) = model {
         env.push(EnvVar {
             name: "VOGT_MODEL".into(),
@@ -3464,7 +3407,6 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 &[],
-                None,
             );
             let carried: SourceDescriptor =
                 serde_json::from_str(&env_value(&pod, "VOGT_SOURCE_JSON").unwrap()).unwrap();
@@ -3475,75 +3417,6 @@ mod tests {
                 Some(&repo.to_string())
             );
         }
-    }
-
-    #[test]
-    fn a_tiered_pod_gets_the_tier_label_and_marker_env_only_when_tiered() {
-        let cfg = PodConfig::default();
-        let template = SessionTemplate {
-            name: "t".into(),
-            description: "t".into(),
-            command: None,
-            cwd: None,
-            env: vec![],
-            default_name: None,
-            match_repo_names: vec![],
-            match_path_prefixes: vec![],
-            tags: vec![],
-            backend: "pod".into(),
-            host_capable: false,
-            pod_capable: false,
-            account: None,
-        };
-        let src = session_source(Some(&project_source("vogt", "rust-2")), &registry()).unwrap();
-        let tiered = pod_template(
-            &cfg,
-            &template,
-            Uuid::nil(),
-            &src,
-            &source_env(&src),
-            "session",
-            None,
-            None,
-            None,
-            None,
-            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
-            &[],
-            Some("estate_admin"),
-        );
-        let labels = tiered.metadata.labels.as_ref().unwrap();
-        assert_eq!(
-            labels.get(TIER_LABEL).map(String::as_str),
-            Some(ESTATE_ADMIN_LABEL_VALUE)
-        );
-        assert_eq!(
-            env_value(&tiered, crate::pty::AGENT_AUTH_TIER_ENV).as_deref(),
-            Some("estate_admin")
-        );
-
-        let ordinary = pod_template(
-            &cfg,
-            &template,
-            Uuid::nil(),
-            &src,
-            &source_env(&src),
-            "session",
-            None,
-            None,
-            None,
-            None,
-            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
-            &[],
-            None,
-        );
-        assert!(ordinary
-            .metadata
-            .labels
-            .as_ref()
-            .unwrap()
-            .get(TIER_LABEL)
-            .is_none());
-        assert!(env_value(&ordinary, crate::pty::AGENT_AUTH_TIER_ENV).is_none());
     }
 
     #[test]
@@ -3611,7 +3484,6 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &["bash".into()],
-            None,
         );
         let labels = pod.metadata.labels.clone().unwrap();
         assert_eq!(labels.get("vogt.session"), Some(&id.to_string()));
@@ -3800,7 +3672,6 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
-            None,
         );
         let metadata = pod.metadata;
         let labels = metadata.labels.unwrap();
@@ -4210,7 +4081,6 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 command,
-                None,
             );
             pod.spec.unwrap().containers[0]
                 .env
@@ -4259,7 +4129,6 @@ mod tests {
             permission_mode,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             template.command.as_deref().unwrap_or(&[]),
-            None,
         );
         pod.spec.unwrap().containers[0]
             .env
@@ -4339,7 +4208,6 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 template.command.as_deref().unwrap_or(&[]),
-                None,
             );
             let container = &pod.spec.as_ref().unwrap().containers[0];
             let env = container
@@ -4434,7 +4302,6 @@ mod tests {
                         "--".into(),
                         "codex".into(),
                     ],
-                    None,
                 );
                 pod.spec.unwrap().containers[0]
                     .env
@@ -4503,7 +4370,6 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
-            None,
         );
         assert_eq!(
             pod.metadata.labels.as_ref().unwrap().get(ENGINE_LABEL),
@@ -5298,7 +5164,6 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
-            None,
         );
         pod.spec.unwrap().containers[0]
             .env
@@ -5652,7 +5517,6 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
-            None,
         )
     }
 

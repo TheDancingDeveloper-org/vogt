@@ -986,7 +986,7 @@ impl ChatRuntime {
             work_item: req.work_item.clone().or_else(|| record.work_item.clone()),
             ..Default::default()
         };
-        let session = self.sessions.create_launched(spec, false, None).await?;
+        let session = self.sessions.create_launched(spec).await?;
         let summary = session.summary();
         record.promoted_session = Some(session.id);
         record.updated_at = now();
