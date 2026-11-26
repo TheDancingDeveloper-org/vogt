@@ -573,7 +573,8 @@ def test_only_a_profile_filled_worktree_is_marked_droppable(
     start_session(
         wired, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
     )
-    assert engine.last_spec["worktree"]["if_supported"] is True
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is True
 
     start_session(
         wired,
@@ -581,12 +582,14 @@ def test_only_a_profile_filled_worktree_is_marked_droppable(
             work_item="WI-1", purpose="implement", worktree=True, reason=WHY
         ),
     )
-    assert engine.last_spec["worktree"]["if_supported"] is False
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is False
 
     start_session(
         wired, StartSessionParams(work_item="WI-1", worktree=True, reason=WHY)
     )
-    assert engine.last_spec["worktree"]["if_supported"] is False
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is False
 
     start_session(
         wired,
