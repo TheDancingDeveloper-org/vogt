@@ -2965,7 +2965,8 @@ impl SessionRegistry {
             }
         }
 
-        // A worker brief says which MCP servers the session got (WI-2746).
+        // A worker brief says which MCP servers the session got (WI-2746) and
+        // the workspace-config commit its pod fetched (WI-4806).
         let brief_text = brief.as_deref().map(|text| {
             if mcp_set != crate::mcp_set::McpSet::Worker {
                 return text.to_string();
@@ -2977,9 +2978,15 @@ impl SessionRegistry {
                 Some("codex") => &mcp_trim.codex_servers,
                 _ => &mcp_trim.claude_servers,
             };
-            format!(
-                "{text}{}",
-                crate::mcp_set::brief_section(servers, &mcp_trim.unregistered)
+            worker_brief_sections(
+                text,
+                servers,
+                &mcp_trim.unregistered,
+                self.cfg
+                    .pod
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.source.as_str()),
             )
         });
         let prompt_file = match brief_text.as_deref() {
@@ -5587,6 +5594,27 @@ fn session_list_order(a: &SessionSummary, b: &SessionSummary) -> std::cmp::Order
             .then_with(|| b.created_at.cmp(&a.created_at))
             .then_with(|| a.id.cmp(&b.id))
     })
+}
+
+/// Append the MCP and workspace-config sections to a worker brief (WI-2746,
+/// WI-4806). The workspace line names the `agent-workspace-config` commit the
+/// pod fetched, or `unknown`.
+fn worker_brief_sections(
+    text: &str,
+    servers: &[String],
+    unregistered: &[String],
+    workspace_source: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "{text}{}",
+        crate::mcp_set::brief_section(servers, unregistered)
+    );
+    if let Some(source) = workspace_source {
+        out.push_str(&crate::workspace_snapshot::workspace_config_brief_line(
+            std::path::Path::new(source),
+        ));
+    }
+    out
 }
 
 /// The largest summary a compacting wake accepts (WI-2037).
@@ -8599,5 +8627,47 @@ mod host_placement_tests {
             !scratch.exists(),
             "the scratch dirs go when the session ends"
         );
+    }
+
+    #[test]
+    fn a_worker_brief_carries_the_workspace_config_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path();
+        let repo = source.join("agent-workspace-config");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("rule.md"), "rule").unwrap();
+        git(&["add", "rule.md"]);
+        git(&["commit", "-qm", "awc"]);
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let full = String::from_utf8(head.stdout).unwrap();
+        let full = full.trim();
+        let brief = super::worker_brief_sections(
+            "BRIEF",
+            &["vogt".to_string()],
+            &[],
+            Some(source.to_str().unwrap()),
+        );
+        assert!(brief.contains(&format!(
+            "Workspace config: agent-workspace-config @ {}",
+            &full[..7]
+        )));
+        assert!(brief.contains("## MCP servers"));
     }
 }
