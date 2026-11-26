@@ -2032,6 +2032,25 @@ mod tests {
     }
 
     #[test]
+    fn tier_granted_event_carries_the_dotted_type_tag() {
+        let granted = ServerEvent::AgentAuthTierGranted {
+            session: Uuid::nil(),
+            person: "human:ada".into(),
+            lane: "vogt-dev".into(),
+            names: vec![
+                "INFISICAL_CLIENT_ID".into(),
+                "INFISICAL_CLIENT_SECRET".into(),
+            ],
+        };
+        let json = serde_json::to_value(&granted).unwrap();
+        assert_eq!(json["type"], "agent_auth.tier_granted");
+        assert_eq!(json["person"], "human:ada");
+        assert_eq!(json["lane"], "vogt-dev");
+        assert_eq!(json["names"][0], "INFISICAL_CLIENT_ID");
+        assert_eq!(json["names"][1], "INFISICAL_CLIENT_SECRET");
+    }
+
+    #[test]
     fn parses_server_event_activity() {
         let raw = r#"{"type":"activity","id":"00000000-0000-0000-0000-000000000000","state":"running","activity_changed_at":"2026-08-30T00:00:00Z"}"#;
         match serde_json::from_str::<ServerEvent>(raw).unwrap() {
