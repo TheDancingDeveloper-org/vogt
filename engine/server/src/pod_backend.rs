@@ -8,10 +8,11 @@ use crate::{
 };
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
-    EmptyDirVolumeSource, EnvFromSource, EnvVar, HostPathVolumeSource, NodeAffinity, NodeSelector,
-    NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaimVolumeSource, Pod,
-    PodSecurityContext, PodSpec, PreferredSchedulingTerm, ResourceRequirements, SeccompProfile,
-    Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+    EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, HostPathVolumeSource, NodeAffinity,
+    NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaimVolumeSource,
+    Pod, PodSecurityContext, PodSpec, PreferredSchedulingTerm, ResourceRequirements,
+    SeccompProfile, Secret, SecretEnvSource, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -1564,33 +1565,150 @@ pub fn is_shell_template(template: &SessionTemplate) -> bool {
     template.tags.iter().any(|tag| tag == "shell")
 }
 
-/// The tier's Infisical identity, mapped onto the ordinary `INFISICAL_CLIENT_*`
-/// names for a tier pod (WI-4814). The API URL and environment come from the
-/// engine's shared identity; the client id and secret come from the tier-only
-/// engine variables. Values are placed in the pod's spec env by
-/// [`pod_template`] only for a tier spawn under tier-scoped passthrough.
-fn tier_identity_env_pairs() -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    for source in ["INFISICAL_API_URL", "ENGINE_INFISICAL_ENV"] {
-        if let Some(value) = std::env::var_os(source) {
-            env.push((source.to_string(), value.to_string_lossy().into_owned()));
-        }
-    }
-    for (source, target) in [
+/// The key names inside a tier pod's per-session identity Secret.
+const TIER_SECRET_CLIENT_ID_KEY: &str = "client-id";
+const TIER_SECRET_CLIENT_SECRET_KEY: &str = "client-secret";
+
+/// The tier's non-secret Infisical settings (API URL and environment) that a
+/// tier pod gets as plain env (WI-4814).
+fn tier_identity_literal_pairs() -> Vec<(String, String)> {
+    ["INFISICAL_API_URL", "ENGINE_INFISICAL_ENV"]
+        .into_iter()
+        .filter_map(|source| {
+            std::env::var_os(source)
+                .map(|value| (source.to_string(), value.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// The tier's machine-identity client id and secret from the engine's
+/// tier-only variables, keyed by the name they take inside the pod's Secret.
+/// Values go only into the per-session Secret, never into a pod spec.
+fn tier_identity_secret_data() -> Vec<(&'static str, String)> {
+    [
         (
             "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
-            "INFISICAL_CLIENT_ID",
+            TIER_SECRET_CLIENT_ID_KEY,
         ),
         (
             "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
-            "INFISICAL_CLIENT_SECRET",
+            TIER_SECRET_CLIENT_SECRET_KEY,
         ),
+    ]
+    .into_iter()
+    .filter_map(|(source, key)| {
+        std::env::var_os(source).map(|value| (key, value.to_string_lossy().into_owned()))
+    })
+    .collect()
+}
+
+/// The name of a tier pod's identity Secret, derived from the pod's own
+/// (unique) bootstrap Secret name.
+fn tier_secret_name_for(bootstrap_name: &str) -> String {
+    format!("{bootstrap_name}-tier")
+}
+
+/// The env a tier pod carries for tier-scoped identity passthrough (WI-4814).
+/// A pod does not inherit the engine's environment, so the engine says what
+/// the in-pod `agent-auth.sh` needs: the passthrough mode (otherwise it sees
+/// the switch unset, goes brokered and strips the identity), the non-secret
+/// settings as plain values, and the client id and secret only as
+/// `secretKeyRef`s into the per-session Secret, so `get pods` shows no value.
+fn tier_pod_env(
+    passthrough_is_tier: bool,
+    literals: &[(String, String)],
+    secret_keys: &[&str],
+    secret_name: &str,
+) -> Vec<EnvVar> {
+    if !passthrough_is_tier {
+        return Vec::new();
+    }
+    let mut env = vec![EnvVar {
+        name: "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH".into(),
+        value: Some("tier".into()),
+        ..Default::default()
+    }];
+    for (name, value) in literals {
+        env.push(EnvVar {
+            name: name.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        });
+    }
+    for (key, name) in [
+        (TIER_SECRET_CLIENT_ID_KEY, "INFISICAL_CLIENT_ID"),
+        (TIER_SECRET_CLIENT_SECRET_KEY, "INFISICAL_CLIENT_SECRET"),
     ] {
-        if let Some(value) = std::env::var_os(source) {
-            env.push((target.to_string(), value.to_string_lossy().into_owned()));
+        if secret_keys.contains(&key) {
+            env.push(EnvVar {
+                name: name.into(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: secret_name.to_string(),
+                        key: key.to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
         }
     }
     env
+}
+
+/// The Secret name a tier pod's identity env refers to, if it has one.
+fn tier_secret_name_in(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .flat_map(|c| c.env.iter().flatten())
+        .find(|e| e.name == "INFISICAL_CLIENT_SECRET")?
+        .value_from
+        .as_ref()?
+        .secret_key_ref
+        .as_ref()
+        .map(|r| r.name.clone())
+}
+
+/// The per-session Secret holding a tier pod's machine identity, owned by the
+/// pod so the garbage collector deletes it with the pod (the engine's Role
+/// grants `create` only). Immutable; labelled so an orphan can be found.
+pub fn tier_identity_secret(
+    cfg: &PodConfig,
+    id: Uuid,
+    name: &str,
+    data: &[(&str, String)],
+    owner: &Pod,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(BTreeMap::from([
+                ("vogt.session".into(), id.to_string()),
+                ("vogt.kind".into(), "tier-identity".into()),
+                (ENGINE_LABEL.into(), cfg.engine_id.clone()),
+            ])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                name: owner.metadata.name.clone().unwrap_or_else(|| pod_name(id)),
+                uid: owner.metadata.uid.clone().unwrap_or_default(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        immutable: Some(true),
+        data: Some(
+            data.iter()
+                .map(|(k, v)| (k.to_string(), ByteString(v.as_bytes().to_vec())))
+                .collect(),
+        ),
+        ..Default::default()
+    }
 }
 
 fn pod_env(
@@ -1938,6 +2056,7 @@ pub fn pod_template(
     if tier.is_some() {
         labels.insert(TIER_LABEL.into(), ESTATE_ADMIN_LABEL_VALUE.into());
     }
+    let bootstrap_name = bootstrap_secret_name(id);
     let image = template
         .env
         .iter()
@@ -1957,19 +2076,14 @@ pub fn pod_template(
             value: Some(tier.into()),
             ..Default::default()
         });
-        // `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier` hands the tier
-        // identity to tier spawns only (WI-4814). A pod does not inherit the
-        // engine's process environment, so the mapped identity is put in its
-        // spec env explicitly.
-        if crate::pty::tier_identity_passthrough_enabled() {
-            for (name, value) in tier_identity_env_pairs() {
-                env.push(EnvVar {
-                    name,
-                    value: Some(value),
-                    ..Default::default()
-                });
-            }
-        }
+        let secret_data = tier_identity_secret_data();
+        let keys: Vec<&str> = secret_data.iter().map(|(k, _)| *k).collect();
+        env.extend(tier_pod_env(
+            crate::pty::tier_identity_passthrough_enabled(),
+            &tier_identity_literal_pairs(),
+            &keys,
+            &tier_secret_name_for(&bootstrap_name),
+        ));
     }
     if let Some(model) = model {
         env.push(EnvVar {
@@ -2223,7 +2337,7 @@ pub fn pod_template(
     volumes.push(Volume {
         name: BOOTSTRAP_VOLUME.into(),
         secret: Some(SecretVolumeSource {
-            secret_name: Some(bootstrap_secret_name(id)),
+            secret_name: Some(bootstrap_name.clone()),
             default_mode: Some(0o400),
             optional: Some(false),
             ..Default::default()
@@ -2779,6 +2893,16 @@ impl PodBackendFactory {
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("creating session cache secret: {e}"));
+        }
+        if let (Ok(()), Some(tier_name)) = (&made, tier_secret_name_in(&created)) {
+            let data = tier_identity_secret_data();
+            let secret = tier_identity_secret(&self.cfg, id, &tier_name, &data, &created);
+            // The error names the Secret, never its data.
+            made = api
+                .create(&PostParams::default(), &secret)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("creating tier identity secret: {e}"));
         }
         if let (Ok(()), Some((key, name))) = (&made, &tailnet) {
             let secret = session_tailnet::tailnet_secret(&self.cfg, id, name, key, &created);
@@ -3475,6 +3599,152 @@ mod tests {
                 Some(&repo.to_string())
             );
         }
+    }
+
+    fn env_names(env: &[EnvVar]) -> Vec<&str> {
+        env.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_tier_pod_carries_the_passthrough_mode_and_no_literal_identity_secret() {
+        let literals = vec![(
+            "INFISICAL_API_URL".to_string(),
+            "https://i.example".to_string(),
+        )];
+        let env = tier_pod_env(
+            true,
+            &literals,
+            &[TIER_SECRET_CLIENT_ID_KEY, TIER_SECRET_CLIENT_SECRET_KEY],
+            "pod-x-tier",
+        );
+        // The in-pod agent-auth.sh needs the mode, or it goes brokered and
+        // strips the tier identity.
+        let mode = env
+            .iter()
+            .find(|e| e.name == "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH")
+            .expect("mode carried");
+        assert_eq!(mode.value.as_deref(), Some("tier"));
+        for name in ["INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET"] {
+            let var = env.iter().find(|e| e.name == name).expect(name);
+            assert!(var.value.is_none(), "{name} must not be a literal value");
+            let key = var
+                .value_from
+                .as_ref()
+                .and_then(|f| f.secret_key_ref.as_ref())
+                .expect("a secretKeyRef");
+            assert_eq!(key.name, "pod-x-tier");
+        }
+        assert_eq!(
+            env.iter()
+                .find(|e| e.name == "INFISICAL_API_URL")
+                .and_then(|e| e.value.as_deref()),
+            Some("https://i.example")
+        );
+    }
+
+    #[test]
+    fn a_pod_outside_tier_passthrough_carries_no_tier_identity_env() {
+        // Non-tier pods never reach tier_pod_env's output (pod_template only
+        // calls it for a tier spawn); a tier pod on a lane without tier
+        // passthrough carries no mode and no identity either.
+        assert!(tier_pod_env(
+            false,
+            &[("INFISICAL_API_URL".into(), "x".into())],
+            &[TIER_SECRET_CLIENT_ID_KEY, TIER_SECRET_CLIENT_SECRET_KEY],
+            "n",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn pod_template_sets_no_identity_env_on_an_ordinary_pod() {
+        let cfg = PodConfig::default();
+        let template = SessionTemplate {
+            name: "t".into(),
+            description: "t".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+        };
+        let src = session_source(Some(&project_source("vogt", "rust-2")), &registry()).unwrap();
+        let pod = pod_template(
+            &cfg,
+            &template,
+            Uuid::nil(),
+            &src,
+            &source_env(&src),
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+            None,
+        );
+        let env: Vec<EnvVar> = pod
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .flat_map(|c| c.env.unwrap_or_default())
+            .collect();
+        let names = env_names(&env);
+        for reserved in [
+            "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH",
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+        ] {
+            assert!(!names.contains(&reserved), "{reserved}");
+        }
+    }
+
+    #[test]
+    fn the_tier_identity_secret_is_owned_by_the_pod_and_found_from_its_env() {
+        let cfg = PodConfig::default();
+        let mut owner = Pod::default();
+        owner.metadata.name = Some("vogt-session-x".into());
+        owner.metadata.uid = Some("uid-1".into());
+        let secret = tier_identity_secret(
+            &cfg,
+            Uuid::nil(),
+            "vogt-session-x-tier",
+            &[(TIER_SECRET_CLIENT_SECRET_KEY, "s3".into())],
+            &owner,
+        );
+        let refs = secret.metadata.owner_references.as_ref().unwrap();
+        assert_eq!(refs[0].uid, "uid-1");
+        assert_eq!(refs[0].kind, "Pod");
+        assert!(secret.data.as_ref().unwrap().contains_key("client-secret"));
+
+        let pod = Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    env: Some(tier_pod_env(
+                        true,
+                        &[],
+                        &[TIER_SECRET_CLIENT_SECRET_KEY],
+                        "vogt-session-x-tier",
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            tier_secret_name_in(&pod).as_deref(),
+            Some("vogt-session-x-tier")
+        );
+        assert_eq!(tier_secret_name_in(&Pod::default()), None);
     }
 
     #[test]
