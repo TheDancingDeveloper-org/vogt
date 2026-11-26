@@ -16,7 +16,9 @@
 #            Gitea or Forgejo)
 #   k8s      K8S_AGENT_READONLY_KUBECONFIG          (the kubeconfig itself,
 #            raw or base64, for a read-only service account that cannot
-#            read Secrets; written to a 0600 file for the run, never argv)
+#            read Secrets; when the manifest declares it `ondemand` instead
+#            of exporting it, the value is fetched from the engine's secret
+#            broker at spawn. Written to a 0600 file for the run, never argv.)
 #
 # Read-only is enforced twice: by the server's own mode below and by the
 # token's scope, which is the one that holds if a server's mode has a gap.
@@ -91,7 +93,12 @@ case "$server" in
         exec gitea-mcp -t stdio -r
         ;;
     k8s)
-        need K8S_AGENT_READONLY_KUBECONFIG
+        value="${K8S_AGENT_READONLY_KUBECONFIG:-}"
+        if [[ -z "$value" ]]; then
+            value="$("${VOGT_AGENT_AUTH:-/usr/local/bin/vogt-agent-auth}" fetch K8S_AGENT_READONLY_KUBECONFIG)" \
+                || die "K8S_AGENT_READONLY_KUBECONFIG is not set and could not be fetched from the secret broker"
+        fi
+        [[ -n "$value" ]] || die "K8S_AGENT_READONLY_KUBECONFIG is empty"
         # The kubeconfig is a credential: it stays out of argv and the repo.
         # The server reads a file, so write one (0600, in a 0700 directory)
         # and remove it when the server exits. The server runs as a child,
@@ -103,10 +110,10 @@ case "$server" in
         trap 'exit 143' TERM
         trap 'exit 130' INT
         kubeconfig="$kdir/kubeconfig"
-        if [[ "$K8S_AGENT_READONLY_KUBECONFIG" == *clusters:* ]]; then
-            printf '%s\n' "$K8S_AGENT_READONLY_KUBECONFIG" >"$kubeconfig"
+        if [[ "$value" == *clusters:* ]]; then
+            printf '%s\n' "$value" >"$kubeconfig"
         else
-            printf '%s' "$K8S_AGENT_READONLY_KUBECONFIG" | base64 -d >"$kubeconfig" 2>/dev/null \
+            printf '%s' "$value" | base64 -d >"$kubeconfig" 2>/dev/null \
                 || die "K8S_AGENT_READONLY_KUBECONFIG is neither a kubeconfig nor base64 of one"
         fi
         # Only this file may configure the client: drop the alternatives.
