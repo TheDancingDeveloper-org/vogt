@@ -172,8 +172,6 @@ pub struct Session {
     posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
     mcp_set: Mutex<Option<String>>,
-    /// The estate-admin tier this session was granted, when it was (WI-4814).
-    tier: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -919,7 +917,6 @@ impl Session {
             posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
             mcp_set: self.mcp_set.lock().clone(),
-            tier: self.tier(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
             budget: self.budget(),
@@ -996,14 +993,6 @@ impl Session {
 
     pub fn set_mcp_set(&self, mcp_set: Option<String>) {
         *self.mcp_set.lock() = mcp_set;
-    }
-
-    pub fn set_tier(&self, tier: Option<String>) {
-        *self.tier.lock() = tier;
-    }
-
-    pub fn tier(&self) -> Option<String> {
-        self.tier.lock().clone()
     }
 
     pub fn account(&self) -> Option<String> {
@@ -1483,10 +1472,6 @@ pub struct SpawnDefaults<'a> {
     /// the helper as `ENGINE_AGENT_AUTH_SECRETS` in place of the engine's
     /// boot-time copy. `None` keeps the engine's own variable.
     pub agent_auth_manifest: Option<String>,
-    /// The estate-admin tier this launch was granted, when it was (WI-4814):
-    /// carried into the child's environment as `VOGT_AGENT_AUTH_TIER` and,
-    /// when identity passthrough is `tier`, the tier identity.
-    pub tier: Option<&'a str>,
     /// Called once the child has exited and its output is drained, after
     /// `SessionKilled` is published. The registry uses it to forget the
     /// hibernation record of a session that ended (rather than hibernated).
@@ -1585,26 +1570,6 @@ where
         .collect()
 }
 
-/// The engine-reserved environment variable a tier spawn carries (WI-4814):
-/// `estate-admin` for a person-started oversight session on a lane that sets
-/// `ENGINE_ESTATE_ADMIN_TIER`. A caller's `spec.env` is refused this name.
-pub(crate) const AGENT_AUTH_TIER_ENV: &str = "VOGT_AGENT_AUTH_TIER";
-
-/// The tier value the session record keeps, and the marker env above carries.
-pub(crate) const ESTATE_ADMIN_TIER: &str = "estate_admin";
-
-/// The engine env names holding the tier's own Infisical machine identity,
-/// mapped into the ordinary `INFISICAL_CLIENT_*` names for a tier spawn
-/// (WI-4814). They are identity, never helper config, so they are withheld
-/// from the helper's re-grant below and mapped explicitly.
-fn is_tier_identity_source_env(key: &str) -> bool {
-    matches!(
-        key.to_ascii_uppercase().as_str(),
-        "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID"
-            | "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET"
-    )
-}
-
 /// Whether an environment variable is one the agent-auth helper (and only the
 /// helper) is re-granted on top of [`sanitized_child_env`].
 ///
@@ -1614,42 +1579,16 @@ fn is_tier_identity_source_env(key: &str) -> bool {
 /// shell (`engine/deploy/agent-auth.sh`). This is a tight allowlist, not an
 /// exemption from stripping: the broad engine secrets (`ENGINE_TOKEN`, the
 /// scoped token set, the assistant/STT/TTS keys, `TAILSCALE_AUTH_KEY`) are
-/// still withheld from the helper. The tier identity source variables are
-/// withheld too: they are mapped to `INFISICAL_CLIENT_*` only for a tier spawn.
+/// still withheld from the helper.
 fn is_agent_auth_helper_env(key: &str) -> bool {
     let k = key.to_ascii_uppercase();
-    !is_tier_identity_source_env(&k)
-        && (matches!(
-            k.as_str(),
-            "INFISICAL_API_URL"
-                | "INFISICAL_CLIENT_ID"
-                | "INFISICAL_CLIENT_SECRET"
-                | "ENGINE_INFISICAL_ENV"
-        ) || k.starts_with("ENGINE_AGENT_AUTH_"))
-}
-
-/// The viewer Infisical machine identity the helper and the broker use.
-fn agent_auth_identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    std::env::vars_os()
-        .filter(|(k, _)| match k.to_str() {
-            Some(s) => is_identity_env(s),
-            None => false,
-        })
-        .collect()
-}
-
-/// The helper's non-identity configuration: the `ENGINE_AGENT_AUTH_*` manifest
-/// and switch variables, minus the tier identity source names.
-fn agent_auth_config_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    std::env::vars_os()
-        .filter(|(k, _)| match k.to_str() {
-            Some(s) => {
-                let k = s.to_ascii_uppercase();
-                k.starts_with("ENGINE_AGENT_AUTH_") && !is_tier_identity_source_env(&k)
-            }
-            None => false,
-        })
-        .collect()
+    matches!(
+        k.as_str(),
+        "INFISICAL_API_URL"
+            | "INFISICAL_CLIENT_ID"
+            | "INFISICAL_CLIENT_SECRET"
+            | "ENGINE_INFISICAL_ENV"
+    ) || k.starts_with("ENGINE_AGENT_AUTH_")
 }
 
 /// The subset of the engine's environment the agent-auth helper is re-granted:
@@ -1687,41 +1626,14 @@ fn identity_passthrough_from(value: Option<&str>) -> bool {
     )
 }
 
-/// How the deployment scopes identity passthrough (WI-4814): full passthrough
-/// (`1`/`true`), tier-only passthrough (`tier`), or the brokered default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdentityPassthrough {
-    Off,
-    Full,
-    Tier,
-}
-
-fn identity_passthrough_mode_from(value: Option<&str>) -> IdentityPassthrough {
-    match value.map(str::trim) {
-        Some("tier") | Some("TIER") => IdentityPassthrough::Tier,
-        Some(v) if identity_passthrough_from(Some(v)) => IdentityPassthrough::Full,
-        _ => IdentityPassthrough::Off,
-    }
-}
-
-fn identity_passthrough_mode() -> IdentityPassthrough {
-    identity_passthrough_mode_from(
+/// Whether this deployment opts every session into holding the full secrets-
+/// manager identity, reversing the default strip for the four identity vars.
+pub(crate) fn identity_passthrough_enabled() -> bool {
+    identity_passthrough_from(
         std::env::var("ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH")
             .ok()
             .as_deref(),
     )
-}
-
-/// Whether this deployment opts every session into holding the full secrets-
-/// manager identity, reversing the default strip for the four identity vars.
-pub(crate) fn identity_passthrough_enabled() -> bool {
-    identity_passthrough_mode() == IdentityPassthrough::Full
-}
-
-/// Whether this deployment hands the tier identity to tier spawns only
-/// (`ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier`, WI-4814).
-pub(crate) fn tier_identity_passthrough_enabled() -> bool {
-    identity_passthrough_mode() == IdentityPassthrough::Tier
 }
 
 /// The Infisical identity variables re-granted to a session in identity-
@@ -1734,37 +1646,6 @@ pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
             None => false,
         })
         .collect()
-}
-
-/// The tier's own Infisical identity, mapped onto the ordinary
-/// `INFISICAL_CLIENT_*` names for a tier spawn (WI-4814): the API URL and
-/// environment come from the engine's shared identity; the client id and
-/// secret come from the tier-only engine variables.
-pub(crate) fn tier_identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
-        .filter(|(k, _)| match k.to_str() {
-            Some(s) => matches!(
-                s.to_ascii_uppercase().as_str(),
-                "INFISICAL_API_URL" | "ENGINE_INFISICAL_ENV"
-            ),
-            None => false,
-        })
-        .collect();
-    for (source, target) in [
-        (
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
-            "INFISICAL_CLIENT_ID",
-        ),
-        (
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
-            "INFISICAL_CLIENT_SECRET",
-        ),
-    ] {
-        if let Some(value) = std::env::var_os(source) {
-            env.push((std::ffi::OsString::from(target), value));
-        }
-    }
-    env
 }
 
 /// Is the child command's program the configured agent-auth helper? A session
@@ -1861,19 +1742,7 @@ pub fn spawn(
     // exactly those variables — and only to the helper command, never to a
     // caller command or a bare shell.
     if spawning_agent_auth_helper {
-        match identity_passthrough_mode() {
-            IdentityPassthrough::Tier if defaults.tier.is_some() => {
-                for (k, v) in tier_identity_env() {
-                    cmd.env(k, v);
-                }
-            }
-            _ => {
-                for (k, v) in agent_auth_identity_env() {
-                    cmd.env(k, v);
-                }
-            }
-        }
-        for (k, v) in agent_auth_config_env() {
+        for (k, v) in agent_auth_helper_env() {
             cmd.env(k, v);
         }
         if let Some(manifest) = defaults.agent_auth_manifest.as_ref() {
@@ -1890,15 +1759,6 @@ pub fn spawn(
         for (k, v) in identity_env() {
             cmd.env(k, v);
         }
-    } else if tier_identity_passthrough_enabled() && defaults.tier.is_some() {
-        for (k, v) in tier_identity_env() {
-            cmd.env(k, v);
-        }
-    }
-    // The tier marker travels with every tier spawn, whatever the identity
-    // passthrough mode: tooling reads it to know this session is tiered.
-    if let Some(tier) = defaults.tier {
-        cmd.env(AGENT_AUTH_TIER_ENV, tier);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("VOGT_ENGINE_SESSION", &spec.name);
@@ -2078,7 +1938,6 @@ fn assemble_session(
         posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
         mcp_set: Mutex::new(None),
-        tier: Mutex::new(None),
         stop: Mutex::new(None),
         launcher,
         first_output_seen: AtomicBool::new(false),
@@ -3530,65 +3389,6 @@ mod secret_env_tests {
             helper
         ));
     }
-
-    #[test]
-    fn tier_passthrough_parses_tier_and_keeps_legacy_truthy_values() {
-        use super::{identity_passthrough_mode_from, IdentityPassthrough};
-        for value in ["tier", "TIER", " tier ", "TIER "] {
-            assert_eq!(
-                identity_passthrough_mode_from(Some(value)),
-                IdentityPassthrough::Tier,
-                "{value:?}"
-            );
-        }
-        for value in ["1", "true", "TRUE", "yes", "on"] {
-            assert_eq!(
-                identity_passthrough_mode_from(Some(value)),
-                IdentityPassthrough::Full,
-                "{value:?}"
-            );
-        }
-        for value in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("false"),
-            Some("no"),
-            Some("off"),
-        ] {
-            assert_eq!(
-                identity_passthrough_mode_from(value),
-                IdentityPassthrough::Off,
-                "{value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tier_identity_source_names_are_not_helper_config() {
-        use super::is_tier_identity_source_env;
-        for key in [
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
-            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
-            "engine_agent_auth_tier_infisical_client_id",
-        ] {
-            assert!(
-                is_tier_identity_source_env(key),
-                "{key} is tier identity, not helper config"
-            );
-        }
-        for key in [
-            "INFISICAL_CLIENT_ID",
-            "INFISICAL_CLIENT_SECRET",
-            "ENGINE_AGENT_AUTH_SECRETS",
-            "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH",
-        ] {
-            assert!(
-                !is_tier_identity_source_env(key),
-                "{key} is ordinary helper config"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -3964,7 +3764,6 @@ mod attach_render_tests {
                 activity_idle_after_ms: 200,
                 secret_broker: None,
                 agent_auth_manifest: None,
-                tier: None,
                 on_exit: None,
             },
             EventBus::new(64),
@@ -4101,7 +3900,6 @@ mod attach_render_tests {
                 activity_idle_after_ms: 200,
                 secret_broker: None,
                 agent_auth_manifest: None,
-                tier: None,
                 on_exit: None,
             },
             EventBus::new(64),
@@ -4202,7 +4000,6 @@ mod pty_size_clamp_tests {
                 activity_idle_after_ms: 200,
                 secret_broker: None,
                 agent_auth_manifest: None,
-                tier: None,
                 on_exit: None,
             },
             EventBus::new(8),
