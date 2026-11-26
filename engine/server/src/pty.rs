@@ -1931,6 +1931,22 @@ pub fn spawn(
             cmd.env(k, v);
         }
     }
+    // WI-4832: a Claude Code session under an account with a long-lived token
+    // gets it as `CLAUDE_CODE_OAUTH_TOKEN`, in the spawn env only (never argv,
+    // never the recorded `spec.env`). It is set last so a caller's own env
+    // cannot swap in another login. Claude Code ranks this token above the
+    // account directory's `.credentials.json`, so a stale file never wins and
+    // there is no refresh to burn.
+    if let Some(token) = crate::claude_oauth_token::token_for_session(
+        spec.account.as_deref(),
+        spec.command.as_deref(),
+        |name| std::env::var(name).ok(),
+    ) {
+        cmd.env(
+            crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV,
+            token,
+        );
+    }
 
     let child = pair
         .slave
@@ -4293,5 +4309,85 @@ mod pty_size_clamp_tests {
         let session = spawn_cat(Some(65535), Some(0));
         assert_eq!(*session.watch_size().borrow(), (MAX_PTY_COLS, 1));
         assert_eq!(session.backend.current_size().unwrap(), (1, MAX_PTY_COLS)); // (rows, cols)
+    }
+}
+
+/// WI-4832: the host spawn gives an account's long-lived token to a Claude Code
+/// session under that account, in its environment, and to nothing else.
+#[cfg(test)]
+mod claude_oauth_token_spawn_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    /// Runs `argv0` (a script that records the token variable) under `account`
+    /// and returns what it saw: `unset` or the value.
+    fn seen(dir: &std::path::Path, script_name: &str, account: Option<&str>) -> String {
+        let out = dir.join(format!("{}.out", Uuid::new_v4()));
+        let script = dir.join(script_name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{CLAUDE_CODE_OAUTH_TOKEN-unset}}\" > '{}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = SessionSpec {
+            name: "oauth".into(),
+            command: Some(vec![script.to_string_lossy().into_owned()]),
+            account: account.map(str::to_string),
+            ..Default::default()
+        };
+        let _spawned = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir,
+                scrollback_bytes: 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                tier: None,
+                on_exit: None,
+            },
+            EventBus::new(8),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the script never ran");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_claude_session_under_the_account_gets_its_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = "wi4832host";
+        let var = crate::claude_oauth_token::engine_env_name(account);
+
+        // No token configured: no new env.
+        std::env::remove_var(&var);
+        assert_eq!(seen(dir.path(), "claude", Some(account)), "unset");
+
+        std::env::set_var(&var, "host-token-value");
+        assert_eq!(
+            seen(dir.path(), "claude", Some(account)),
+            "host-token-value"
+        );
+        // Another account, no account, or a program that is not Claude Code.
+        assert_eq!(seen(dir.path(), "claude", Some("other")), "unset");
+        assert_eq!(seen(dir.path(), "claude", None), "unset");
+        assert_eq!(seen(dir.path(), "not-claude", Some(account)), "unset");
+        std::env::remove_var(&var);
     }
 }

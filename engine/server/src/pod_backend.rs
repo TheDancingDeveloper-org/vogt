@@ -1556,6 +1556,86 @@ pub fn bootstrap_secret(
     }
 }
 
+/// The key inside a Claude pod's per-session OAuth-token Secret (WI-4832).
+const CLAUDE_OAUTH_SECRET_KEY: &str = "token";
+
+/// The name of a Claude pod's OAuth-token Secret, derived from the pod's own
+/// (unique) bootstrap Secret name.
+fn claude_oauth_secret_name_for(bootstrap_name: &str) -> String {
+    format!("{bootstrap_name}-claude-oauth")
+}
+
+/// The env a Claude pod carries for its account's long-lived token: a
+/// `secretKeyRef` into the per-session Secret, never a literal value, so
+/// `get pods` shows no token (WI-4832).
+fn claude_oauth_env(secret_name: &str) -> EnvVar {
+    EnvVar {
+        name: crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV.into(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret_name.to_string(),
+                key: CLAUDE_OAUTH_SECRET_KEY.into(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The Secret name a pod's Claude token env refers to, if it has one.
+fn claude_oauth_secret_name_in(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .flat_map(|c| c.env.iter().flatten())
+        .find(|e| e.name == crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV)?
+        .value_from
+        .as_ref()?
+        .secret_key_ref
+        .as_ref()
+        .map(|r| r.name.clone())
+}
+
+/// The per-session Secret holding a Claude pod's account token, owned by the
+/// pod so the garbage collector deletes it with the pod. Immutable; labelled
+/// so an orphan can be found. `token` is the value, kept out of every log.
+pub fn claude_oauth_secret(
+    cfg: &PodConfig,
+    id: Uuid,
+    name: &str,
+    token: &str,
+    owner: &Pod,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(BTreeMap::from([
+                ("vogt.session".into(), id.to_string()),
+                ("vogt.kind".into(), "claude-oauth".into()),
+                (ENGINE_LABEL.into(), cfg.engine_id.clone()),
+            ])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                name: owner.metadata.name.clone().unwrap_or_else(|| pod_name(id)),
+                uid: owner.metadata.uid.clone().unwrap_or_default(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        immutable: Some(true),
+        data: Some(BTreeMap::from([(
+            CLAUDE_OAUTH_SECRET_KEY.to_string(),
+            ByteString(token.as_bytes().to_vec()),
+        )])),
+        ..Default::default()
+    }
+}
+
 /// The argv a pod runs for a shell template with no command (WI-4521).
 pub const POD_LOGIN_SHELL: [&str; 2] = ["bash", "-l"];
 
@@ -2158,6 +2238,18 @@ pub fn pod_template(
         if let Some(cli) = env.iter_mut().find(|e| e.name == "VOGT_CLI") {
             cli.value = Some(agent.clone());
         }
+    }
+    // WI-4832: a Claude Code pod under an account with a long-lived token
+    // gets it from a per-session Secret, so the pod needs no credentials
+    // copy and has no refresh token to burn. Only the reference is in the spec.
+    if crate::claude_oauth_token::token_for_session(account, Some(command), |name| {
+        std::env::var(name).ok()
+    })
+    .is_some()
+    {
+        env.push(claude_oauth_env(&claude_oauth_secret_name_for(
+            &bootstrap_name,
+        )));
     }
     // Any other requested argv runs in the PTY (the session agent reads it);
     // the container command stays the image entrypoint.
@@ -2910,6 +3002,28 @@ impl PodBackendFactory {
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("creating tier identity secret: {e}"));
+        }
+        if let (Ok(()), Some(secret_name)) = (&made, claude_oauth_secret_name_in(&created)) {
+            // The pod names the account; the value is read here, not carried.
+            let token = crate::claude_oauth_token::token_for(
+                created
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("vogt.account"))
+                    .map(String::as_str),
+            );
+            made = match token {
+                Some(token) => {
+                    let secret = claude_oauth_secret(&self.cfg, id, &secret_name, &token, &created);
+                    // The error names the Secret, never its data.
+                    api.create(&PostParams::default(), &secret)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("creating claude oauth secret: {e}"))
+                }
+                None => Err("the account's Claude token is no longer configured".to_string()),
+            };
         }
         if let (Ok(()), Some((key, name))) = (&made, &tailnet) {
             let secret = session_tailnet::tailnet_secret(&self.cfg, id, name, key, &created);
@@ -3773,6 +3887,105 @@ mod tests {
         assert_eq!(
             tier_secret_name_in(&id_only).as_deref(),
             Some("vogt-session-x-tier")
+        );
+    }
+
+    /// WI-4832: a Claude pod under an account with a token gets it as a
+    /// `secretKeyRef` into a per-session Secret, never a literal value.
+    #[test]
+    fn a_claude_pod_carries_its_account_token_as_a_secret_ref_only() {
+        let cfg = PodConfig::default();
+        let templates = SessionTemplate::default_templates();
+        let template = templates
+            .iter()
+            .find(|t| t.name == "Claude Code (protected)")
+            .unwrap();
+        // A name no other test or deployment uses, so setting the variable
+        // cannot leak into another test.
+        let account = "wi4832pod";
+        let var = crate::claude_oauth_token::engine_env_name(account);
+        let build = |account: Option<&str>, command: &[String]| {
+            pod_template(
+                &cfg,
+                template,
+                Uuid::nil(),
+                &default_source(&cfg),
+                &[],
+                "session",
+                account,
+                None,
+                None,
+                None,
+                vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+                command,
+                None,
+            )
+        };
+        let command = template.command.clone().unwrap_or_default();
+        let token_env = |pod: &Pod| {
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .iter()
+                .flatten()
+                .find(|e| e.name == "CLAUDE_CODE_OAUTH_TOKEN")
+                .cloned()
+        };
+
+        // No token configured: unchanged, no new env.
+        std::env::remove_var(&var);
+        assert!(token_env(&build(Some(account), &command)).is_none());
+
+        std::env::set_var(&var, "sk-ant-oat-pod-secret-value");
+        let pod = build(Some(account), &command);
+        let env = token_env(&pod).expect("token env");
+        assert_eq!(env.value, None, "no literal value in the pod spec");
+        let key = env.value_from.unwrap().secret_key_ref.unwrap();
+        assert_eq!(key.key, "token");
+        assert!(
+            key.name.ends_with("-bootstrap-claude-oauth"),
+            "{}",
+            key.name
+        );
+        assert_eq!(
+            claude_oauth_secret_name_in(&pod).as_deref(),
+            Some(key.name.as_str())
+        );
+        assert!(
+            !serde_json::to_string(&pod)
+                .unwrap()
+                .contains("pod-secret-value"),
+            "the token value must not appear anywhere in the pod spec"
+        );
+        // Another account, no account, a non-Claude command: nothing.
+        assert!(token_env(&build(Some("other"), &command)).is_none());
+        assert!(token_env(&build(None, &command)).is_none());
+        assert!(token_env(&build(Some(account), &["codex".to_string()])).is_none());
+        std::env::remove_var(&var);
+    }
+
+    /// WI-4832: the per-session Secret holds the value, is owned by the pod
+    /// and immutable.
+    #[test]
+    fn the_claude_oauth_secret_holds_the_token_and_is_owned_by_the_pod() {
+        let cfg = PodConfig::default();
+        let owner = Pod {
+            metadata: ObjectMeta {
+                name: Some("p".into()),
+                uid: Some("u".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let secret = claude_oauth_secret(&cfg, Uuid::nil(), "p-claude-oauth", "tok", &owner);
+        assert_eq!(secret.immutable, Some(true));
+        assert_eq!(secret.data.as_ref().unwrap()["token"].0, b"tok");
+        assert_eq!(
+            secret.metadata.owner_references.as_ref().unwrap()[0].uid,
+            "u"
+        );
+        assert_eq!(
+            secret.metadata.labels.as_ref().unwrap()["vogt.kind"],
+            "claude-oauth"
         );
     }
 

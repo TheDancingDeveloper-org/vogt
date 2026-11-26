@@ -24,6 +24,7 @@ pub mod chat_codex;
 pub mod chat_store;
 pub mod chats;
 pub mod claude_config;
+pub mod claude_oauth_token;
 pub mod client_diag;
 mod codex_rollout;
 pub mod compact_backoff;

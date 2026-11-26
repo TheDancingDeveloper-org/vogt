@@ -1247,8 +1247,11 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
 fn with_onboarding_config(
     mut files: Vec<(String, Vec<u8>)>,
     work_dirs: &[&str],
+    token_login: bool,
 ) -> Vec<(String, Vec<u8>)> {
-    if !files.iter().any(|(path, _)| path == ".credentials.json") {
+    // A pod signed in by `CLAUDE_CODE_OAUTH_TOKEN` carries no login file, but
+    // Claude Code still needs the config to skip its first-run flow (WI-4832).
+    if !token_login && !files.iter().any(|(path, _)| path == ".credentials.json") {
         return files;
     }
     let config = match files.iter().position(|(path, _)| path == ".claude.json") {
@@ -1297,6 +1300,21 @@ fn resumes_conversation(path: &str, conversation: &str) -> bool {
     vogt_session_agent::is_conversation_transcript(path, conversation)
 }
 
+/// The files a pod's account bundle carries. With a token login (WI-4832) the
+/// single-use `.credentials.json` is not copied, so no pod holds a refresh
+/// token to burn or a stale file that could be refreshed over the token; the
+/// onboarding config still travels so Claude Code skips its first-run flow.
+fn bundle_files(
+    mut files: Vec<(String, Vec<u8>)>,
+    work_dirs: &[&str],
+    token_login: bool,
+) -> Vec<(String, Vec<u8>)> {
+    if token_login {
+        files.retain(|(path, _)| path != ".credentials.json");
+    }
+    with_onboarding_config(files, work_dirs, token_login)
+}
+
 /// The account bundle a pod resumes from: the login, the global config, a
 /// woken session's transcript, and project memory when it is on. Returns the
 /// bundle and whether it carries the session's conversation.
@@ -1323,7 +1341,12 @@ fn pod_bundle(
             .sessions
             .secret_broker()
             .bundle_snapshot(account, conversation.unwrap_or(""));
-        for (path, bytes) in with_onboarding_config(files, onboarding_dirs) {
+        // WI-4832: an account with a long-lived token signs the pod in through
+        // `CLAUDE_CODE_OAUTH_TOKEN`. Other accounts and CLIs are unchanged.
+        let token_login = cli == "claude"
+            && !account.is_empty()
+            && crate::claude_oauth_token::is_configured(Some(account));
+        for (path, bytes) in bundle_files(files, onboarding_dirs, token_login) {
             // Claude keeps `<conversation>.jsonl`; a Codex rollout is
             // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
             // woken Codex pod starts a fresh conversation and loses its
@@ -2971,12 +2994,37 @@ mod tests {
         ));
     }
 
+    /// WI-4832: with a token login the bundle has no `.credentials.json`
+    /// (the single-use refresh token is not copied) but keeps the config; with
+    /// none, the login travels exactly as before.
+    #[test]
+    fn a_token_login_bundle_drops_the_login_file_and_keeps_the_config() {
+        let files = || {
+            vec![
+                (".credentials.json".to_string(), b"{\"refresh\":1}".to_vec()),
+                (".claude.json".to_string(), b"{}".to_vec()),
+            ]
+        };
+        let with = bundle_files(files(), &["/work"], true);
+        assert!(with.iter().all(|(p, _)| p != ".credentials.json"));
+        assert!(with.iter().any(|(p, _)| p == ".claude.json"));
+        let seeded: serde_json::Value =
+            serde_json::from_slice(&with.iter().find(|(p, _)| p == ".claude.json").unwrap().1)
+                .unwrap();
+        assert_eq!(seeded["hasCompletedOnboarding"], true);
+        // Without a token: the login is copied, as before.
+        let without = bundle_files(files(), &["/work"], false);
+        assert!(without.iter().any(|(p, _)| p == ".credentials.json"));
+        // No login and no token: untouched (no config invented).
+        assert!(bundle_files(Vec::new(), &["/work"], false).is_empty());
+    }
+
     /// WI-2000: an alternate account's bundle gets trust and the external
     /// import approval for the checkout and for the workspace root.
     #[test]
     fn the_bundle_config_approves_every_given_directory() {
         let files = vec![(".credentials.json".to_string(), b"{}".to_vec())];
-        let files = with_onboarding_config(files, &["/work", "/home/a/Working"]);
+        let files = with_onboarding_config(files, &["/work", "/home/a/Working"], false);
         let config = files.iter().find(|(p, _)| p == ".claude.json").unwrap();
         let config: serde_json::Value = serde_json::from_slice(&config.1).unwrap();
         for dir in ["/work", "/home/a/Working"] {

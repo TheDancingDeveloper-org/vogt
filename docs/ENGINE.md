@@ -2302,6 +2302,45 @@ List the account there as well when the board should show it.
 - Logins are never copied between accounts. Claude Code's OAuth refresh token
   rotates on use, so a copied credentials file signs one of the two copies out.
 
+**Long-lived token per account (WI-4832).** A pod holds its own copy of an
+account's login, and the refresh token is single-use: the first session to
+refresh invalidates every other pod's copy, so pods show "Login expired" every
+6-12 hours. An account can instead use a token from `claude setup-token`
+(valid about a year, no refresh) through `CLAUDE_CODE_OAUTH_TOKEN`.
+
+- **Mint it once.** Run `claude setup-token` (interactive, browser) as that
+  account's login. Store the printed token in the secrets store from stdin, and
+  never print it or put it in argv.
+- **Give it to the engine** as `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT>`: the
+  account name upper-cased with `-` as `_` (`acct1` is
+  `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_ACCT1`), through an agent-auth manifest
+  line. It is an `ENGINE_` variable, so it is stripped from every child
+  environment. The engine sets `CLAUDE_CODE_OAUTH_TOKEN` itself, as below.
+- **Who gets it.** Only a Claude Code session started under that account. A
+  shell, Codex or OpenCode session, a session with no account and a session on
+  another account get nothing. A caller's `env` cannot override it on a host.
+  The value is never logged, audited or recorded in the session's environment;
+  the engine names at most the variable and account.
+- **Host sessions:** set in the spawn environment only, never in argv.
+- **Pod sessions:** the pod spec holds only a `secretKeyRef` to a per-session
+  Secret (`<bootstrap>-claude-oauth`, key `token`), owned by the pod and
+  deleted with it, the same pattern as the tier identity Secret. The token is
+  never a literal `EnvVar`, so `get pods` shows no value. The Secret
+  is created with the pod; if the token is gone by then, the start fails.
+- **No login file.** For such a pod the engine does not copy
+  `.credentials.json` into the bundle (the config still travels, so onboarding
+  is skipped), and the entrypoint removes a top-level `.credentials.json` if
+  one is present and skips the "signed out" warning. Claude Code ranks
+  `CLAUDE_CODE_OAUTH_TOKEN` above the login file, so on a host the account
+  directory's file is left alone (other tools may share it) and never wins.
+- **No token configured:** behaviour is unchanged (the credentials copy as
+  before). A shell pod that names an account is also unchanged: it still gets
+  the credentials copy, because the token goes to Claude Code sessions only.
+- **Rotation.** Re-run `claude setup-token` before the token expires (about a
+  year), store the new value under the same secret name, and restart the engine
+  so it reads it. Running sessions keep the old token until they restart. Note
+  the mint date so the renewal is not a surprise.
+
 #### Hibernation
 
 **Pod sessions:** the engine requests account/transcript write-back before
