@@ -116,7 +116,7 @@ if command -v ssh >/dev/null; then
         ssh_g "$h" | grep -qx 'connecttimeout 10' || fail "ssh_config: $h ConnectTimeout"
     done
     ssh_g edgerouter | grep -qx 'hostname 100.92.4.57' || fail "ssh_config: edgerouter HostName"
-    for pair in hertzde3=100.76.94.94 node-e=100.118.6.65 node-f=100.69.108.33 winrarhost=100.92.54.45 winrarhost1=100.92.54.45; do
+    for pair in hertzde3=100.76.94.94 node-e=100.118.6.65 node-f=100.69.108.33 winrarhost=100.92.54.45 winrarhost1=100.100.75.109 winrarhost4=100.99.138.82; do
         ssh_g "${pair%%=*}" | grep -qx "hostname ${pair#*=}" || fail "ssh_config: ${pair%%=*} HostName"
     done
     for h in github.com 100.63.0.1 100.128.0.1 192.168.1.75 example.com; do
