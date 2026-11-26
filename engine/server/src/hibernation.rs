@@ -154,6 +154,10 @@ pub struct Record {
     /// Never inherited by a session this one starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// The person who started the tiered session (WI-4814), kept so the
+    /// `agent_auth.tier_granted` event for a wake or adopt names them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_person: Option<String>,
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
@@ -279,6 +283,7 @@ impl Record {
             budget_session_secs: 0,
             role: SessionRole::Worker,
             tier: None,
+            tier_person: None,
             work_item: None,
             supervisor: None,
             wake_on: Vec::new(),

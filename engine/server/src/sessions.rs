@@ -222,6 +222,17 @@ fn announce_tier_grant(
     });
 }
 
+/// The person a tier grant names: the caller on a fresh start, the recorded
+/// starter on a wake or adopt (which have no caller).
+fn tier_grant_person(starter_name: Option<String>, creating: &Creating) -> String {
+    starter_name
+        .or_else(|| match creating {
+            Creating::Wake(record) => record.tier_person.clone(),
+            Creating::Fresh(_) => None,
+        })
+        .unwrap_or_default()
+}
+
 /// `spec.env` may not set the tier marker (WI-4814): the engine owns it, and
 /// sets it only on a tier spawn. Checked for every placement, so a host
 /// session and a pod session refuse alike.
@@ -2383,6 +2394,7 @@ impl SessionRegistry {
             workspace,
             conversation,
             tier,
+            tier_person,
         } = input;
         let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
         record.template = spec.template.clone();
@@ -2415,6 +2427,7 @@ impl SessionRegistry {
         record.source = spec.source.clone();
         record.budget = spec.budget.clone();
         record.role = spec.role;
+        record.tier_person = tier_person.filter(|_| tier.is_some());
         record.tier = tier;
         record.work_item = spec.work_item.clone();
         record.supervisor = spec.supervisor;
@@ -2635,6 +2648,7 @@ impl SessionRegistry {
             person_started,
             estate_admin_tier_enabled(),
         );
+        let tier_person = tier_grant_person(starter_name, &creating);
         // What a hibernation record keeps: the command and environment as
         // the template and caller gave them, before the engine adds its own
         // launch arguments and variables (a wake adds those again).
@@ -3324,6 +3338,7 @@ impl SessionRegistry {
                     workspace: workspace.clone(),
                     conversation: conversation.clone(),
                     tier: tier.clone(),
+                    tier_person: Some(tier_person.clone()).filter(|p| !p.is_empty()),
                 },
             )),
             Creating::Wake(record) => Some(self.woken_record(
@@ -3352,7 +3367,7 @@ impl SessionRegistry {
             &self.bus,
             id,
             tier.as_deref(),
-            starter_name.unwrap_or_default(),
+            tier_person.clone(),
             self.cfg.lane.clone().unwrap_or_default(),
         );
         // A fresh Codex session given a brief must actually start its first
@@ -6283,6 +6298,7 @@ struct FreshRecordInputs<'a> {
     workspace: Option<vogt_engine_contract::Workspace>,
     conversation: Option<vogt_engine_contract::AgentConversation>,
     tier: Option<String>,
+    tier_person: Option<String>,
 }
 
 /// A session worktree cut during a start that has not spawned yet (WI-1298).
@@ -6503,6 +6519,36 @@ mod tests {
             other => panic!("expected the tier grant, got {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "exactly one event per spawn");
+    }
+
+    #[test]
+    fn a_wake_or_adopt_grant_names_the_recorded_starter() {
+        let record = super::hibernation::Record {
+            tier: Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            tier_person: Some("alice".into()),
+            ..super::hibernation::Record::new(uuid::Uuid::new_v4(), "tiered".into(), "now".into())
+        };
+        let wake = super::Creating::Wake(Box::new(record));
+        let person = super::tier_grant_person(None, &wake);
+        assert_eq!(person, "alice");
+        let bus = crate::events::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        super::announce_tier_grant(
+            &bus,
+            uuid::Uuid::new_v4(),
+            Some(super::pty::ESTATE_ADMIN_TIER),
+            person,
+            "dev".into(),
+        );
+        match rx.try_recv() {
+            Ok(crate::events::ServerEvent::AgentAuthTierGranted { person, .. }) => {
+                assert_eq!(person, "alice");
+            }
+            other => panic!("expected the tier grant, got {other:?}"),
+        }
+        // A fresh start names its caller.
+        let fresh = super::Creating::Fresh(super::Origin::Api);
+        assert_eq!(super::tier_grant_person(Some("bob".into()), &fresh), "bob");
     }
 
     #[test]

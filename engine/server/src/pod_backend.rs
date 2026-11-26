@@ -1664,7 +1664,14 @@ fn tier_secret_name_in(pod: &Pod) -> Option<String> {
         .containers
         .iter()
         .flat_map(|c| c.env.iter().flatten())
-        .find(|e| e.name == "INFISICAL_CLIENT_SECRET")?
+        // Either variable may be the only one configured; both point at the
+        // same Secret, which must exist whenever either does.
+        .find(|e| {
+            matches!(
+                e.name.as_str(),
+                "INFISICAL_CLIENT_ID" | "INFISICAL_CLIENT_SECRET"
+            ) && e.value_from.is_some()
+        })?
         .value_from
         .as_ref()?
         .secret_key_ref
@@ -3745,6 +3752,28 @@ mod tests {
             Some("vogt-session-x-tier")
         );
         assert_eq!(tier_secret_name_in(&Pod::default()), None);
+
+        // A config with only the client id still needs its Secret created, or
+        // the pod sits in CreateContainerConfigError.
+        let id_only = Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    env: Some(tier_pod_env(
+                        true,
+                        &[],
+                        &[TIER_SECRET_CLIENT_ID_KEY],
+                        "vogt-session-x-tier",
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            tier_secret_name_in(&id_only).as_deref(),
+            Some("vogt-session-x-tier")
+        );
     }
 
     #[test]
