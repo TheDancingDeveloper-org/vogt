@@ -37,6 +37,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
     sync::{Mutex as StdMutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -642,6 +643,11 @@ pub async fn workspace(
         return (StatusCode::NOT_FOUND, "the workspace tree is not enabled").into_response();
     };
     let source = PathBuf::from(workspace.source);
+    // Move the workspace-config clone forward at most once per interval when
+    // the deployment opts in, so a session started after an awc merge sees it
+    // without an engine restart (WI-4806). Failures are logged and the
+    // existing tree is served.
+    refresh_workspace_config(&source, workspace_refresh_enabled()).await;
     let limit = workspace.max_bytes;
     let (bytes, etag) = match snapshot_cache().get(&source, limit).await {
         Ok(built) => built,
@@ -672,6 +678,139 @@ pub async fn workspace(
         .header(header::CACHE_CONTROL, "private, max-age=300")
         .body(Body::from(bytes))
         .expect("valid response")
+}
+
+/// Where the `agent-workspace-config` clone lives inside the snapshot source.
+pub const WORKSPACE_CONFIG_REPO: &str = "agent-workspace-config";
+
+/// The env flag that opts a deployment into refreshing the workspace-config
+/// clone at session start. Only the exact value `1` opts in, matching the pod
+/// feature flags beside it.
+const WORKSPACE_REFRESH_ENV: &str = "ENGINE_POD_WORKSPACE_REFRESH";
+/// Refresh at most this often, however many pods start in between.
+const WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// The whole fetch + checkout + install must finish inside this window.
+const WORKSPACE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The installed workspace-config commit a session is about to receive, as a
+/// short sha. `None` when the directory or git is missing; this never fails
+/// the session start.
+pub fn workspace_config_commit(source: &Path) -> Option<String> {
+    let repo = source.join(WORKSPACE_CONFIG_REPO);
+    if !repo.is_dir() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let full = String::from_utf8(output.stdout).ok()?;
+    let full = full.trim();
+    if full.is_empty() || !full.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let end = full.len().min(7);
+    Some(full[..end].to_string())
+}
+
+/// The one-line workspace-config status a worker brief carries, separated
+/// from the section above it.
+pub fn workspace_config_brief_line(source: &Path) -> String {
+    match workspace_config_commit(source) {
+        Some(sha) => format!("\n\nWorkspace config: agent-workspace-config @ {sha}"),
+        None => "\n\nWorkspace config: agent-workspace-config @ unknown".to_string(),
+    }
+}
+
+/// Whether the deployment opted into the session-start refresh.
+fn workspace_refresh_enabled() -> bool {
+    workspace_refresh_enabled_value(std::env::var(WORKSPACE_REFRESH_ENV).ok().as_deref())
+}
+
+fn workspace_refresh_enabled_value(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1"))
+}
+
+fn workspace_refresh_last() -> &'static StdMutex<Option<Instant>> {
+    static LAST: OnceLock<StdMutex<Option<Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| StdMutex::new(None))
+}
+
+/// Refresh the workspace-config clone and reinstall its tree, at most once
+/// per [`WORKSPACE_REFRESH_INTERVAL`], when `enabled`. A failure is logged and
+/// the existing tree is served: this never fails the session start.
+async fn refresh_workspace_config(source: &Path, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    {
+        let mut last = workspace_refresh_last()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| at.elapsed() < WORKSPACE_REFRESH_INTERVAL) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    if let Err(error) = run_workspace_config_refresh(source).await {
+        tracing::warn!(
+            source = %source.display(),
+            error = %error,
+            "workspace-config refresh failed; serving the existing tree"
+        );
+    }
+}
+
+/// Move the clone to `origin/main` and reinstall the installed tree. Fails
+/// fast on the first failing command.
+async fn run_workspace_config_refresh(source: &Path) -> Result<(), String> {
+    let repo = source.join(WORKSPACE_CONFIG_REPO);
+    tokio::time::timeout(WORKSPACE_REFRESH_TIMEOUT, async {
+        run_git(&repo, &["fetch", "--depth", "1", "origin", "main"]).await?;
+        run_git(&repo, &["checkout", "--detach", "FETCH_HEAD"]).await?;
+        run_install(source, &repo).await
+    })
+    .await
+    .map_err(|_| format!("timed out after {}s", WORKSPACE_REFRESH_TIMEOUT.as_secs()))?
+}
+
+async fn run_git(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("spawn git {args:?}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+async fn run_install(source: &Path, repo: &Path) -> Result<(), String> {
+    let output = tokio::process::Command::new("./bootstrap/install.sh")
+        .args(["--manifest=/dev/null", "--force-shared"])
+        .current_dir(repo)
+        .env("WORKSPACE_ROOT", source)
+        .output()
+        .await
+        .map_err(|e| format!("spawn bootstrap/install.sh: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "bootstrap/install.sh failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -954,5 +1093,113 @@ mod tests {
             Err(StatusCode::UNAUTHORIZED)
         );
         assert!(auth.consume(id, b"right").await);
+    }
+
+    /// `git` in `dir`, asserting it succeeds.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A `agent-workspace-config` clone with one committed file, inside `source`.
+    fn init_workspace_config(source: &Path) -> PathBuf {
+        let repo = source.join(WORKSPACE_CONFIG_REPO);
+        fs::create_dir_all(&repo).unwrap();
+        git_in(&repo, &["init", "-q", "-b", "main"]);
+        git_in(&repo, &["config", "user.email", "t@example.com"]);
+        git_in(&repo, &["config", "user.name", "t"]);
+        write(&repo, "rules/standing-approval.md", "rule");
+        git_in(&repo, &["add", "rules/standing-approval.md"]);
+        git_in(&repo, &["commit", "-qm", "awc"]);
+        repo
+    }
+
+    fn rev_parse_head(repo: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn workspace_config_commit_is_the_short_sha_of_head() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path();
+        let repo = init_workspace_config(source);
+        let full = rev_parse_head(&repo);
+        assert_eq!(workspace_config_commit(source).as_deref(), Some(&full[..7]),);
+    }
+
+    #[test]
+    fn workspace_config_commit_is_none_without_a_repo() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(workspace_config_commit(dir.path()), None);
+        fs::create_dir_all(dir.path().join(WORKSPACE_CONFIG_REPO)).unwrap();
+        assert_eq!(workspace_config_commit(dir.path()), None);
+    }
+
+    #[test]
+    fn the_brief_line_carries_the_commit_or_unknown() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            workspace_config_brief_line(dir.path()),
+            "\n\nWorkspace config: agent-workspace-config @ unknown"
+        );
+        let repo = init_workspace_config(dir.path());
+        let full = rev_parse_head(&repo);
+        assert_eq!(
+            workspace_config_brief_line(dir.path()),
+            format!(
+                "\n\nWorkspace config: agent-workspace-config @ {}",
+                &full[..7]
+            )
+        );
+    }
+
+    #[test]
+    fn refresh_is_enabled_only_by_the_exact_flag_value() {
+        assert!(!workspace_refresh_enabled_value(None));
+        assert!(!workspace_refresh_enabled_value(Some("0")));
+        assert!(!workspace_refresh_enabled_value(Some("true")));
+        assert!(workspace_refresh_enabled_value(Some("1")));
+    }
+
+    #[tokio::test]
+    async fn refresh_is_skipped_when_not_enabled() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path();
+        let repo = init_workspace_config(source);
+        let before = workspace_config_commit(source).unwrap();
+        refresh_workspace_config(source, false).await;
+        // The clone is untouched and git never ran a fetch.
+        assert_eq!(
+            workspace_config_commit(source).as_deref(),
+            Some(before.as_str())
+        );
+        assert!(!repo.join(".git/FETCH_HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_still_serves_the_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path();
+        write(source, ".claude/rules/r.md", "rule");
+        // A directory that is not a git repository makes the fetch fail fast.
+        fs::create_dir_all(source.join(WORKSPACE_CONFIG_REPO)).unwrap();
+        refresh_workspace_config(source, true).await;
+        let built = build_tarball(source, 1024 * 1024).unwrap();
+        let names = names(&built);
+        assert!(
+            names.iter().any(|n| n == ".claude/rules/r.md"),
+            "the existing tree is still served: {names:?}"
+        );
     }
 }
