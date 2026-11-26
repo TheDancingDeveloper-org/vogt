@@ -273,7 +273,7 @@ passthrough_case() {
         ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
         INFISICAL_API_URL="$base/api" INFISICAL_CLIENT_ID=client-id \
         INFISICAL_CLIENT_SECRET=client-secret ENGINE_INFISICAL_ENV=prod \
-        bash -c 'source "$1"; agent_auth_passthrough_decision; printf "%s|%s|%s" "$AGENT_AUTH_MODE" "${INFISICAL_CLIENT_ID-unset}" "${INFISICAL_API_URL-unset}"' _ "$script")" \
+        bash -c "source \"\$1\"; agent_auth_passthrough_decision; printf '%s|%s|%s' \"\$AGENT_AUTH_MODE\" \"\${INFISICAL_CLIENT_ID-unset}\" \"\${INFISICAL_API_URL-unset}\"" _ "$script")" \
         || fail "$desc: decision failed"
     local mode="${out%%|*}" rest="${out#*|}"
     local client="${rest%%|*}" api="${rest#*|}"
@@ -286,9 +286,9 @@ passthrough_case() {
             || fail "$desc dropped the identity: $out"
     fi
 }
-PASSTHROUGH_VALUE=1 VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "full passthrough" identity kept
+PASSTHROUGH_VALUE=1 VOGT_AGENT_AUTH_TIER_VALUE='' passthrough_case "full passthrough" identity kept
 PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE=estate_admin passthrough_case "tier spawn" identity kept
-PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "tier non-spawn" brokered dropped
-PASSTHROUGH_VALUE= VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "brokered default" brokered dropped
+PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE='' passthrough_case "tier non-spawn" brokered dropped
+PASSTHROUGH_VALUE='' VOGT_AGENT_AUTH_TIER_VALUE='' passthrough_case "brokered default" brokered dropped
 
 echo "agent-auth: ok"
