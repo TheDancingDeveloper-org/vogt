@@ -351,6 +351,7 @@ Usage:
   vogt-agent-auth set <VAR>     (value on stdin)
   vogt-agent-auth store <VAR>   (value on stdin)
   vogt-agent-auth grants
+  vogt-agent-auth git-credential <HOST>
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -371,6 +372,10 @@ Commands:
   grants (session-side) List the credential grants a person approved for this
          session (WI-973): VAR, secret, uses, expiry, grant id and the reason
          it was approved for. Never a value. Fetch one with `fetch VAR`.
+  git-credential
+         (session-side) Ask the broker for the forge token of an approved
+         `git:<HOST>` grant (WI-1331). Prints the username and the token on two
+         lines; exits 1 silently on any refusal. Used by vogt-git-askpass.
 EOF
 }
 
@@ -791,6 +796,30 @@ list_grants() {
     rm -f "$response"
 }
 
+# `git-credential HOST` (WI-1331): the askpass's half of a `git:<host>` grant.
+# Prints username and token on two lines. Silent on every refusal (exit 1):
+# git then fails with its own message, and nothing here can echo a value or a
+# server error body. The token never touches argv.
+git_credential() {
+    local host="$1" response status url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        return 1
+    fi
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+    umask 077
+    response="$(mktemp)" || return 1
+    status="$(broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -G --data-urlencode "host=$host" \
+        "${url%/}/api/agent-auth/git-credential" 2>/dev/null)" || status="000"
+    if [[ "$status" != "200" ]]; then
+        rm -f "$response"
+        return 1
+    fi
+    jq -er '.username, .token' "$response" 2>/dev/null || { rm -f "$response"; return 1; }
+    rm -f "$response"
+}
+
 # Ask the engine whether manifest entry $1 is stale at GitHub (gh#1460). The
 # request carries no token: the engine resolves the secret itself and checks its
 # own copy, so nothing here can probe or move Inbox state with a value of its
@@ -895,6 +924,37 @@ load_manifest_secrets() {
     done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
 }
 
+# Decide AGENT_AUTH_MODE and whether the brokering machine identity survives
+# this launch, then drop it unless the launch keeps it (WI-4814).
+# `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier` scopes the passthrough to an
+# estate-admin tier spawn: the engine maps the tier identity into
+# INFISICAL_CLIENT_* and sets VOGT_AGENT_AUTH_TIER only for that spawn.
+# `1`/`true` keep the old full passthrough; anything else stays brokered and
+# the identity is unset.
+agent_auth_passthrough_decision() {
+    local identity_passthrough=0 tier_passthrough=0 tier_spawn=0
+    case "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" in
+        1|true|TRUE|yes|on)
+            identity_passthrough=1
+            ;;
+        tier|TIER)
+            tier_passthrough=1
+            ;;
+    esac
+    [[ -n "${VOGT_AGENT_AUTH_TIER:-}" ]] && tier_spawn=1
+    if [[ "$identity_passthrough" -eq 1 || ("$tier_passthrough" -eq 1 && "$tier_spawn" -eq 1) ]]; then
+        export AGENT_AUTH_MODE=identity
+    else
+        export AGENT_AUTH_MODE=brokered
+    fi
+    if [[ "$identity_passthrough" -eq 0 \
+        && ! ("$tier_passthrough" -eq 1 && "$tier_spawn" -eq 1) ]]; then
+        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
+            ENGINE_INFISICAL_ENV \
+            2>/dev/null || true
+    fi
+}
+
 load_agent_environment() {
     local access_token="" started
     if [[ -z "${INFISICAL_API_URL:-}" || -z "${INFISICAL_CLIENT_ID:-}" \
@@ -986,17 +1046,11 @@ load_agent_environment() {
     # Identity-passthrough is an explicit per-deployment opt-in that keeps
     # the machine identity in the session (reverses the identity strip below).
     # Decided here, before the identity is unset, and reused for both.
-    local identity_passthrough=0
-    if [[ "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" =~ ^(1|true|TRUE|yes|on)$ ]]; then
-        identity_passthrough=1
-    fi
-    if [[ "$identity_passthrough" -eq 1 ]]; then
-        # The session holds the full secrets-manager identity; session tooling
-        # should use `infisical` directly, not the manifest broker.
-        export AGENT_AUTH_MODE=identity
-    else
-        export AGENT_AUTH_MODE=brokered
-    fi
+    # `tier` scopes the passthrough to an estate-admin tier spawn: the engine
+    # maps the tier identity into INFISICAL_CLIENT_* and sets the marker
+    # VOGT_AGENT_AUTH_TIER only for that spawn (WI-4814). `1`/`true` keep the
+    # old full passthrough.
+    agent_auth_passthrough_decision
     export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
     export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
     # Names a session may *store* through the broker, beside the names it
@@ -1019,15 +1073,6 @@ load_agent_environment() {
         ENGINE_AGENT_AUTH_PROBES ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH \
         ENGINE_AGENT_AUTH_VOGT_SECRET_NAME \
         2>/dev/null || true
-    # The machine identity is dropped by default: a normal session
-    # must not keep the credential that could read the rest of the vault. In
-    # identity-passthrough mode it is deliberately KEPT so the session can
-    # use `infisical` directly against any project.
-    if [[ "$identity_passthrough" -eq 0 ]]; then
-        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
-            ENGINE_INFISICAL_ENV \
-            2>/dev/null || true
-    fi
 }
 
 # The service-probe list is configuration, not a baked-in estate service map.
@@ -1176,6 +1221,11 @@ main() {
             ;;
         grants)
             list_grants
+            ;;
+        git-credential)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "git-credential requires exactly one HOST"
+            git_credential "$1" || exit 1
             ;;
         -h|--help|help)
             usage

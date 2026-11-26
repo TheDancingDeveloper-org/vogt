@@ -25,6 +25,18 @@ use crate::{
     session_backend::SessionBackend,
 };
 
+/// Widest PTY a client may ask for, in columns.
+pub const MAX_PTY_COLS: u16 = 500;
+/// Tallest PTY a client may ask for, in rows.
+pub const MAX_PTY_ROWS: u16 = 200;
+
+/// Bring a `(cols, rows)` size into `1..=MAX_PTY_COLS` x `1..=MAX_PTY_ROWS`.
+/// A client's resize, a stored size and a spec's size all pass through this
+/// before they reach the agent's PTY or the engine's grid (WI-4567).
+pub fn clamp_pty_size(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.clamp(1, MAX_PTY_COLS), rows.clamp(1, MAX_PTY_ROWS))
+}
+
 /// One chunk of PTY output. `pos` is the byte offset (in the lifetime stream)
 /// at which `data` begins. Lets re-attaching clients de-duplicate scrollback
 /// replay vs live broadcast.
@@ -160,6 +172,8 @@ pub struct Session {
     posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
     mcp_set: Mutex<Option<String>>,
+    /// The estate-admin tier this session was granted, when it was (WI-4814).
+    tier: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -905,6 +919,7 @@ impl Session {
             posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
             mcp_set: self.mcp_set.lock().clone(),
+            tier: self.tier(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
             budget: self.budget(),
@@ -981,6 +996,14 @@ impl Session {
 
     pub fn set_mcp_set(&self, mcp_set: Option<String>) {
         *self.mcp_set.lock() = mcp_set;
+    }
+
+    pub fn set_tier(&self, tier: Option<String>) {
+        *self.tier.lock() = tier;
+    }
+
+    pub fn tier(&self) -> Option<String> {
+        self.tier.lock().clone()
     }
 
     pub fn account(&self) -> Option<String> {
@@ -1279,8 +1302,17 @@ impl Session {
             // a few KiB where the raw tail was up to the whole budget.
         }
         // Lock order is scrollback, then terminal, as in the reader thread.
-        if let Some(frame) = self.grid_frame() {
+        // Only a copy of the grid is taken under the guard, so the copy and
+        // `pos` describe the same instant (the WI-891 invariant: the payload
+        // never carries bytes past `pos`). The frame is rendered from the
+        // copy after the guard is gone: formatting a deep scrollback is the
+        // slow part, and the reader thread, which needs the ring's lock for
+        // every chunk, must not wait on it (WI-2699).
+        if let Some(screen) = self.grid_copy() {
             drop(sb);
+            #[cfg(test)]
+            attach_render_hook::run();
+            let frame = crate::screen::render_frame(&mut { screen });
             return (self.bounded_frame(frame, tail_bytes), pos, true);
         }
         // No live grid (a session restored without one): the bounded tail
@@ -1292,9 +1324,9 @@ impl Session {
         (snapshot, pos, true)
     }
 
-    /// The live grid's frame, when this session has one.
-    fn grid_frame(&self) -> Option<Vec<u8>> {
-        self.terminal.lock().as_mut().map(|t| t.frame())
+    /// A copy of the live grid's screen, when this session has one.
+    fn grid_copy(&self) -> Option<vt100::Screen> {
+        self.terminal.lock().as_ref().map(|t| t.screen_copy())
     }
 
     /// The frame, cut to `tail_bytes` when one was given and the frame is
@@ -1392,6 +1424,7 @@ impl Session {
         *self.last_person_input_at.lock()
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let (cols, rows) = clamp_pty_size(cols, rows);
         self.backend.resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
@@ -1450,6 +1483,10 @@ pub struct SpawnDefaults<'a> {
     /// the helper as `ENGINE_AGENT_AUTH_SECRETS` in place of the engine's
     /// boot-time copy. `None` keeps the engine's own variable.
     pub agent_auth_manifest: Option<String>,
+    /// The estate-admin tier this launch was granted, when it was (WI-4814):
+    /// carried into the child's environment as `VOGT_AGENT_AUTH_TIER` and,
+    /// when identity passthrough is `tier`, the tier identity.
+    pub tier: Option<&'a str>,
     /// Called once the child has exited and its output is drained, after
     /// `SessionKilled` is published. The registry uses it to forget the
     /// hibernation record of a session that ended (rather than hibernated).
@@ -1548,6 +1585,26 @@ where
         .collect()
 }
 
+/// The engine-reserved environment variable a tier spawn carries (WI-4814):
+/// `estate-admin` for a person-started oversight session on a lane that sets
+/// `ENGINE_ESTATE_ADMIN_TIER`. A caller's `spec.env` is refused this name.
+pub(crate) const AGENT_AUTH_TIER_ENV: &str = "VOGT_AGENT_AUTH_TIER";
+
+/// The tier value the session record keeps, and the marker env above carries.
+pub(crate) const ESTATE_ADMIN_TIER: &str = "estate_admin";
+
+/// The engine env names holding the tier's own Infisical machine identity,
+/// mapped into the ordinary `INFISICAL_CLIENT_*` names for a tier spawn
+/// (WI-4814). They are identity, never helper config, so they are withheld
+/// from the helper's re-grant below and mapped explicitly.
+fn is_tier_identity_source_env(key: &str) -> bool {
+    matches!(
+        key.to_ascii_uppercase().as_str(),
+        "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID"
+            | "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET"
+    )
+}
+
 /// Whether an environment variable is one the agent-auth helper (and only the
 /// helper) is re-granted on top of [`sanitized_child_env`].
 ///
@@ -1557,16 +1614,42 @@ where
 /// shell (`engine/deploy/agent-auth.sh`). This is a tight allowlist, not an
 /// exemption from stripping: the broad engine secrets (`ENGINE_TOKEN`, the
 /// scoped token set, the assistant/STT/TTS keys, `TAILSCALE_AUTH_KEY`) are
-/// still withheld from the helper.
+/// still withheld from the helper. The tier identity source variables are
+/// withheld too: they are mapped to `INFISICAL_CLIENT_*` only for a tier spawn.
 fn is_agent_auth_helper_env(key: &str) -> bool {
     let k = key.to_ascii_uppercase();
-    matches!(
-        k.as_str(),
-        "INFISICAL_API_URL"
-            | "INFISICAL_CLIENT_ID"
-            | "INFISICAL_CLIENT_SECRET"
-            | "ENGINE_INFISICAL_ENV"
-    ) || k.starts_with("ENGINE_AGENT_AUTH_")
+    !is_tier_identity_source_env(&k)
+        && (matches!(
+            k.as_str(),
+            "INFISICAL_API_URL"
+                | "INFISICAL_CLIENT_ID"
+                | "INFISICAL_CLIENT_SECRET"
+                | "ENGINE_INFISICAL_ENV"
+        ) || k.starts_with("ENGINE_AGENT_AUTH_"))
+}
+
+/// The viewer Infisical machine identity the helper and the broker use.
+fn agent_auth_identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => is_identity_env(s),
+            None => false,
+        })
+        .collect()
+}
+
+/// The helper's non-identity configuration: the `ENGINE_AGENT_AUTH_*` manifest
+/// and switch variables, minus the tier identity source names.
+fn agent_auth_config_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => {
+                let k = s.to_ascii_uppercase();
+                k.starts_with("ENGINE_AGENT_AUTH_") && !is_tier_identity_source_env(&k)
+            }
+            None => false,
+        })
+        .collect()
 }
 
 /// The subset of the engine's environment the agent-auth helper is re-granted:
@@ -1604,18 +1687,71 @@ fn identity_passthrough_from(value: Option<&str>) -> bool {
     )
 }
 
-/// Whether this deployment opts every session into holding the full secrets-
-/// manager identity, reversing the default strip for the four identity vars.
-pub(crate) fn identity_passthrough_enabled() -> bool {
-    identity_passthrough_from(
+/// How the deployment scopes identity passthrough (WI-4814): full passthrough
+/// (`1`/`true`), tier-only passthrough (`tier`), or the brokered default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityPassthrough {
+    Off,
+    Full,
+    Tier,
+}
+
+fn identity_passthrough_mode_from(value: Option<&str>) -> IdentityPassthrough {
+    match value.map(str::trim) {
+        Some("tier") | Some("TIER") => IdentityPassthrough::Tier,
+        Some(v) if identity_passthrough_from(Some(v)) => IdentityPassthrough::Full,
+        _ => IdentityPassthrough::Off,
+    }
+}
+
+fn identity_passthrough_mode() -> IdentityPassthrough {
+    identity_passthrough_mode_from(
         std::env::var("ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH")
             .ok()
             .as_deref(),
     )
 }
 
+/// Whether this deployment hands the tier identity to tier spawns only
+/// (`ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier`, WI-4814).
+pub(crate) fn tier_identity_passthrough_enabled() -> bool {
+    identity_passthrough_mode() == IdentityPassthrough::Tier
+}
+
+type EnvPairs = Vec<(std::ffi::OsString, std::ffi::OsString)>;
+
+/// The Infisical identity a spawn is given, by passthrough mode (WI-4814):
+/// - the agent-auth helper always gets the broker identity, except a tier
+///   spawn under `tier` mode, which gets the tier identity instead;
+/// - `Full` additionally hands every spawn the full identity;
+/// - `Tier` hands the tier identity to a tier spawn only;
+/// - a non-tier spawn never receives the tier identity.
+fn spawn_identity_env(
+    mode: IdentityPassthrough,
+    helper: bool,
+    tier: bool,
+    broker: impl FnOnce() -> EnvPairs,
+    tier_identity: impl FnOnce() -> EnvPairs,
+    full: impl FnOnce() -> EnvPairs,
+) -> EnvPairs {
+    let mut out = EnvPairs::new();
+    if helper {
+        if mode == IdentityPassthrough::Tier && tier {
+            out.extend(tier_identity());
+            return out;
+        }
+        out.extend(broker());
+    }
+    match mode {
+        IdentityPassthrough::Full => out.extend(full()),
+        IdentityPassthrough::Tier if tier && !helper => out.extend(tier_identity()),
+        _ => {}
+    }
+    out
+}
+
 /// The Infisical identity variables re-granted to a session in identity-
-/// passthrough mode [`identity_passthrough_enabled`], which [`sanitized_child_env`]
+/// passthrough mode (`Full`), which [`sanitized_child_env`]
 /// would otherwise have stripped.
 pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
@@ -1624,6 +1760,37 @@ pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
             None => false,
         })
         .collect()
+}
+
+/// The tier's own Infisical identity, mapped onto the ordinary
+/// `INFISICAL_CLIENT_*` names for a tier spawn (WI-4814): the API URL and
+/// environment come from the engine's shared identity; the client id and
+/// secret come from the tier-only engine variables.
+pub(crate) fn tier_identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => matches!(
+                s.to_ascii_uppercase().as_str(),
+                "INFISICAL_API_URL" | "ENGINE_INFISICAL_ENV"
+            ),
+            None => false,
+        })
+        .collect();
+    for (source, target) in [
+        (
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_ID",
+        ),
+        (
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
+            "INFISICAL_CLIENT_SECRET",
+        ),
+    ] {
+        if let Some(value) = std::env::var_os(source) {
+            env.push((std::ffi::OsString::from(target), value));
+        }
+    }
+    env
 }
 
 /// Is the child command's program the configured agent-auth helper? A session
@@ -1657,9 +1824,10 @@ pub fn spawn(
     history: Option<Arc<SessionHistory>>,
 ) -> Result<SpawnedSession> {
     let pty_system = portable_pty::native_pty_system();
+    let (cols, rows) = clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24));
     let size = PtySize {
-        rows: spec.rows.unwrap_or(24),
-        cols: spec.cols.unwrap_or(80),
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     };
@@ -1718,24 +1886,30 @@ pub fn spawn(
     // tokens, then unsets them before it launches the user's shell. Re-grant
     // exactly those variables — and only to the helper command, never to a
     // caller command or a bare shell.
+    let mode = identity_passthrough_mode();
+    let has_tier = defaults.tier.is_some();
+    for (k, v) in spawn_identity_env(
+        mode,
+        spawning_agent_auth_helper,
+        has_tier,
+        || agent_auth_identity_env().into_iter().collect(),
+        tier_identity_env,
+        identity_env,
+    ) {
+        cmd.env(k, v);
+    }
     if spawning_agent_auth_helper {
-        for (k, v) in agent_auth_helper_env() {
+        for (k, v) in agent_auth_config_env() {
             cmd.env(k, v);
         }
         if let Some(manifest) = defaults.agent_auth_manifest.as_ref() {
             cmd.env("ENGINE_AGENT_AUTH_SECRETS", manifest);
         }
     }
-    // An opted-in deployment (ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH) hands
-    // every session the full secrets-manager identity, reversing the default strip for
-    // exactly the four Infisical identity vars. The agent-auth helper already
-    // holds them (above); this also covers a bare shell or a caller command. The
-    // broad engine credentials (ENGINE_TOKEN, the scoped token set, assistant/STT
-    // keys, TAILSCALE_AUTH_KEY) stay stripped in both modes.
-    if identity_passthrough_enabled() {
-        for (k, v) in identity_env() {
-            cmd.env(k, v);
-        }
+    // The tier marker travels with every tier spawn, whatever the identity
+    // passthrough mode: tooling reads it to know this session is tiered.
+    if let Some(tier) = defaults.tier {
+        cmd.env(AGENT_AUTH_TIER_ENV, tier);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("VOGT_ENGINE_SESSION", &spec.name);
@@ -1756,6 +1930,22 @@ pub fn spawn(
         for (k, v) in env {
             cmd.env(k, v);
         }
+    }
+    // WI-4832: a Claude Code session under an account with a long-lived token
+    // gets it as `CLAUDE_CODE_OAUTH_TOKEN`, in the spawn env only (never argv,
+    // never the recorded `spec.env`). It is set last so a caller's own env
+    // cannot swap in another login. Claude Code ranks this token above the
+    // account directory's `.credentials.json`, so a stale file never wins and
+    // there is no refresh to burn.
+    if let Some(token) = crate::claude_oauth_token::token_for_session(
+        spec.account.as_deref(),
+        spec.command.as_deref(),
+        |name| std::env::var(name).ok(),
+    ) {
+        cmd.env(
+            crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV,
+            token,
+        );
     }
 
     let child = pair
@@ -1811,7 +2001,10 @@ pub fn spawn_remote(
         defaults,
         bus,
         history,
-        (spec.rows.unwrap_or(24), spec.cols.unwrap_or(80)),
+        {
+            let (cols, rows) = clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24));
+            (rows, cols)
+        },
         cwd.to_string_lossy().into_owned(),
         backend,
         reader,
@@ -1837,6 +2030,7 @@ fn assemble_session(
     pid: Option<u32>,
     launcher: &'static str,
 ) -> Result<SpawnedSession> {
+    let (cols, rows) = clamp_pty_size(cols, rows);
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
     let command = Some(command_display(spec, &defaults));
     let runtime = tokio::runtime::Handle::current();
@@ -1911,6 +2105,7 @@ fn assemble_session(
         posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
         mcp_set: Mutex::new(None),
+        tier: Mutex::new(None),
         stop: Mutex::new(None),
         launcher,
         first_output_seen: AtomicBool::new(false),
@@ -1955,15 +2150,65 @@ fn assemble_session(
     Ok(SpawnedSession { session })
 }
 
+/// Appends a session's output to its history log on a thread of its own, in
+/// order, so the PTY reader never waits on the disk.
+struct HistoryLogWriter {
+    tx: std::sync::mpsc::Sender<Bytes>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl HistoryLogWriter {
+    fn spawn(id: Uuid, mut file: File) -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<Bytes>();
+        let thread = std::thread::Builder::new()
+            .name(format!("pty-hist-{id}"))
+            .spawn(move || {
+                while let Ok(chunk) = rx.recv() {
+                    if let Err(e) = file.write_all(&chunk) {
+                        tracing::warn!(
+                            session = %id,
+                            error = %e,
+                            "failed to append session history log"
+                        );
+                        // Dropping `rx` makes the reader's next `append` fail,
+                        // which stops it sending.
+                        return;
+                    }
+                }
+                let _ = file.flush();
+            })
+            .map_err(|e| {
+                tracing::warn!(session = %id, error = %e, "could not start the history log writer");
+            })
+            .ok()?;
+        Some(Self { tx, thread })
+    }
+
+    /// Queue a chunk; false once the writer has stopped.
+    fn append(&self, chunk: Bytes) -> bool {
+        self.tx.send(chunk).is_ok()
+    }
+
+    /// Close the queue and wait for everything queued to reach the file.
+    fn finish(self) {
+        drop(self.tx);
+        let _ = self.thread.join();
+    }
+}
+
 fn spawn_reader_thread(
     session: Arc<Session>,
     mut reader: Box<dyn Read + Send>,
     tx: broadcast::Sender<OutputChunk>,
     bus: EventBus,
     history: Option<Arc<SessionHistory>>,
-    mut history_log: Option<File>,
+    history_log: Option<File>,
     runtime: tokio::runtime::Handle,
 ) -> Result<()> {
+    // The history log is appended on its own thread: a write into a saturated
+    // disk's page cache can block for seconds, and the reader must keep
+    // draining the PTY (and feeding the grid) meanwhile.
+    let mut history_log = history_log.and_then(|file| HistoryLogWriter::spawn(session.id, file));
     std::thread::Builder::new()
         .name(format!("pty-read-{}", session.id))
         .spawn(move || {
@@ -2007,13 +2252,8 @@ fn spawn_reader_thread(
                             );
                         }
 
-                        if let Some(log) = history_log.as_mut() {
-                            if let Err(e) = log.write_all(&data) {
-                                tracing::warn!(
-                                    session = %session.id,
-                                    error = %e,
-                                    "failed to append session history log"
-                                );
+                        if let Some(log) = history_log.as_ref() {
+                            if !log.append(data.clone()) {
                                 history_log = None;
                             }
                         }
@@ -2030,8 +2270,10 @@ fn spawn_reader_thread(
                     }
                 }
             }
-            if let Some(mut log) = history_log {
-                let _ = log.flush();
+            // Drain the log writer before declaring the reader done: the
+            // archive reads the file once `reader_done` is set.
+            if let Some(log) = history_log {
+                log.finish();
             }
             session.reader_done.store(true, Ordering::Release);
             try_spawn_archive(&session, history, &runtime);
@@ -2165,6 +2407,12 @@ fn spawn_exit_waiter(
     });
 }
 
+/// The exit code a history row records: none for the stop a hibernation
+/// causes, which is not an outcome of the session.
+fn archived_exit_code(hibernating: bool, exit_code: i32) -> Option<i32> {
+    (!hibernating).then_some(exit_code)
+}
+
 fn try_spawn_archive(
     session: &Arc<Session>,
     history: Option<Arc<SessionHistory>>,
@@ -2202,7 +2450,9 @@ fn try_spawn_archive(
             name: session.name(),
             created_at: session.created_at,
             ended_at: (*session.ended_at.lock()).or(Some(time::OffsetDateTime::now_utc())),
-            exit_code: Some(exit_code),
+            // Hibernation stops the pod with SIGKILL; that 137 is ours, not a
+            // crash, so the row records none (WI-4567).
+            exit_code: archived_exit_code(session.is_hibernating(), exit_code),
             cwd: Some(session.cwd.clone()),
             command: session.command.clone(),
             scrollback_bytes,
@@ -2307,6 +2557,30 @@ async fn read_tail(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// `Session::last_change` on the blocking pool. It takes the terminal lock and
+/// hashes the whole screen, which must not run on an async worker: a worker
+/// parked behind the PTY reader's lock stalls every task scheduled on it,
+/// terminal input included.
+async fn last_change_off_worker(session: &Arc<Session>) -> Option<Instant> {
+    let session = Arc::clone(session);
+    tokio::task::spawn_blocking(move || session.last_change())
+        .await
+        .unwrap_or(None)
+}
+
+/// Settle pending output and classify, on the blocking pool (it renders the
+/// screen and takes the terminal and scrollback locks). A panicked task keeps
+/// the state the session already has.
+async fn classify_off_worker(session: &Arc<Session>) -> ActivityState {
+    let worker = Arc::clone(session);
+    tokio::task::spawn_blocking(move || {
+        let _ = worker.last_change();
+        compute_activity(&worker)
+    })
+    .await
+    .unwrap_or_else(|_| session.activity())
+}
+
 fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
     tokio::spawn(async move {
         loop {
@@ -2328,14 +2602,15 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
 
             // Measured from the last change to the screen, not the last
             // byte: an identical repaint is not work (WI-1090).
-            let reference = session.last_change().unwrap_or(session.spawned_at);
+            let reference = last_change_off_worker(&session)
+                .await
+                .unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
             let collapse_ms = crate::activity::collapse_after_ms(session.idle_after_ms);
             let wait_ms = if elapsed_ms >= collapse_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
-                    let _ = session.last_change();
-                    compute_activity(&session)
+                    classify_off_worker(&session).await
                 } else {
                     ActivityState::Idle
                 };
@@ -2368,8 +2643,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                     }
                     let new_state = if session.last_output.lock().is_some() {
                         // Settle pending output before classifying.
-                        let _ = session.last_change();
-                        compute_activity(&session)
+                        classify_off_worker(&session).await
                     } else {
                         ActivityState::Idle
                     };
@@ -2628,7 +2902,10 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // quiet window alone reads `idle` while the title says working. Only for
     // an agent whose title this engine reads, and never over a terminal state.
     let titled = matches!(session.agent().as_deref(), Some("codex"));
-    let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
+    // Only `titled_activity` reads it, and only for a titled agent. Rendering
+    // the whole grid for every chunk the reader takes, under the terminal
+    // lock, is wasted work (and lock hold time) for every other session.
+    let screen_busy = titled && crate::screen::screen_busy(&session.render_screen(0).0.lines);
     let title = session.title();
     let title = title
         .as_deref()
@@ -2868,6 +3145,43 @@ fn clear_addressed_block(session: &Arc<Session>, bus: &EventBus) {
 fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
     new == ActivityState::Running
         && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
+}
+
+/// A test seam in [`Session::snapshot_for_attach`]: a closure that runs on the
+/// attaching thread at the point where the scrollback guard has been dropped
+/// and the frame is about to be rendered (WI-2699). A test uses it to let the
+/// session's output move while the frame is in flight.
+#[cfg(test)]
+pub(crate) mod attach_render_hook {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once, at the next render on this thread.
+    pub(crate) fn set(f: impl FnOnce() + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn run() {
+        if let Some(f) = HOOK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+}
+
+#[cfg(test)]
+mod archived_exit_code_tests {
+    use super::archived_exit_code;
+
+    #[test]
+    fn hibernate_kill_is_not_recorded_as_an_exit_code() {
+        assert_eq!(archived_exit_code(true, 137), None);
+        assert_eq!(archived_exit_code(false, 137), Some(137));
+    }
 }
 
 #[cfg(test)]
@@ -3243,6 +3557,112 @@ mod secret_env_tests {
             helper
         ));
     }
+
+    #[test]
+    fn tier_passthrough_parses_tier_and_keeps_legacy_truthy_values() {
+        use super::{identity_passthrough_mode_from, IdentityPassthrough};
+        for value in ["tier", "TIER", " tier ", "TIER "] {
+            assert_eq!(
+                identity_passthrough_mode_from(Some(value)),
+                IdentityPassthrough::Tier,
+                "{value:?}"
+            );
+        }
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert_eq!(
+                identity_passthrough_mode_from(Some(value)),
+                IdentityPassthrough::Full,
+                "{value:?}"
+            );
+        }
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+        ] {
+            assert_eq!(
+                identity_passthrough_mode_from(value),
+                IdentityPassthrough::Off,
+                "{value:?}"
+            );
+        }
+    }
+
+    fn pairs(tag: &str) -> super::EnvPairs {
+        vec![("INFISICAL_CLIENT_ID".into(), tag.into())]
+    }
+
+    fn grant(mode: super::IdentityPassthrough, helper: bool, tier: bool) -> Vec<String> {
+        super::spawn_identity_env(
+            mode,
+            helper,
+            tier,
+            || pairs("broker"),
+            || pairs("tier"),
+            || pairs("full"),
+        )
+        .into_iter()
+        .map(|(_, v)| v.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    #[test]
+    fn tier_mode_gives_the_tier_identity_to_a_tier_spawn_only() {
+        use super::IdentityPassthrough::Tier;
+        // A tier shell and the tier's helper get the tier identity, never the
+        // broker or full one.
+        assert_eq!(grant(Tier, false, true), ["tier"]);
+        assert_eq!(grant(Tier, true, true), ["tier"]);
+        // A non-tier shell gets nothing; a non-tier helper only the broker
+        // identity (which agent-auth.sh then strips), never the tier one.
+        assert!(grant(Tier, false, false).is_empty());
+        assert_eq!(grant(Tier, true, false), ["broker"]);
+    }
+
+    #[test]
+    fn full_mode_gives_every_spawn_the_full_identity() {
+        use super::IdentityPassthrough::Full;
+        assert_eq!(grant(Full, false, false), ["full"]);
+        assert_eq!(grant(Full, false, true), ["full"]);
+        assert_eq!(grant(Full, true, false), ["broker", "full"]);
+        assert!(!grant(Full, true, true).contains(&"tier".to_string()));
+    }
+
+    #[test]
+    fn off_mode_gives_only_the_helper_the_broker_identity() {
+        use super::IdentityPassthrough::Off;
+        assert!(grant(Off, false, true).is_empty());
+        assert_eq!(grant(Off, true, true), ["broker"]);
+    }
+
+    #[test]
+    fn tier_identity_source_names_are_not_helper_config() {
+        use super::is_tier_identity_source_env;
+        for key in [
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
+            "engine_agent_auth_tier_infisical_client_id",
+        ] {
+            assert!(
+                is_tier_identity_source_env(key),
+                "{key} is tier identity, not helper config"
+            );
+        }
+        for key in [
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+            "ENGINE_AGENT_AUTH_SECRETS",
+            "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH",
+        ] {
+            assert!(
+                !is_tier_identity_source_env(key),
+                "{key} is ordinary helper config"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3579,5 +3999,395 @@ mod escalation_key_tests {
             format!("{id}:permission_prompt:e3b0c44298fc1c14")
         );
         assert_eq!(approval_key(id, " go? "), approval_key(id, "go?"));
+    }
+}
+
+/// WI-2699: an attach renders its frame from a copy of the grid, outside the
+/// scrollback lock, so the PTY reader is not held up for the length of a
+/// render — and the payload still never carries bytes past `pos` (WI-891).
+#[cfg(test)]
+mod attach_render_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// Prints `L00000`..`L02999`, parks on `read`, then prints `L03000`..
+    /// `L03999` once a line arrives. Echo is off, so the line that releases it
+    /// does not land in the ring.
+    const SCRIPT: &str = "stty -echo; i=0; \
+        while [ $i -lt 3000 ]; do printf 'L%05d\\n' $i; i=$((i+1)); done; \
+        read x; \
+        while [ $i -lt 4000 ]; do printf 'L%05d\\n' $i; i=$((i+1)); done; \
+        sleep 30";
+
+    fn spawn_session(dir: &std::path::Path) -> Arc<Session> {
+        let spec = SessionSpec {
+            name: "attach-render".into(),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), SCRIPT.into()]),
+            ..Default::default()
+        };
+        spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir,
+                scrollback_bytes: 1024 * 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                tier: None,
+                on_exit: None,
+            },
+            EventBus::new(64),
+            None,
+        )
+        .unwrap()
+        .session
+    }
+
+    fn wait_for(session: &Session, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !String::from_utf8_lossy(&session.snapshot().0).contains(marker) {
+            assert!(Instant::now() < deadline, "never saw {marker}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct Attach {
+        frame: Vec<u8>,
+        pos: u64,
+        reader_moved_during_render: bool,
+        /// The ring from `pos` on, read once the session settled.
+        live_after_pos: Vec<u8>,
+    }
+
+    /// A cold attach on a quiet session whose reader is released while the
+    /// frame is rendering.
+    fn attach_while_output_lands() -> Attach {
+        // `spawn` starts its watchers on the ambient runtime.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in_rt = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let session = spawn_session(dir.path());
+        wait_for(&session, "L02999");
+        let quiet_pos = session.scrollback_position();
+
+        let moved = Arc::new(AtomicBool::new(false));
+        {
+            let session = session.clone();
+            let moved = moved.clone();
+            // Watch the broadcast rather than the ring: the reader publishes
+            // a chunk only after it has pushed it under the ring's lock, and
+            // reading the broadcast needs no lock of the render's.
+            let mut rx = session.subscribe();
+            attach_render_hook::set(move || {
+                // The guard is gone: release the child and require the reader
+                // to land its output now, before the render continues. Were
+                // the render still under the ring's lock, the reader could
+                // not push and this would time out.
+                session.write_input(b"go\n").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    match rx.try_recv() {
+                        Ok(chunk) if chunk.pos >= quiet_pos => {
+                            moved.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            });
+        }
+        let (frame, pos, reset) = session.snapshot_for_attach(None, None);
+        assert!(reset, "a cold attach is a frame");
+        wait_for(&session, "L03999");
+        let live_after_pos = session.snapshot_for_attach(Some(pos), None).0.to_vec();
+        let _ = session.kill();
+        Attach {
+            frame: frame.to_vec(),
+            pos,
+            reader_moved_during_render: moved.load(Ordering::SeqCst),
+            live_after_pos,
+        }
+    }
+
+    #[test]
+    fn the_reader_keeps_landing_output_while_a_frame_renders() {
+        let a = attach_while_output_lands();
+        assert!(
+            a.reader_moved_during_render,
+            "the reader was held up behind the render"
+        );
+    }
+
+    #[test]
+    fn no_output_is_lost_or_doubled_across_the_attach_boundary() {
+        let a = attach_while_output_lands();
+        let frame = String::from_utf8_lossy(&a.frame);
+        let live = String::from_utf8_lossy(&a.live_after_pos);
+        // The frame stops at `pos`: the last line the child had printed when
+        // the guard was held, and nothing the reader landed after it.
+        assert!(frame.contains("L02999"), "frame lost the tail");
+        assert!(!frame.contains("L03000"), "frame carries bytes past pos");
+        // The live stream picks up exactly there: every later line once, in
+        // order, none repeated from the frame.
+        let expected: String = (3000..4000).map(|i| format!("L{i:05}\r\n")).collect();
+        assert!(
+            live.starts_with(&expected),
+            "live stream from pos {} is not L03000..L03999 contiguous",
+            a.pos
+        );
+        assert!(!live.contains("L02999"), "live stream repeats the frame");
+    }
+
+    /// WI-2699 measurement, not a gate: run with
+    /// `cargo test -p vogt-engine-server --lib reader_delay_histogram -- --ignored --nocapture`.
+    ///
+    /// The child streams at full rate while one thread attaches in a loop and
+    /// another takes the ring's lock the way the reader does, timing each
+    /// wait. A wait is the delay the reader would see; the histogram is of
+    /// those waits, in microseconds.
+    #[test]
+    #[ignore = "measurement"]
+    fn reader_delay_histogram_under_attach_load() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _in_rt = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let line = "x".repeat(200);
+        let spec = SessionSpec {
+            name: "attach-hist".into(),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), format!("yes {line}")]),
+            ..Default::default()
+        };
+        let session = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir.path(),
+                scrollback_bytes: 4 * 1024 * 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                tier: None,
+                on_exit: None,
+            },
+            EventBus::new(64),
+            None,
+        )
+        .unwrap()
+        .session;
+        // Let the grid fill its scrollback, so a frame is as large as it gets.
+        std::thread::sleep(Duration::from_secs(2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let attacher = {
+            let (session, stop) = (session.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut n, mut bytes) = (0u32, 0usize);
+                while !stop.load(Ordering::Relaxed) {
+                    bytes = session.snapshot_for_attach(None, None).0.len();
+                    n += 1;
+                }
+                (n, bytes)
+            })
+        };
+        let mut waits_us: Vec<u128> = Vec::new();
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            let t = Instant::now();
+            let _ = session.scrollback_position();
+            waits_us.push(t.elapsed().as_micros());
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (attaches, frame_bytes) = attacher.join().unwrap();
+        let _ = session.kill();
+        waits_us.sort_unstable();
+        let edges = [10u128, 50, 100, 500, 1_000, 5_000, 10_000, 50_000];
+        let mut prev = 0;
+        for e in edges {
+            let n = waits_us.iter().filter(|w| **w >= prev && **w < e).count();
+            println!("  {prev:>6}..{e:<6} us: {n}");
+            prev = e;
+        }
+        let n = waits_us.iter().filter(|w| **w >= prev).count();
+        println!("  {prev:>6}..     us: {n}");
+        println!(
+            "attaches {attaches}, frame {frame_bytes} B, probes {}, p50 {} us, p99 {} us, max {} us",
+            waits_us.len(),
+            waits_us[waits_us.len() / 2],
+            waits_us[waits_us.len() * 99 / 100],
+            waits_us.last().unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod pty_size_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_size_is_held_within_bounds_and_a_normal_one_is_untouched() {
+        assert_eq!(clamp_pty_size(0, 0), (1, 1));
+        assert_eq!(clamp_pty_size(65535, 65535), (MAX_PTY_COLS, MAX_PTY_ROWS));
+        assert_eq!(clamp_pty_size(120, 40), (120, 40));
+        assert_eq!(clamp_pty_size(80, 24), (80, 24));
+    }
+
+    /// Kills the session on drop, so a failed assertion fails the test
+    /// instead of hanging the runtime on the live `cat`.
+    struct KillOnDrop(Arc<Session>);
+    impl std::ops::Deref for KillOnDrop {
+        type Target = Session;
+        fn deref(&self) -> &Session {
+            &self.0
+        }
+    }
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn spawn_cat(cols: Option<u16>, rows: Option<u16>) -> KillOnDrop {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = SessionSpec {
+            name: "clamp".into(),
+            command: Some(vec!["cat".into()]),
+            cols,
+            rows,
+            ..Default::default()
+        };
+        let spawned = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir.path(),
+                scrollback_bytes: 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                tier: None,
+                on_exit: None,
+            },
+            EventBus::new(8),
+            None,
+        )
+        .unwrap();
+        KillOnDrop(spawned.session)
+    }
+
+    #[tokio::test]
+    async fn session_resize_clamps_what_reaches_the_pty_and_the_grid() {
+        let session = spawn_cat(None, None);
+        let size = session.watch_size();
+        session.resize(0, 0).unwrap();
+        assert_eq!(*size.borrow(), (1, 1));
+        assert_eq!(session.backend.current_size().unwrap(), (1, 1)); // (rows, cols)
+        session.resize(65535, 65535).unwrap();
+        assert_eq!(*size.borrow(), (MAX_PTY_COLS, MAX_PTY_ROWS));
+        assert_eq!(
+            session.backend.current_size().unwrap(),
+            (MAX_PTY_ROWS, MAX_PTY_COLS)
+        );
+        session.resize(120, 40).unwrap();
+        assert_eq!(*size.borrow(), (120, 40));
+        assert_eq!(session.backend.current_size().unwrap(), (40, 120));
+    }
+
+    #[tokio::test]
+    async fn a_stored_spec_size_is_clamped_when_the_session_starts() {
+        let session = spawn_cat(Some(65535), Some(0));
+        assert_eq!(*session.watch_size().borrow(), (MAX_PTY_COLS, 1));
+        assert_eq!(session.backend.current_size().unwrap(), (1, MAX_PTY_COLS)); // (rows, cols)
+    }
+}
+
+/// WI-4832: the host spawn gives an account's long-lived token to a Claude Code
+/// session under that account, in its environment, and to nothing else.
+#[cfg(test)]
+mod claude_oauth_token_spawn_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    /// Runs `argv0` (a script that records the token variable) under `account`
+    /// and returns what it saw: `unset` or the value.
+    fn seen(dir: &std::path::Path, script_name: &str, account: Option<&str>) -> String {
+        let out = dir.join(format!("{}.out", Uuid::new_v4()));
+        let script = dir.join(script_name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{CLAUDE_CODE_OAUTH_TOKEN-unset}}\" > '{}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = SessionSpec {
+            name: "oauth".into(),
+            command: Some(vec![script.to_string_lossy().into_owned()]),
+            account: account.map(str::to_string),
+            ..Default::default()
+        };
+        let _spawned = spawn(
+            Uuid::new_v4(),
+            &spec,
+            SpawnDefaults {
+                default_shell: "/bin/sh",
+                auto_agent_auth: false,
+                agent_auth_helper: Path::new("/usr/local/bin/vogt-agent-auth"),
+                default_cwd: dir,
+                scrollback_bytes: 1024,
+                activity_idle_after_ms: 200,
+                secret_broker: None,
+                agent_auth_manifest: None,
+                tier: None,
+                on_exit: None,
+            },
+            EventBus::new(8),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the script never ran");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_claude_session_under_the_account_gets_its_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = "wi4832host";
+        let var = crate::claude_oauth_token::engine_env_name(account);
+
+        // No token configured: no new env.
+        std::env::remove_var(&var);
+        assert_eq!(seen(dir.path(), "claude", Some(account)), "unset");
+
+        std::env::set_var(&var, "host-token-value");
+        assert_eq!(
+            seen(dir.path(), "claude", Some(account)),
+            "host-token-value"
+        );
+        // Another account, no account, or a program that is not Claude Code.
+        assert_eq!(seen(dir.path(), "claude", Some("other")), "unset");
+        assert_eq!(seen(dir.path(), "claude", None), "unset");
+        assert_eq!(seen(dir.path(), "not-claude", Some(account)), "unset");
+        std::env::remove_var(&var);
     }
 }

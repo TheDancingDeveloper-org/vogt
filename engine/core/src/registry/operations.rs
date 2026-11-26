@@ -156,7 +156,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "work.get",
-            "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+            "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/work/get"),
@@ -508,7 +508,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.start",
-            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
+            "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. `resume` continues an agent conversation: pass a `conversation_id` from session_history_list (whose `resume_template` names the template to use), or the id of a session (ses_\u{2026} or engine UUID), whose recorded conversation and `resume_template` are used; a session with no recorded conversation is refused, and a `template` that conflicts with its `resume_template` is refused. Any other value is passed to the agent CLI as its own conversation id. Returns both ids (ses_\u{2026} and engine_session_id); then poll session_screen until `ready`.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions"),
@@ -516,7 +516,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.list",
-            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u{2026}). `fields` accepts a list or a comma-separated string.",
+            "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_\u{2026}) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_\u{2026}), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions"),
@@ -532,7 +532,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.stop",
-            "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u{2026} id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+            "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u{2026} id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/sessions/stop"),
@@ -892,7 +892,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.history_list",
-            "List archived sessions (history), newest first.",
+            "List archived sessions (history), newest first. Each row carries `conversation_id` (the agent's own id, for session_start `resume`) and `resume_template` (the template session_start should use with it); session_start `resume` also takes a row's session id.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/history"),

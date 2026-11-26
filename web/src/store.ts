@@ -592,6 +592,8 @@ export function startEventStream(): void {
             produce((s) => {
               const sess = s.sessions[ev.id];
               if (!sess) return;
+              // Asleep is not a crash: drop the code the stopped process left.
+              sess.exit_code = null;
               sess.activity = "hibernated";
               sess.hibernation = {
                 at: new Date().toISOString(),
@@ -608,6 +610,9 @@ export function startEventStream(): void {
               const sess = s.sessions[ev.id];
               if (!sess) return;
               sess.hibernation = null;
+              // A new process: the old run's exit code (a pod killed with 137)
+              // must not stay on a live session (WI-4567).
+              sess.exit_code = null;
               if (sess.activity === "hibernated") sess.activity = "idle";
             }),
           );

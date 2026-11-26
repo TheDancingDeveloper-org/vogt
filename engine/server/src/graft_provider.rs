@@ -55,7 +55,7 @@ const DEFAULT_LINE: &str = "rust-2";
 
 /// Where minted session credentials are kept under the engine's state dir.
 /// The name predates the provider; adopted pods' credentials are found here.
-const CREDENTIAL_DIR: &str = "pod-graft-tokens";
+pub(crate) const CREDENTIAL_DIR: &str = "pod-graft-tokens";
 
 const SETTINGS: [(&str, &str); 5] = [
     ("ENGINE_SOURCE_GRAFT_ENDPOINT", "ENGINE_POD_GRAFT_ENDPOINT"),
@@ -446,18 +446,26 @@ impl SourceProvider for GraftProvider {
                 .and_then(|n| n.to_str())
                 .and_then(|n| Uuid::parse_str(n).ok())
                 .ok_or_else(|| SourceError::InvalidSource("not a graft credential".into()))?;
+            // Without a mint config (the mint token file was removed, say by
+            // an engine restart with changed settings) the token cannot be
+            // revoked. Keep the file so a later teardown that has a minter
+            // revokes it, instead of deleting the only copy; the TTL is the
+            // backstop.
+            let Some(minter) = &self.minter else {
+                return Ok(());
+            };
             let token = std::fs::read_to_string(&credential.path)
                 .ok()
                 .map(|t| GraftToken::new(t.trim()));
             // The file goes whether or not revocation succeeds; the TTL is the
             // backstop, as at session stop today.
             let _ = std::fs::remove_file(&credential.path);
-            match (&self.minter, token) {
-                (Some(m), Some(t)) => m
+            match token {
+                Some(t) => minter
                     .revoke(id, &t)
                     .await
                     .map_err(|e| SourceError::Unavailable(e.to_string())),
-                _ => Ok(()),
+                None => Ok(()),
             }
         })
     }
@@ -588,21 +596,45 @@ mod tests {
     }
 
     /// A fake `graft` that logs its argv and prints a canned JSON reply.
+    ///
+    /// Every call writes to a fresh path (never rewriting an executable in
+    /// place), and the file is written, synced, closed and chmod'ed before it
+    /// is returned, and it is probed until `exec` works (see below).
     fn fake(dir: &Path, reply: &str, code: i32) -> PathBuf {
-        let bin = dir.join("graft");
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let bin = dir.join(format!("graft-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
         let log = dir.join("argv");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> '{}'\ncat <<'EOF'\n{reply}\nEOF\nexit {code}\n",
-                log.display()
-            ),
-        )
-        .unwrap();
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = __probe ] && exit 0\necho \"$@\" >> '{}'\ncat <<'EOF'\n{reply}\nEOF\nexit {code}\n",
+            log.display()
+        );
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o755);
+        }
+        let mut f = opts.open(&bin).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        // Another test thread may have forked while `f` was open and its child
+        // can still hold a copy of the write fd until it execs. Until then
+        // `exec` of this file fails with ETXTBSY (errno 26), so probe until it
+        // runs. The probe exits before logging, so `argv` is untouched.
+        let mut tries = 0;
+        loop {
+            match std::process::Command::new(&bin).arg("__probe").status() {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(26) && tries < 2000 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake graft cannot run: {e}"),
+            }
         }
         bin
     }
@@ -769,6 +801,36 @@ mod tests {
             .any(|s| s.starts_with("mirror:")));
 
         p.revoke_credential(&h).await.unwrap();
+        assert!(!h.path.exists());
+        assert_eq!(
+            *minter.revoked.lock().unwrap(),
+            vec![(id, "minted".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_without_a_minter_keeps_the_token_for_a_later_revoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        let creds = tmp.path().join("creds");
+        let minter = Arc::new(FakeMinter::default());
+        let id = Uuid::new_v4();
+        let h = GraftProvider::new(&creds, Some(minter.clone()))
+            .mint_credential(&source(), &CredentialRequest::for_session(id))
+            .await
+            .unwrap();
+        // The engine came back without a mint config.
+        let bare = GraftProvider::new(&creds, None);
+        bare.revoke_credential(&h).await.unwrap();
+        assert!(h.path.exists(), "the kept token must survive");
+        assert!(minter.revoked.lock().unwrap().is_empty());
+        // A later run with a mint config revokes it and withdraws the file.
+        let held = GraftProvider::new(&creds, Some(minter.clone()))
+            .held_credential(id)
+            .unwrap();
+        GraftProvider::new(&creds, Some(minter.clone()))
+            .revoke_credential(&held)
+            .await
+            .unwrap();
         assert!(!h.path.exists());
         assert_eq!(
             *minter.revoked.lock().unwrap(),

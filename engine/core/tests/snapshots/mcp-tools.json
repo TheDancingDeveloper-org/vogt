@@ -986,7 +986,7 @@
     },
     {
       "name": "work_get",
-      "description": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+      "description": "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -996,11 +996,37 @@
             "type": "string"
           },
           "comment_limit": {
-            "default": 50,
+            "default": null,
+            "description": "How many comments to return. Default 3 (the newest); with `include` containing `all`, 200.",
             "maximum": 500,
             "minimum": 0,
             "title": "Comment Limit",
             "type": "integer"
+          },
+          "include": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "comments",
+                    "sessions",
+                    "branches",
+                    "git",
+                    "delivery",
+                    "relations",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it.",
+            "title": "Include"
           },
           "mode": {
             "default": "full",
@@ -1198,6 +1224,12 @@
             "title": "Include Finished",
             "type": "boolean"
           },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
+            "type": "boolean"
+          },
           "mode": {
             "default": "summary",
             "description": "`summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.",
@@ -1381,6 +1413,12 @@
             ],
             "default": null,
             "title": "Label"
+          },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every card: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
+            "type": "boolean"
           },
           "lane_mode": {
             "default": "none",
@@ -2285,6 +2323,12 @@
             "default": true,
             "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`.",
             "title": "Include Prs",
+            "type": "boolean"
+          },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
             "type": "boolean"
           },
           "mode": {
@@ -3555,7 +3599,7 @@
     },
     {
       "name": "session_start",
-      "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
+      "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. `resume` continues an agent conversation: pass a `conversation_id` from session_history_list (whose `resume_template` names the template to use), or the id of a session (ses_… or engine UUID), whose recorded conversation and `resume_template` are used; a session with no recorded conversation is refused, and a `template` that conflicts with its `resume_template` is refused. Any other value is passed to the agent CLI as its own conversation id. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
       "inputSchema": {
         "$defs": {
           "SessionBudgetParams": {
@@ -3989,7 +4033,7 @@
     },
     {
       "name": "session_list",
-      "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
+      "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4037,7 +4081,7 @@
           },
           "mode": {
             "default": "digest",
-            "description": "`digest` (default) or `full` (every SessionSummary field).",
+            "description": "`digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it).",
             "enum": [
               "digest",
               "full"
@@ -4047,7 +4091,7 @@
           },
           "fields": {
             "default": [],
-            "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list.",
+            "description": "Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list.",
             "items": {
               "type": "string"
             },
@@ -4070,7 +4114,7 @@
               }
             ],
             "default": null,
-            "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
+            "description": "Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
             "title": "Started By Session"
           },
           "states": {
@@ -4141,7 +4185,7 @@
     },
     {
       "name": "session_stop",
-      "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+      "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4154,6 +4198,16 @@
             "description": "Why this write is being made (audited).",
             "minLength": 1,
             "title": "Reason",
+            "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
             "type": "string"
           }
         },
@@ -6850,7 +6904,7 @@
     },
     {
       "name": "session_history_list",
-      "description": "List archived sessions (history), newest first.",
+      "description": "List archived sessions (history), newest first. Each row carries `conversation_id` (the agent's own id, for session_start `resume`) and `resume_template` (the template session_start should use with it); session_start `resume` also takes a row's session id.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

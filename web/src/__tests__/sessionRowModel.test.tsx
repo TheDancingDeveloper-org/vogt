@@ -28,6 +28,13 @@ function session(over: Partial<SessionSummary> & { id: string }): SessionSummary
   };
 }
 
+describe("hibernated is not a crash (WI-4567)", () => {
+  it("wins over a stale exit code in the label and class", () => {
+    expect(activityLabel("hibernated", 137)).toBe("hibernated");
+    expect(activityClass(session({ id: "h", activity: "hibernated", exit_code: 137 }))).toBe("hibernated");
+  });
+});
+
 describe("activity labels and classes", () => {
   it("reads a finished session as finished, exit code first", () => {
     expect(activityLabel("running", 0)).toBe("exited (0)");
@@ -164,6 +171,58 @@ describe("resource words", () => {
     expect(sessionStateWord(heavy, 0)).toContain("⚠ 50 GiB");
     expect(sessionResourceWord({ ...heavy, activity: "hibernated" })).toBeNull();
     expect(sessionResourceWord(session({ id: "n" }))).toBeNull();
+  });
+});
+
+describe("unmeasured pod samples and the pod memory badge (WI-4759)", () => {
+  const NOW = Date.parse("2026-11-25T12:00:00Z");
+  const GIB = 1024 ** 3;
+  const pod = (over: Record<string, unknown> = {}) => ({
+    rss_bytes: 0,
+    cpu_pct: 0,
+    processes: 0,
+    sampled_at: "2026-11-25T12:00:00Z",
+    memory_current: 3 * GIB,
+    memory_max: 4 * GIB,
+    observed_at: "2026-11-25T11:59:50Z",
+    ...over,
+  });
+
+  it("shows no rss word for processes === 0 and ranks it below a measured row", async () => {
+    const { sessionResourceWord, rssSortKey } = await import("../sessionRowModel");
+    const s = { ...session({ id: "p", activity: "running" }), resources: pod() };
+    expect(sessionResourceWord(s)).toBeNull();
+    const real = { rss_bytes: 0, cpu_pct: 0, processes: 1, sampled_at: "x" };
+    expect(rssSortKey(s.resources)).toBe(-1);
+    expect(rssSortKey(undefined)).toBe(-1);
+    expect(rssSortKey(real)).toBe(0);
+    expect(rssSortKey(real)).toBeGreaterThan(rssSortKey(s.resources));
+  });
+
+  it("shows memory_current of memory_max as a percentage", async () => {
+    const { podMemoryBadge } = await import("../sessionRowModel");
+    const b = podMemoryBadge(pod(), NOW);
+    expect(b).toMatchObject({ text: "75%", warning: false, age: null });
+    expect(b?.title).toContain("3.0 GiB of 4.0 GiB");
+    expect(podMemoryBadge(pod({ memory_max: undefined }), NOW)?.text).toBe("3.0 GiB");
+  });
+
+  it("flags memory_warning", async () => {
+    const { podMemoryBadge } = await import("../sessionRowModel");
+    expect(podMemoryBadge(pod({ memory_warning: true }), NOW)?.warning).toBe(true);
+  });
+
+  it("adds a muted age hint once the reading is older than 30 s", async () => {
+    const { podMemoryBadge } = await import("../sessionRowModel");
+    expect(podMemoryBadge(pod({ observed_at: "2026-11-25T11:59:31Z" }), NOW)?.age).toBeNull();
+    expect(podMemoryBadge(pod({ observed_at: "2026-11-25T11:59:29Z" }), NOW)?.age).toBe("31s old");
+    expect(podMemoryBadge(pod({ observed_at: "2026-11-25T11:57:00Z" }), NOW)?.age).toBe("3 min old");
+  });
+
+  it("shows nothing without memory fields", async () => {
+    const { podMemoryBadge } = await import("../sessionRowModel");
+    expect(podMemoryBadge(undefined, NOW)).toBeNull();
+    expect(podMemoryBadge({ rss_bytes: 1, cpu_pct: 0, processes: 2, sampled_at: "x" }, NOW)).toBeNull();
   });
 });
 

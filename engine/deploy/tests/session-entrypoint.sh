@@ -148,6 +148,15 @@ jq -e '.hasCompletedOnboarding == true and .theme == "dark"
   and .projects["/work"].hasClaudeMdExternalIncludesWarningShown == true' \
   "$tmp/happy/claude/.claude.json" >/dev/null || fail "Claude onboarding/trust config not installed"
 grep -q "clone vogt $tmp/happy/work --line rust-2" "$tmp/happy/graft.args" || fail "clone args"
+
+# WI-4832: with CLAUDE_CODE_OAUTH_TOKEN in the pod, a stray top-level login
+# file is removed (the token signs in, nothing refreshes), the onboarding
+# config stays, and the signed-out warning is not printed.
+oauth_out=$(run_case "$tmp/oauth" VOGT_SESSION_COMMAND='["sleep","1"]' BUNDLE_JSON="$CLAUDE_BUNDLE" CLAUDE_CODE_OAUTH_TOKEN=oauth-secret-value 2>&1) || fail "token path: $oauth_out"
+[[ ! -e "$tmp/oauth/claude/.credentials.json" ]] || fail "token pod kept .credentials.json"
+[[ -f "$tmp/oauth/claude/.claude.json" ]] || fail "token pod lost the onboarding config"
+grep -q 'no Claude Code credentials' <<<"$oauth_out" && fail "token pod warned it was signed out"
+grep -q oauth-secret-value <<<"$oauth_out" && fail "token printed"
 # WI-3356: /work is a git repository whose last commit is the line's tip
 # changeset, with no remote, so git log -1 -p, git diff and git status work.
 w="$tmp/happy/work"

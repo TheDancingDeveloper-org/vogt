@@ -157,6 +157,99 @@ fn validate_host_placement_role(
     Ok(())
 }
 
+/// Whether the lane switch that grants the estate-admin tier is truthy
+/// (`ENGINE_ESTATE_ADMIN_TIER=1`, WI-4814). Kept as a pure parser so tests
+/// need no process-global env mutation.
+fn estate_admin_tier_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
+    )
+}
+
+fn estate_admin_tier_enabled() -> bool {
+    estate_admin_tier_enabled_from(std::env::var("ENGINE_ESTATE_ADMIN_TIER").ok().as_deref())
+}
+
+/// The estate-admin tier a start carries, or `None` (WI-4814). A fresh API
+/// start is tiered exactly when a person started an oversight session on a
+/// tiered lane; a wake keeps its record's tier only while the lane grants it; an agent task never has one.
+fn estate_admin_tier(
+    spec: &SessionSpec,
+    creating: &Creating,
+    person_started: bool,
+    tier_lane_enabled: bool,
+) -> Option<String> {
+    match creating {
+        // A wake keeps the recorded tier only while the lane still grants it:
+        // unsetting ENGINE_ESTATE_ADMIN_TIER withdraws the identity from a
+        // session that comes back afterwards.
+        Creating::Wake(record) => record.tier.clone().filter(|_| tier_lane_enabled),
+        Creating::Fresh(Origin::AgentTask) => None,
+        Creating::Fresh(Origin::Api) => {
+            (person_started && spec.role == SessionRole::Oversight && tier_lane_enabled)
+                .then(|| pty::ESTATE_ADMIN_TIER.to_string())
+        }
+    }
+}
+
+/// Record `agent_auth.tier_granted` for one tiered spawn, a fresh start or a
+/// wake alike (WI-4814): the session, the person, the lane and the identity
+/// names, never a value. A spawn with no tier records nothing.
+fn announce_tier_grant(
+    bus: &EventBus,
+    session: Uuid,
+    tier: Option<&str>,
+    person: String,
+    lane: String,
+) {
+    if tier.is_none() {
+        return;
+    }
+    let names = if pty::tier_identity_passthrough_enabled() {
+        vec![
+            "INFISICAL_CLIENT_ID".to_string(),
+            "INFISICAL_CLIENT_SECRET".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    bus.publish(ServerEvent::AgentAuthTierGranted {
+        session,
+        person,
+        lane,
+        names,
+    });
+}
+
+/// The person a tier grant names: the caller on a fresh start, the recorded
+/// starter on a wake or adopt (which have no caller).
+fn tier_grant_person(starter_name: Option<String>, creating: &Creating) -> String {
+    starter_name
+        .or_else(|| match creating {
+            Creating::Wake(record) => record.tier_person.clone(),
+            Creating::Fresh(_) => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `spec.env` may not set the tier marker (WI-4814): the engine owns it, and
+/// sets it only on a tier spawn. Checked for every placement, so a host
+/// session and a pod session refuse alike.
+fn validate_reserved_tier_env(env: Option<&[(String, String)]>) -> Result<()> {
+    if env
+        .into_iter()
+        .flatten()
+        .any(|(name, _)| name == pty::AGENT_AUTH_TIER_ENV)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "env {:?} is reserved: the engine sets it only for an estate-admin tier session",
+            pty::AGENT_AUTH_TIER_ENV
+        )));
+    }
+    Ok(())
+}
+
 /// The deployment's default agent pod template: the first pod-backed template
 /// that runs an agent CLI (WI-4428). `None` when there is none.
 fn default_pod_template(
@@ -1050,6 +1143,7 @@ impl SessionRegistry {
         template: &crate::config::SessionTemplate,
         launch: crate::agent_stream::PodLaunch,
         long_lived: bool,
+        tier: Option<&str>,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
@@ -1076,7 +1170,7 @@ impl SessionRegistry {
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
             id,
             Arc::clone(&link),
-            (spec.cols.unwrap_or(80), spec.rows.unwrap_or(24)),
+            pty::clamp_pty_size(spec.cols.unwrap_or(80), spec.rows.unwrap_or(24)),
         ));
         let spawned = pty::spawn_remote(
             id,
@@ -1090,6 +1184,7 @@ impl SessionRegistry {
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                 secret_broker: None,
                 agent_auth_manifest: None,
+                tier: None,
                 on_exit: Some(self.exit_hook()),
             },
             self.bus.clone(),
@@ -1128,6 +1223,7 @@ impl SessionRegistry {
                 spec.permission_mode.as_deref(),
                 self.cfg.codex_approval_policy.as_str(),
                 spec.command.as_deref().unwrap_or_default(),
+                tier,
             )
         });
         let pod = pod.map(|mut pod| {
@@ -1519,7 +1615,7 @@ impl SessionRegistry {
             None,
             None,
         );
-        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None, false, None);
         self.pod_create_waits.remove(&id);
         self.adopting.lock().remove(&id);
         match created {
@@ -1542,7 +1638,7 @@ impl SessionRegistry {
             &spec.command,
             spec.template.as_deref(),
         )?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), None);
+        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), None, false, None);
         if let Ok(session) = &created {
             self.pod_create_waits.remove(&session.id);
         }
@@ -1620,7 +1716,12 @@ impl SessionRegistry {
     /// and its writes were attributed to them. A plain shell keeps the pod's
     /// token, because the person at it is a person. A session vogt-core
     /// started arrives with its own token and is left alone.
-    pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+    pub async fn create_launched(
+        &self,
+        mut spec: SessionSpec,
+        person_started: bool,
+        starter_name: Option<String>,
+    ) -> Result<Arc<Session>> {
         self.check_parent_standing(&spec)?;
         // Before the host graft preparation below, which asks the same
         // placement question (WI-4428).
@@ -1647,7 +1748,13 @@ impl SessionRegistry {
         }
         self.check_provider_secret(id, &spec).await?;
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id));
+        let created = self.create_inner(
+            spec,
+            Creating::Fresh(Origin::Api),
+            Some(id),
+            person_started,
+            starter_name,
+        );
         if created.is_err() {
             self.revoke_host_graft(id).await;
         }
@@ -1699,7 +1806,11 @@ impl SessionRegistry {
             budget: spec.budget.clone(),
             oversight: spec.role == SessionRole::Oversight,
         };
-        let provisioned = match crate::host_graft::config_home() {
+        let home = match self.cfg.host_placement.graft_config_home.clone() {
+            Some(home) => Ok(home),
+            None => crate::host_graft::config_home(),
+        };
+        let provisioned = match home {
             Ok(home) => {
                 crate::host_graft::HostGraftCredential::provision(
                     Arc::clone(&provider),
@@ -1951,7 +2062,13 @@ impl SessionRegistry {
         let id = Uuid::new_v4();
         self.check_provider_secret(id, &spec).await?;
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::AgentTask), Some(id));
+        let created = self.create_inner(
+            spec,
+            Creating::Fresh(Origin::AgentTask),
+            Some(id),
+            false,
+            None,
+        );
         self.pod_create_waits.remove(&id);
         if created.is_err() {
             self.revoke_host_graft(id).await;
@@ -1993,6 +2110,7 @@ impl SessionRegistry {
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
         spec.wake_on = crate::oversight_wake::normalize_wake_on(&spec.wake_on)?;
+        validate_reserved_tier_env(spec.env.as_deref())?;
         validate_requested_placement(spec.placement.as_deref(), self.cfg.pod_backends_enabled)?;
         validate_placement_template_requirement(
             spec.placement.as_deref(),
@@ -2275,6 +2393,8 @@ impl SessionRegistry {
             prompt_file,
             workspace,
             conversation,
+            tier,
+            tier_person,
         } = input;
         let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
         record.template = spec.template.clone();
@@ -2307,6 +2427,8 @@ impl SessionRegistry {
         record.source = spec.source.clone();
         record.budget = spec.budget.clone();
         record.role = spec.role;
+        record.tier_person = tier_person.filter(|_| tier.is_some());
+        record.tier = tier;
         record.work_item = spec.work_item.clone();
         record.supervisor = spec.supervisor;
         record.wake_on = spec.wake_on.clone();
@@ -2362,7 +2484,12 @@ impl SessionRegistry {
     /// Provisional history row, written at spawn with `ended_at` and
     /// `exit_code` NULL, so a session SIGKILLed on redeploy is still visible
     /// in the History tab.
-    fn write_provisional_history_row(&self, session: &Arc<Session>, role: SessionRole) {
+    fn write_provisional_history_row(
+        &self,
+        session: &Arc<Session>,
+        role: SessionRole,
+        waking: bool,
+    ) {
         if let Some(history) = self.history.clone() {
             let role = role.as_str();
             let live = Arc::clone(session);
@@ -2390,6 +2517,14 @@ impl SessionRegistry {
                     economics: None,
                 };
                 drop(live);
+                // A wake continues the same row: the stop that hibernated it
+                // is not this run's outcome, so clear it (WI-4567). The upsert
+                // below keeps NULLs, so this must come first.
+                if waking {
+                    if let Err(e) = history.reopen_session(sid).await {
+                        tracing::warn!(session = %sid, error = %e, "failed to reopen history row on wake");
+                    }
+                }
                 if let Err(e) = history.archive_session(record).await {
                     tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
                 }
@@ -2500,8 +2635,20 @@ impl SessionRegistry {
         mut spec: SessionSpec,
         creating: Creating,
         preassigned: Option<Uuid>,
+        person_started: bool,
+        starter_name: Option<String>,
     ) -> Result<Arc<Session>> {
         self.validate_and_expand_spec(&mut spec, &creating)?;
+        // The tier is computed once here and then stored on the record; a
+        // session this one starts never inherits it (its own start computes
+        // it afresh from its caller, who is a session and not a person).
+        let tier = estate_admin_tier(
+            &spec,
+            &creating,
+            person_started,
+            estate_admin_tier_enabled(),
+        );
+        let tier_person = tier_grant_person(starter_name, &creating);
         // What a hibernation record keeps: the command and environment as
         // the template and caller gave them, before the engine adds its own
         // launch arguments and variables (a wake adds those again).
@@ -2542,7 +2689,7 @@ impl SessionRegistry {
         // conversation would move `cwd` to its transcript's directory, which
         // is not the checkout the caller named, so the two are refused
         // together rather than cut from somewhere unasked.
-        let worktree = spec.worktree.take();
+        let mut worktree = spec.worktree.take();
         if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
             return Err(ApiError::BadRequest(
                 "a worktree cannot be cut for a resumed conversation; start it fresh, or resume in the worktree as cwd".into(),
@@ -2615,6 +2762,11 @@ impl SessionRegistry {
         // clone — travels through the bootstrap response, so neither value
         // enters the Kubernetes object.
         if pod_backed {
+            // A worktree a dispatch profile filled in is dropped: the pod has
+            // its own checkout (WI-4707). One the caller asked for is refused.
+            if worktree.as_ref().is_some_and(|w| w.if_supported) {
+                worktree = None;
+            }
             validate_pod_placement_fields(worktree.is_some())?;
         }
         // An opencode pod runs a model only through a registered provider, as
@@ -2943,7 +3095,8 @@ impl SessionRegistry {
             }
         }
 
-        // A worker brief says which MCP servers the session got (WI-2746).
+        // A worker brief says which MCP servers the session got (WI-2746) and
+        // the workspace-config commit its pod fetched (WI-4806).
         let brief_text = brief.as_deref().map(|text| {
             if mcp_set != crate::mcp_set::McpSet::Worker {
                 return text.to_string();
@@ -2955,9 +3108,15 @@ impl SessionRegistry {
                 Some("codex") => &mcp_trim.codex_servers,
                 _ => &mcp_trim.claude_servers,
             };
-            format!(
-                "{text}{}",
-                crate::mcp_set::brief_section(servers, &mcp_trim.unregistered)
+            worker_brief_sections(
+                text,
+                servers,
+                &mcp_trim.unregistered,
+                self.cfg
+                    .pod
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.source.as_str()),
             )
         });
         let prompt_file = match brief_text.as_deref() {
@@ -3090,6 +3249,7 @@ impl SessionRegistry {
                 template,
                 pod_launch.unwrap_or_default(),
                 long_lived_pod(&spec, &creating),
+                tier.as_deref(),
             )
         } else {
             pty::spawn(
@@ -3104,6 +3264,7 @@ impl SessionRegistry {
                     activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                     secret_broker: self.secret_broker.grant(id),
                     agent_auth_manifest: self.secret_broker.live_manifest_text(),
+                    tier: tier.as_deref(),
                     on_exit: Some(self.exit_hook()),
                 },
                 self.bus.clone(),
@@ -3146,6 +3307,7 @@ impl SessionRegistry {
             &account,
             mcp_set,
             &workspace,
+            tier.as_deref(),
         );
 
         // The record is written before the session is listed, so there is no
@@ -3153,6 +3315,11 @@ impl SessionRegistry {
         // forget on a SIGKILL. A failed write is logged, not fatal: the
         // session runs; it is only not recoverable.
         let fresh = matches!(&creating, Creating::Fresh(_));
+        // True for a wake and also for adopt (`adopt_one` creates with
+        // `Creating::Wake`). Clearing the old outcome on adopt is intended: the
+        // session is live again, and a shutdown drain may have left
+        // `engine-shutdown` on its row (WI-4567).
+        let waking = matches!(&creating, Creating::Wake(_));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
             Creating::Fresh(Origin::Api) => Some(self.fresh_record(
@@ -3170,6 +3337,8 @@ impl SessionRegistry {
                     prompt_file: prompt_file.as_ref(),
                     workspace: workspace.clone(),
                     conversation: conversation.clone(),
+                    tier: tier.clone(),
+                    tier_person: Some(tier_person.clone()).filter(|p| !p.is_empty()),
                 },
             )),
             Creating::Wake(record) => Some(self.woken_record(
@@ -3190,6 +3359,17 @@ impl SessionRegistry {
         }
         session.keep_reports_in(&self.cfg.state_dir, adopting);
         self.sessions.insert(session.id, Arc::clone(&session));
+        // A fresh tier start is the one grant: audited per spawn, with the
+        // person, the lane and the identity names granted, never a value
+        // (WI-4814). A wake respawns with the tier identity too, so it is
+        // recorded the same way.
+        announce_tier_grant(
+            &self.bus,
+            id,
+            tier.as_deref(),
+            tier_person.clone(),
+            self.cfg.lane.clone().unwrap_or_default(),
+        );
         // A fresh Codex session given a brief must actually start its first
         // turn (WI-4068). Start the confirmation before the caller's request
         // returns, so a session that never submits surfaces as blocked rather
@@ -3207,7 +3387,7 @@ impl SessionRegistry {
         // guard means this provisional write can never NULL a completed row,
         // even if it lands after the finalize under load. Metadata only — no
         // FTS write here, so it cannot wipe indexed output either.
-        self.write_provisional_history_row(&session, spec.role);
+        self.write_provisional_history_row(&session, spec.role, waking);
         self.bus.publish(ServerEvent::SessionCreated {
             id: session.id,
             name: session.name(),
@@ -3402,12 +3582,9 @@ impl SessionRegistry {
         let record = self.records.get(&id)?.clone();
         let bytes = hibernation::read_screen(&self.cfg.state_dir, id);
         let summary = hibernated_summary(&record, bytes.len() as u64)?;
-        Some((
-            bytes::Bytes::from(bytes),
-            record.rows.unwrap_or(24),
-            record.cols.unwrap_or(80),
-            summary,
-        ))
+        let (cols, rows) =
+            pty::clamp_pty_size(record.cols.unwrap_or(80), record.rows.unwrap_or(24));
+        Some((bytes::Bytes::from(bytes), rows, cols, summary))
     }
 
     /// The hook a session's exit waiter calls: a session that ended — exited
@@ -3510,12 +3687,15 @@ impl SessionRegistry {
             // it exits for hibernation or engine shutdown. Wake mints anew.
             if let Some((_, credential)) = host_graft_credentials.remove(&session.id) {
                 let id = session.id;
-                // The file goes now, so an engine shutdown cannot leave it and
-                // a fast wake's new file is never removed by this task.
-                credential.remove_delivered();
+                // The delivered file and the provider's copy are taken away
+                // here, synchronously: a wake that follows mints under the
+                // same paths, and the task below must neither delete nor
+                // revoke that new token (WI-4216). It only revokes the old
+                // run's token at graft.
+                let revoke = credential.into_remote_revoke();
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn(async move {
-                        if let Err(error) = credential.revoke().await {
+                        if let Err(error) = revoke.revoke().await {
                             tracing::warn!(
                                 target: "vogt::audit", session = %id, error = %error,
                                 "could not revoke the host session's graft credential; it expires on its own"
@@ -4111,7 +4291,7 @@ impl SessionRegistry {
             record.conversation_lost = Some(conversation.clone());
         }
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None, false, None);
         self.pod_create_waits.remove(&id);
         let session = match created {
             Ok(session) => session,
@@ -4190,8 +4370,8 @@ impl SessionRegistry {
             } else {
                 record.conversation.as_ref().map(|c| c.id.clone())
             },
-            cols: cols.or(record.cols),
-            rows: rows.or(record.rows),
+            cols: cols.or(record.cols).map(|c| pty::clamp_pty_size(c, 1).0),
+            rows: rows.or(record.rows).map(|r| pty::clamp_pty_size(1, r).1),
             scrollback_bytes: None,
             companion: None,
             charter: None,
@@ -5562,6 +5742,27 @@ fn session_list_order(a: &SessionSummary, b: &SessionSummary) -> std::cmp::Order
     })
 }
 
+/// Append the MCP and workspace-config sections to a worker brief (WI-2746,
+/// WI-4806). The workspace line names the `agent-workspace-config` commit the
+/// pod fetched, or `unknown`.
+fn worker_brief_sections(
+    text: &str,
+    servers: &[String],
+    unregistered: &[String],
+    workspace_source: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "{text}{}",
+        crate::mcp_set::brief_section(servers, unregistered)
+    );
+    if let Some(source) = workspace_source {
+        out.push_str(&crate::workspace_snapshot::workspace_config_brief_line(
+            std::path::Path::new(source),
+        ));
+    }
+    out
+}
+
 /// The largest summary a compacting wake accepts (WI-2037).
 pub const FRESH_PROMPT_MAX: usize = 64 * 1024;
 
@@ -5689,6 +5890,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         posture_lost_on_resume: false,
         account: record.account.clone(),
         mcp_set: record.mcp_set.clone(),
+        tier: record.tier.clone(),
         stop: None,
         // The last reading, so a caller can judge the wake (WI-2037).
         economics: record
@@ -6016,6 +6218,10 @@ fn normalize_session_name(name: &str) -> Result<String> {
 
 /// Give a freshly spawned session the state the request, and for a wake the
 /// record, asked for. Returns the posture as the wire names it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the spawn's inputs; a params struct would churn every caller"
+)]
 fn apply_spawned_state(
     session: &Arc<Session>,
     spec: &SessionSpec,
@@ -6024,6 +6230,7 @@ fn apply_spawned_state(
     account: &Option<String>,
     mcp_set: crate::mcp_set::McpSet,
     workspace: &Option<vogt_engine_contract::Workspace>,
+    tier: Option<&str>,
 ) -> Option<String> {
     session.set_conversation(conversation.clone());
     // The posture as the wire names it, `None` for the default one.
@@ -6057,6 +6264,7 @@ fn apply_spawned_state(
     session.set_policy(spec.policy.clone());
     session.set_budget(spec.budget.clone());
     session.set_role(spec.role);
+    session.set_tier(tier.map(str::to_string));
     session.set_work_item(spec.work_item.clone());
     session.set_supervisor(spec.supervisor);
     session.set_wake_on(spec.wake_on.clone());
@@ -6089,6 +6297,8 @@ struct FreshRecordInputs<'a> {
     prompt_file: Option<&'a std::path::PathBuf>,
     workspace: Option<vogt_engine_contract::Workspace>,
     conversation: Option<vogt_engine_contract::AgentConversation>,
+    tier: Option<String>,
+    tier_person: Option<String>,
 }
 
 /// A session worktree cut during a start that has not spawned yet (WI-1298).
@@ -6180,11 +6390,181 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_claude_cli_model, normalize_requested_model, normalize_session_name, pod_carry_env,
-        pod_carry_recorded, validate_codex_placement, validate_placement_template_requirement,
-        validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
+        estate_admin_tier, estate_admin_tier_enabled_from, is_claude_cli_model,
+        normalize_requested_model, normalize_session_name, pod_carry_env, pod_carry_recorded,
+        validate_codex_placement, validate_placement_template_requirement,
+        validate_pod_placement_fields, validate_requested_placement, validate_reserved_tier_env,
+        validate_template_placement, SessionSpec,
     };
     use crate::config::SessionTemplate;
+
+    fn spec(role: vogt_engine_contract::SessionRole) -> SessionSpec {
+        SessionSpec {
+            name: "tier-spec".into(),
+            role,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_estate_admin_tier_switch_is_truthy_only_when_set() {
+        for (value, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some("TRUE"), true),
+        ] {
+            assert_eq!(
+                estate_admin_tier_enabled_from(value),
+                expected,
+                "ENGINE_ESTATE_ADMIN_TIER={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tier_is_granted_only_for_a_person_started_oversight_on_a_tiered_lane() {
+        let oversight = vogt_engine_contract::SessionRole::Oversight;
+        let worker = vogt_engine_contract::SessionRole::Worker;
+        for (role, person_started, lane_enabled, expected) in [
+            (
+                oversight,
+                true,
+                true,
+                Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            ),
+            (oversight, true, false, None),
+            (oversight, false, true, None),
+            (worker, true, true, None),
+            (worker, false, true, None),
+        ] {
+            let fresh = super::Creating::Fresh(super::Origin::Api);
+            assert_eq!(
+                estate_admin_tier(&spec(role), &fresh, person_started, lane_enabled),
+                expected,
+                "role={role:?} person={person_started} lane={lane_enabled}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tier_is_kept_on_wake_but_never_given_to_an_agent_task() {
+        let record = super::hibernation::Record {
+            tier: Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            ..super::hibernation::Record::new(uuid::Uuid::new_v4(), "tiered".into(), "now".into())
+        };
+        let wake = super::Creating::Wake(Box::new(record));
+        assert_eq!(
+            estate_admin_tier(
+                &spec(vogt_engine_contract::SessionRole::Oversight),
+                &wake,
+                false,
+                false,
+            ),
+            None::<String>,
+            "a wake on a lane that no longer grants the tier drops it"
+        );
+        assert_eq!(
+            estate_admin_tier(
+                &spec(vogt_engine_contract::SessionRole::Oversight),
+                &wake,
+                false,
+                true,
+            ),
+            Some(super::pty::ESTATE_ADMIN_TIER.to_string())
+        );
+
+        let task = super::Creating::Fresh(super::Origin::AgentTask);
+        assert_eq!(
+            estate_admin_tier(
+                &spec(vogt_engine_contract::SessionRole::Oversight),
+                &task,
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tiered_spawn_publishes_the_grant_and_an_ordinary_one_does_not() {
+        let bus = crate::events::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let id = uuid::Uuid::new_v4();
+        super::announce_tier_grant(&bus, id, None, "alice".into(), "dev".into());
+        assert!(rx.try_recv().is_err(), "no event for a non-tier spawn");
+        // A wake respawn is a tier spawn like a fresh start.
+        super::announce_tier_grant(
+            &bus,
+            id,
+            Some(super::pty::ESTATE_ADMIN_TIER),
+            "alice".into(),
+            "dev".into(),
+        );
+        match rx.try_recv() {
+            Ok(crate::events::ServerEvent::AgentAuthTierGranted {
+                session,
+                person,
+                lane,
+                names,
+            }) => {
+                assert_eq!(session, id);
+                assert_eq!(person, "alice");
+                assert_eq!(lane, "dev");
+                assert!(names.iter().all(|n| n.starts_with("INFISICAL_")));
+            }
+            other => panic!("expected the tier grant, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one event per spawn");
+    }
+
+    #[test]
+    fn a_wake_or_adopt_grant_names_the_recorded_starter() {
+        let record = super::hibernation::Record {
+            tier: Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            tier_person: Some("alice".into()),
+            ..super::hibernation::Record::new(uuid::Uuid::new_v4(), "tiered".into(), "now".into())
+        };
+        let wake = super::Creating::Wake(Box::new(record));
+        let person = super::tier_grant_person(None, &wake);
+        assert_eq!(person, "alice");
+        let bus = crate::events::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        super::announce_tier_grant(
+            &bus,
+            uuid::Uuid::new_v4(),
+            Some(super::pty::ESTATE_ADMIN_TIER),
+            person,
+            "dev".into(),
+        );
+        match rx.try_recv() {
+            Ok(crate::events::ServerEvent::AgentAuthTierGranted { person, .. }) => {
+                assert_eq!(person, "alice");
+            }
+            other => panic!("expected the tier grant, got {other:?}"),
+        }
+        // A fresh start names its caller.
+        let fresh = super::Creating::Fresh(super::Origin::Api);
+        assert_eq!(super::tier_grant_person(Some("bob".into()), &fresh), "bob");
+    }
+
+    #[test]
+    fn a_caller_cannot_set_the_reserved_tier_marker() {
+        let refusal = validate_reserved_tier_env(Some(&[(
+            super::pty::AGENT_AUTH_TIER_ENV.to_string(),
+            "estate-admin".to_string(),
+        )]));
+        assert!(refusal.is_err(), "{refusal:?}");
+
+        let ordinary = validate_reserved_tier_env(Some(&[
+            ("VOGT_HTTP_TOKEN".to_string(), "v".to_string()),
+            ("HOME".to_string(), "/home/agent".to_string()),
+        ]));
+        assert!(ordinary.is_ok(), "{ordinary:?}");
+    }
 
     #[test]
     fn late_teardown_keeps_the_newer_pods_token() {
@@ -7100,6 +7480,7 @@ mod tests {
             posture_lost_on_resume: false,
             account: None,
             mcp_set: None,
+            tier: None,
             stop: None,
             economics: None,
             budget: None,
@@ -8150,6 +8531,119 @@ mod host_placement_tests {
         let _ = sessions.remove(id);
     }
 
+    async fn registry_with_history(
+        dir: &std::path::Path,
+    ) -> (SessionRegistry, Arc<crate::history::SessionHistory>) {
+        let history = Arc::new(crate::history::SessionHistory::new(dir).await.unwrap());
+        let cfg = crate::agent_tasks::tests::test_config(dir.to_path_buf());
+        let sessions = SessionRegistry::new(
+            Arc::new(cfg),
+            EventBus::default(),
+            Some(Arc::clone(&history)),
+        );
+        (sessions, history)
+    }
+
+    /// Removes (kills) the session when the test ends, including by a failed
+    /// assertion: a live `cat` would otherwise keep the runtime from shutting
+    /// down and a failing test would hang instead of failing.
+    struct RemoveOnDrop<'a>(&'a SessionRegistry, Uuid);
+
+    impl Drop for RemoveOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.remove(self.1);
+        }
+    }
+
+    async fn wait_for_row(
+        history: &crate::history::SessionHistory,
+        id: Uuid,
+        ready: impl Fn(&crate::history::SessionMetadata) -> bool,
+    ) -> crate::history::SessionMetadata {
+        for _ in 0..200 {
+            if let Ok(row) = history.get_session(id).await {
+                if ready(&row) {
+                    return row;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the history row for {id} never reached the expected state");
+    }
+
+    /// WI-4567: a wake through `create_inner` (`Creating::Wake`) clears the
+    /// outcome the run that hibernated left on the history row. Fails if
+    /// `waking` is not passed to `write_provisional_history_row`: the
+    /// provisional upsert's COALESCE then keeps the old exit code.
+    #[tokio::test]
+    async fn a_wake_clears_the_old_outcome_on_the_history_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, history) = registry_with_history(dir.path()).await;
+        let id = Uuid::new_v4();
+        history
+            .archive_session(crate::history::ArchiveRecord {
+                id,
+                name: "worker".into(),
+                created_at: time::OffsetDateTime::now_utc(),
+                ended_at: Some(time::OffsetDateTime::now_utc()),
+                exit_code: Some(137),
+                cwd: None,
+                command: Some("cat".into()),
+                scrollback_bytes: 0,
+                end_reason: Some(crate::history::END_EXITED),
+                identity: None,
+                economics: None,
+            })
+            .await
+            .unwrap();
+        sessions
+            .records
+            .insert(id, hibernated_record(id, None, Some("host")));
+        sessions.wake(id, Default::default()).await.unwrap();
+        let _cleanup = RemoveOnDrop(&sessions, id);
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_none()).await;
+        assert_eq!(row.exit_code, None, "the old 137 must not outlive the wake");
+        assert_eq!(row.end_reason, None);
+    }
+
+    /// WI-4567: hibernating a live session records `hibernated` with no exit
+    /// code (the SIGKILL is ours, not a crash), and a wake then reopens the
+    /// row. Drives the real exit waiter, so it fails if `mark_hibernating` is
+    /// not seen by `try_spawn_archive` (the row would carry the kill's code).
+    #[tokio::test]
+    async fn hibernate_then_wake_leaves_no_exit_code_on_the_history_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, history) = registry_with_history(dir.path()).await;
+        let session = sessions.create(spec("hib", None)).unwrap();
+        let id = session.id;
+        let _cleanup = RemoveOnDrop(&sessions, id);
+        wait_for_row(&history, id, |_| true).await;
+        sessions
+            .hibernate(
+                id,
+                None,
+                vogt_engine_contract::HibernateTrigger::Manual,
+                true,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_some()).await;
+        assert_eq!(
+            row.end_reason.as_deref(),
+            Some(crate::history::END_HIBERNATED)
+        );
+        assert_eq!(
+            row.exit_code, None,
+            "a hibernation kill is not an exit code"
+        );
+        sessions.wake(id, Default::default()).await.unwrap();
+        let row = wait_for_row(&history, id, |r| r.ended_at.is_none()).await;
+        assert_eq!(row.exit_code, None);
+        assert_eq!(row.end_reason, None);
+    }
+
     #[tokio::test]
     async fn a_wake_whose_recorded_template_is_gone_is_a_named_bad_request() {
         let dir = tempfile::tempdir().unwrap();
@@ -8459,5 +8953,47 @@ mod host_placement_tests {
             !scratch.exists(),
             "the scratch dirs go when the session ends"
         );
+    }
+
+    #[test]
+    fn a_worker_brief_carries_the_workspace_config_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path();
+        let repo = source.join("agent-workspace-config");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("rule.md"), "rule").unwrap();
+        git(&["add", "rule.md"]);
+        git(&["commit", "-qm", "awc"]);
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let full = String::from_utf8(head.stdout).unwrap();
+        let full = full.trim();
+        let brief = super::worker_brief_sections(
+            "BRIEF",
+            &["vogt".to_string()],
+            &[],
+            Some(source.to_str().unwrap()),
+        );
+        assert!(brief.contains(&format!(
+            "Workspace config: agent-workspace-config @ {}",
+            &full[..7]
+        )));
+        assert!(brief.contains("## MCP servers"));
     }
 }

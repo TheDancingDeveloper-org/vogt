@@ -1,4 +1,5 @@
 // Engine-spec, image and workflow checks with no Python (WI-4610).
+// Also ports tests/test_engine_parity.py (WI-4663) against a golden.
 // Ports the assertions of tests/test_check_engine_spec.py (the real-tree
 // half), tests/test_dev_images_workflow.py and tests/test_engine_image_core.py.
 // Run from anywhere: node scripts/check-engine-files.mjs
@@ -122,6 +123,88 @@ if (!existsSync(join(root, "engine/server/src/app.rs"))) {
       if (l.includes("engine/Dockerfile") && l.includes("CORE_IMAGE"))
         failures.push(`CORE_IMAGE passed to engine/Dockerfile at ${f}:${i + 1}`);
     });
+}
+
+// --- engine routes vs MCP (tests/test_engine_parity.py, WI-4663) ---
+// Reads the golden dumped from ENGINE_COUNTERPARTS, ENGINE_ONLY and the MCP
+// registry (regenerate: uv run python tests/test_engine_parity.py --regenerate).
+{
+  const golden = JSON.parse(read("tests/fixtures/engine_parity.json"));
+  const counterparts = golden.engine_counterparts;
+  const only = golden.engine_only;
+  const mcp = new Set(golden.mcp_operations);
+  const engineSrc = "engine/server/src";
+  const consts = {};
+  for (const dir of [engineSrc, "engine/session-agent/src"])
+    for (const f of readdirSync(join(root, dir)).filter((f) => f.endsWith(".rs")))
+      for (const m of read(`${dir}/${f}`).matchAll(/pub const ([A-Z_]+): &str = "(\/[^"]*)"/g)) consts[m[1]] = m[2];
+  const probe = read(`${engineSrc}/vogt_core.rs`).match(/pub const PROBE_PATHS: \[&str; \d+\] = \[([\s\S]*?)\];/);
+  if (!probe) failures.push("PROBE_PATHS was not found in vogt_core.rs");
+  const probePaths = probe ? [...probe[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]) : [];
+
+  // Every `METHOD /path` the router serves: each `.route(` call read to its
+  // matching parenthesis, a constant path resolved, the probe loop expanded.
+  const text = read(`${engineSrc}/app.rs`);
+  const routes = new Set();
+  let start = 0, found;
+  while ((found = text.indexOf(".route(", start)) !== -1) {
+    const cursor = found + 7;
+    let depth = 1, end = cursor;
+    while (depth) { const c = text[end++]; depth += c === "(" ? 1 : c === ")" ? -1 : 0; }
+    const call = text.slice(cursor, end - 1);
+    start = end;
+    let paths;
+    const lit = call.match(/^\s*"([^"]+)"/);
+    if (lit) paths = [lit[1]];
+    else {
+      const name = call.match(/^\s*([\w:]+)/);
+      if (!name) { failures.push(`unreadable route call: ${call.slice(0, 60)}`); continue; }
+      const ident = name[1].split("::").pop();
+      if (ident === "path") paths = probePaths;
+      else if (ident in consts) paths = [consts[ident]];
+      else { failures.push(`route constant ${ident} not found`); continue; }
+    }
+    const methods = [...call.matchAll(/\b(get|post|put|patch|delete|any)\(/g)].map((m) => m[1].toUpperCase());
+    if (!methods.length) failures.push(`no handler method in route call: ${call.slice(0, 60)}`);
+    for (const m of methods) for (const p of paths) routes.add(`${m} ${p}`);
+  }
+  check(routes.size > 50, "the router read implausibly few routes");
+
+  const cKeys = Object.keys(counterparts), oKeys = Object.keys(only);
+  const listed = new Set([...cKeys, ...oKeys]);
+  const unaccounted = [...routes].filter((r) => !listed.has(r)).sort();
+  check(!unaccounted.length, `engine routes ${JSON.stringify(unaccounted)} have no MCP counterpart and no reason: add the core operation that proxies each to ENGINE_COUNTERPARTS, or say why there is none in ENGINE_ONLY (src/vogt/registry/engine_routes.py), then regenerate tests/fixtures/engine_parity.json`);
+  const stale = [...listed].filter((r) => !routes.has(r)).sort();
+  check(!stale.length, `entries name routes the engine no longer serves: ${JSON.stringify(stale)}`);
+  const both = cKeys.filter((r) => r in only).sort();
+  check(!both.length, `routes listed as both counterpart and exclusion: ${JSON.stringify(both)}`);
+  const wrong = cKeys.filter((r) => !mcp.has(counterparts[r])).sort();
+  check(!wrong.length, `counterparts that are not MCP operations: ${JSON.stringify(wrong.map((r) => [r, counterparts[r]]))}`);
+  for (const [r, reason] of Object.entries(only))
+    check(reason.trim().split(/\s+/).length >= 8, `${r} needs a real justification`);
+
+  // The PWA's own calls, named directly.
+  const webSrc = join(root, "web/src");
+  if (existsSync(webSrc)) {
+    const norm = (p) => {
+      const i = p.indexOf("${");
+      if (i !== -1) p = p.slice(0, i);
+      return p.replace(/\{[^}]*\}/g, "{}").replace(/\/+$/, "");
+    };
+    const accounted = [...listed].map((e) => norm(e.split(" ").slice(1).join(" ")));
+    const literals = new Set();
+    const walk = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (e.isDirectory()) { if (e.name !== "__tests__") walk(join(dir, e.name)); }
+        else if (/\.tsx?$/.test(e.name))
+          for (const m of readFileSync(join(dir, e.name), "utf8").matchAll(/["'`](\/api\/[A-Za-z0-9/_.$\-{}]*)/g)) literals.add(m[1]);
+      }
+    };
+    walk(webSrc);
+    const unresolved = [...literals].filter((l) => !l.startsWith("/api/vogt")
+      && !accounted.some((k) => k === norm(l) || k.startsWith(norm(l)))).sort();
+    check(!unresolved.length, `the PWA calls ${JSON.stringify(unresolved)}, which no entry accounts for`);
+  }
 }
 
 if (failures.length) {

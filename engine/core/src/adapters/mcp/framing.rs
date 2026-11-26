@@ -494,11 +494,7 @@ fn failed_call(code: &str, message: &str, error: &crate::errors::VogtError) -> V
 /// way `run_raw` raises `InvalidParams`; every other error keeps its own code.
 fn tool_code(error: &crate::errors::VogtError) -> &str {
     match error {
-        crate::errors::VogtError::InvalidRequest(message)
-            if message.starts_with("invalid arguments for ") =>
-        {
-            "invalid_params"
-        }
+        crate::errors::VogtError::InvalidArguments(_) => "invalid_params",
         other => other.code(),
     }
 }
@@ -507,7 +503,7 @@ fn tool_code(error: &crate::errors::VogtError) -> &str {
 /// what is wrong, then what the tool accepts. The validator's report names each
 /// field and why; anything else keeps its own message.
 fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
-    let Some(report) = crate::errors::take_validation(error) else {
+    let Some(report) = error.validation_report() else {
         return error.message().to_string();
     };
     let problems = report

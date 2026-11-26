@@ -339,6 +339,11 @@ pub struct HostPlacement {
     /// as lost (GH #1466). Off in a bare `Default`, for test agents that keep
     /// no transcripts.
     pub wake_transcript_check: bool,
+    /// Where a host session's graft token is delivered (`graft/sessions/...`
+    /// below it). `None` uses the process's config home (`XDG_CONFIG_HOME`,
+    /// else `~/.config`). Set by tests, so they need no process-wide
+    /// environment change (WI-4216); there is no environment variable.
+    pub graft_config_home: Option<std::path::PathBuf>,
 }
 
 /// `ENGINE_POD_SALVAGE` (on unless explicitly off) and the retention bounds
@@ -1041,6 +1046,7 @@ fn resolve_host_placement() -> Result<HostPlacement> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from),
+        graft_config_home: None,
     })
 }
 

@@ -596,11 +596,11 @@ mod tests {
         let built = built("ranges", Vec::new(), None);
         assert!(matches!(
             ask_history(&built, json!({"limit": 0})).unwrap_err(),
-            VogtError::InvalidRequest(_)
+            VogtError::InvalidRequest(_) | VogtError::InvalidArguments(_)
         ));
         assert!(matches!(
             ask_search(&built, json!({})).unwrap_err(),
-            VogtError::InvalidRequest(_)
+            VogtError::InvalidRequest(_) | VogtError::InvalidArguments(_)
         ));
     }
 
@@ -635,7 +635,10 @@ mod tests {
             json!({"id": "ses_00000000000000000000000001", "n": 0}),
         )
         .unwrap_err();
-        assert!(matches!(error, VogtError::InvalidRequest(_)));
+        assert!(matches!(
+            error,
+            VogtError::InvalidRequest(_) | VogtError::InvalidArguments(_)
+        ));
     }
 
     #[test]

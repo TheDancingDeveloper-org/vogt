@@ -168,3 +168,7 @@ mod handoff_test;
 mod oversight_proof_test;
 #[cfg(test)]
 mod verdict_test;
+#[cfg(test)]
+mod work_get_lean_test;
+#[cfg(test)]
+mod work_live_sessions_test;

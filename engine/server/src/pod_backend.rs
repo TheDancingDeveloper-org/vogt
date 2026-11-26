@@ -8,10 +8,11 @@ use crate::{
 };
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
-    EmptyDirVolumeSource, EnvFromSource, EnvVar, HostPathVolumeSource, NodeAffinity, NodeSelector,
-    NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaimVolumeSource, Pod,
-    PodSecurityContext, PodSpec, PreferredSchedulingTerm, ResourceRequirements, SeccompProfile,
-    Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+    EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, HostPathVolumeSource, NodeAffinity,
+    NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaimVolumeSource,
+    Pod, PodSecurityContext, PodSpec, PreferredSchedulingTerm, ResourceRequirements,
+    SeccompProfile, Secret, SecretEnvSource, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -555,6 +556,10 @@ fn default_heartbeat_timeout() -> Duration {
 }
 /// The label that marks which engine deployment owns a session pod.
 pub const ENGINE_LABEL: &str = "vogt.engine";
+/// The pod label a tier session carries, and its value (WI-4814). The label
+/// is engine-owned: a caller's `spec.env` can never add it.
+pub const TIER_LABEL: &str = "vogt.dev/tier";
+pub const ESTATE_ADMIN_LABEL_VALUE: &str = "estate-admin";
 pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
 fn default_engine_id() -> String {
     DEFAULT_ENGINE_ID.into()
@@ -1275,6 +1280,168 @@ const PRIVATE_CACHE_ENV: &[(&str, &str)] = &[
     ("UV_CACHE_DIR", "/cache/uv"),
 ];
 
+/// Gradle/Kotlin daemon hygiene (WI-898), carried in the pod spec because the
+/// `session-home` emptyDir hides anything the image put under `/home/vogt`
+/// (a `~/.gradle/gradle.properties` would never be seen). Sources: Gradle
+/// "Configuring the build environment" docs.
+///
+/// - `org.gradle.daemon.idletimeout` (ms) ends an idle daemon after 30
+///   minutes instead of the 3 hour default.
+/// - `org.gradle.jvmargs` sets the daemon's JVM arguments. The docs say
+///   `GRADLE_OPTS` can pass it as a system property, and that system
+///   properties outrank a project's `gradle.properties`. That is how the pod
+///   caps the `-Xmx8G -XX:MaxMetaspaceSize=4G` the Flutter templates
+///   (aus-price-scanner, farmeggs) ship, which this repo does not control.
+///   It also lifts a smaller project value (mobile/ uses `-Xmx1536m`) to 4G;
+///   that is a ceiling, not a reservation.
+/// - `-Dorg.gradle.project.<name>` is the documented system-property form of
+///   project property `<name>`; `kotlin.daemon.jvmargs` is the Kotlin Gradle
+///   plugin's property for the Kotlin compile daemon (otherwise it inherits
+///   the Gradle daemon's heap), capped at 3 GiB.
+///
+/// Not run against a real Gradle here (none in the build pod): confirm in a
+/// deployed pod with `jps -v` after a build.
+const GRADLE_OPTS: &str = "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g \
+-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\"";
+
+/// Tool caps derived from a pod's memory limit (WI-4748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolCaps {
+    cargo_jobs: u64,
+    gradle_mib: u64,
+    kotlin_mib: u64,
+    jvm_mib: u64,
+}
+
+/// Bytes of a Kubernetes memory quantity (`1Gi`, `6144Mi`, `2G`, `500000`).
+/// `None` for anything else: zero, a milli-suffix, a decimal (`1.5Gi`), an
+/// exponent form (`1e9`), the `E`/`P`/`Pi`/`Ei` suffixes, or a value that
+/// overflows `u64`. A pod whose limit is refused keeps today's fixed
+/// `GRADLE_OPTS` and gets no derived caps.
+fn memory_bytes(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, factor) = [
+        ("Ti", 1u64 << 40),
+        ("Gi", 1 << 30),
+        ("Mi", 1 << 20),
+        ("Ki", 1 << 10),
+        ("T", 1_000_000_000_000),
+        ("G", 1_000_000_000),
+        ("M", 1_000_000),
+        ("K", 1_000),
+        ("k", 1_000),
+    ]
+    .into_iter()
+    .find_map(|(suffix, f)| raw.strip_suffix(suffix).map(|d| (d, f)))
+    .unwrap_or((raw, 1));
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(factor)?;
+    (bytes > 0).then_some(bytes)
+}
+
+/// Whole CPUs of a Kubernetes CPU quantity (`2`, `1500m`, `0.5`), rounded
+/// down and at least 1; `None` when it does not parse or is not positive.
+fn cpu_limit_cores(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let cores = match raw.strip_suffix('m') {
+        Some(milli) => milli.parse::<f64>().ok()? / 1000.0,
+        None => raw.parse::<f64>().ok()?,
+    };
+    (cores.is_finite() && cores > 0.0).then(|| (cores.floor() as u64).max(1))
+}
+
+/// Splits 70% of the pod memory limit between the build tools, so a heavy
+/// build cannot push the pod over its limit and get OOM-killed.
+///
+/// Shares of the limit: Gradle daemon heap 28%, Kotlin daemon heap 17%, any
+/// other JVM (`JAVA_TOOL_OPTIONS`, e.g. Soot) 10%, cargo 15% at an estimated
+/// 512 MiB per job, rounded down, at least one job and, when `cpu_cores` is
+/// known, at most that many jobs. Each heap is at least 128 MiB.
+///
+/// The 70% counts the three heaps and the cargo jobs only. Gradle's
+/// `MaxMetaspaceSize=1G` and JVM native memory are not counted.
+///
+/// Returns `None` when the heaps and jobs would not fit in 70% of the limit
+/// (below about 3.4 GiB, where the one-job minimum and the floors dominate):
+/// the caller then keeps today's fixed `GRADLE_OPTS` ceilings and sets no
+/// `JAVA_TOOL_OPTIONS` or `CARGO_BUILD_JOBS`, as for an unparsable limit.
+///
+/// | limit | cargo jobs | Gradle | Kotlin | other JVM | sum (jobs at 512 MiB) |
+/// |-------|-----------|--------|--------|-----------|-----------------------|
+/// | 1Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
+/// | 2Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
+/// | 6Gi   | 1         | 1720m  | 1044m  | 614m      | 3890m (63%)           |
+/// | 8Gi   | 2         | 2293m  | 1392m  | 819m      | 5528m (67%)           |
+///
+/// With a 1-CPU limit the 8Gi row gets 1 job.
+fn derive_tool_caps(limit_bytes: u64, cpu_cores: Option<u64>) -> Option<ToolCaps> {
+    const MIB: u64 = 1 << 20;
+    let mib = limit_bytes / MIB;
+    let heap = |percent: u64| (mib * percent / 100).max(128);
+    let by_memory = (mib * 15 / 100 / 512).max(1);
+    let caps = ToolCaps {
+        cargo_jobs: cpu_cores.map_or(by_memory, |c| by_memory.min(c.max(1))),
+        gradle_mib: heap(28),
+        kotlin_mib: heap(17),
+        jvm_mib: heap(10),
+    };
+    let total = caps.gradle_mib + caps.kotlin_mib + caps.jvm_mib + caps.cargo_jobs * 512;
+    (total * 100 <= mib * 70).then_some(caps)
+}
+
+/// `GRADLE_OPTS` with the Gradle and Kotlin heaps taken from `caps`.
+fn gradle_opts_for(caps: &ToolCaps) -> String {
+    format!(
+        "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx{}m \
+-Dorg.gradle.jvmargs=\"-Xmx{}m -XX:MaxMetaspaceSize=1G\"",
+        caps.kotlin_mib, caps.gradle_mib
+    )
+}
+
+/// The memory and CPU limits the pod gets: the deployment default with the
+/// template policy's map merged over it, as `pod_template` builds the
+/// container.
+fn effective_limits(
+    cfg: &PodConfig,
+    policy: Option<&PodTemplatePolicy>,
+) -> (Option<u64>, Option<u64>) {
+    let limits = merge_resources(
+        &cfg.resource_limits,
+        policy.and_then(|p| p.resource_limits.as_ref()),
+    );
+    (
+        limits.get("memory").and_then(|q| memory_bytes(&q.0)),
+        limits.get("cpu").and_then(|q| cpu_limit_cores(&q.0)),
+    )
+}
+
+/// Adds the derived caps to `env`, leaving every name already set (by the
+/// operator or the template) alone. No limit, one that does not parse, or one
+/// too small for the caps to fit in 70% keeps the fixed `GRADLE_OPTS` and sets
+/// nothing else.
+fn push_tool_cap_env(env: &mut Vec<EnvVar>, limits: (Option<u64>, Option<u64>)) {
+    let (limit_bytes, cpu_cores) = limits;
+    let caps = limit_bytes.and_then(|l| derive_tool_caps(l, cpu_cores));
+    let mut set = |name: &str, value: String| {
+        if !env.iter().any(|e| e.name == name) {
+            env.push(EnvVar {
+                name: name.into(),
+                value: Some(value),
+                ..Default::default()
+            });
+        }
+    };
+    match caps {
+        Some(caps) => {
+            set("GRADLE_OPTS", gradle_opts_for(&caps));
+            set("CARGO_BUILD_JOBS", caps.cargo_jobs.to_string());
+            set("JAVA_TOOL_OPTIONS", format!("-Xmx{}m", caps.jvm_mib));
+        }
+        None => set("GRADLE_OPTS", GRADLE_OPTS.into()),
+    }
+}
+
 /// Volumes in `pod` that a session can write and another session's pod can
 /// also mount: any claim, host path, NFS or CSI source without both the
 /// volume and the mount marked read-only. `emptyDir`, Secret, ConfigMap,
@@ -1389,6 +1556,86 @@ pub fn bootstrap_secret(
     }
 }
 
+/// The key inside a Claude pod's per-session OAuth-token Secret (WI-4832).
+const CLAUDE_OAUTH_SECRET_KEY: &str = "token";
+
+/// The name of a Claude pod's OAuth-token Secret, derived from the pod's own
+/// (unique) bootstrap Secret name.
+fn claude_oauth_secret_name_for(bootstrap_name: &str) -> String {
+    format!("{bootstrap_name}-claude-oauth")
+}
+
+/// The env a Claude pod carries for its account's long-lived token: a
+/// `secretKeyRef` into the per-session Secret, never a literal value, so
+/// `get pods` shows no token (WI-4832).
+fn claude_oauth_env(secret_name: &str) -> EnvVar {
+    EnvVar {
+        name: crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV.into(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret_name.to_string(),
+                key: CLAUDE_OAUTH_SECRET_KEY.into(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The Secret name a pod's Claude token env refers to, if it has one.
+fn claude_oauth_secret_name_in(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .flat_map(|c| c.env.iter().flatten())
+        .find(|e| e.name == crate::claude_oauth_token::CLAUDE_CODE_OAUTH_TOKEN_ENV)?
+        .value_from
+        .as_ref()?
+        .secret_key_ref
+        .as_ref()
+        .map(|r| r.name.clone())
+}
+
+/// The per-session Secret holding a Claude pod's account token, owned by the
+/// pod so the garbage collector deletes it with the pod. Immutable; labelled
+/// so an orphan can be found. `token` is the value, kept out of every log.
+pub fn claude_oauth_secret(
+    cfg: &PodConfig,
+    id: Uuid,
+    name: &str,
+    token: &str,
+    owner: &Pod,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(BTreeMap::from([
+                ("vogt.session".into(), id.to_string()),
+                ("vogt.kind".into(), "claude-oauth".into()),
+                (ENGINE_LABEL.into(), cfg.engine_id.clone()),
+            ])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                name: owner.metadata.name.clone().unwrap_or_else(|| pod_name(id)),
+                uid: owner.metadata.uid.clone().unwrap_or_default(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        immutable: Some(true),
+        data: Some(BTreeMap::from([(
+            CLAUDE_OAUTH_SECRET_KEY.to_string(),
+            ByteString(token.as_bytes().to_vec()),
+        )])),
+        ..Default::default()
+    }
+}
+
 /// The argv a pod runs for a shell template with no command (WI-4521).
 pub const POD_LOGIN_SHELL: [&str; 2] = ["bash", "-l"];
 
@@ -1396,6 +1643,159 @@ pub const POD_LOGIN_SHELL: [&str; 2] = ["bash", "-l"];
 /// Shell template and the deployment's default shell pod template are.
 pub fn is_shell_template(template: &SessionTemplate) -> bool {
     template.tags.iter().any(|tag| tag == "shell")
+}
+
+/// The key names inside a tier pod's per-session identity Secret.
+const TIER_SECRET_CLIENT_ID_KEY: &str = "client-id";
+const TIER_SECRET_CLIENT_SECRET_KEY: &str = "client-secret";
+
+/// The tier's non-secret Infisical settings (API URL and environment) that a
+/// tier pod gets as plain env (WI-4814).
+fn tier_identity_literal_pairs() -> Vec<(String, String)> {
+    ["INFISICAL_API_URL", "ENGINE_INFISICAL_ENV"]
+        .into_iter()
+        .filter_map(|source| {
+            std::env::var_os(source)
+                .map(|value| (source.to_string(), value.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// The tier's machine-identity client id and secret from the engine's
+/// tier-only variables, keyed by the name they take inside the pod's Secret.
+/// Values go only into the per-session Secret, never into a pod spec.
+fn tier_identity_secret_data() -> Vec<(&'static str, String)> {
+    [
+        (
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_ID",
+            TIER_SECRET_CLIENT_ID_KEY,
+        ),
+        (
+            "ENGINE_AGENT_AUTH_TIER_INFISICAL_CLIENT_SECRET",
+            TIER_SECRET_CLIENT_SECRET_KEY,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(source, key)| {
+        std::env::var_os(source).map(|value| (key, value.to_string_lossy().into_owned()))
+    })
+    .collect()
+}
+
+/// The name of a tier pod's identity Secret, derived from the pod's own
+/// (unique) bootstrap Secret name.
+fn tier_secret_name_for(bootstrap_name: &str) -> String {
+    format!("{bootstrap_name}-tier")
+}
+
+/// The env a tier pod carries for tier-scoped identity passthrough (WI-4814).
+/// A pod does not inherit the engine's environment, so the engine says what
+/// the in-pod `agent-auth.sh` needs: the passthrough mode (otherwise it sees
+/// the switch unset, goes brokered and strips the identity), the non-secret
+/// settings as plain values, and the client id and secret only as
+/// `secretKeyRef`s into the per-session Secret, so `get pods` shows no value.
+fn tier_pod_env(
+    passthrough_is_tier: bool,
+    literals: &[(String, String)],
+    secret_keys: &[&str],
+    secret_name: &str,
+) -> Vec<EnvVar> {
+    if !passthrough_is_tier {
+        return Vec::new();
+    }
+    let mut env = vec![EnvVar {
+        name: "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH".into(),
+        value: Some("tier".into()),
+        ..Default::default()
+    }];
+    for (name, value) in literals {
+        env.push(EnvVar {
+            name: name.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        });
+    }
+    for (key, name) in [
+        (TIER_SECRET_CLIENT_ID_KEY, "INFISICAL_CLIENT_ID"),
+        (TIER_SECRET_CLIENT_SECRET_KEY, "INFISICAL_CLIENT_SECRET"),
+    ] {
+        if secret_keys.contains(&key) {
+            env.push(EnvVar {
+                name: name.into(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: secret_name.to_string(),
+                        key: key.to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+    }
+    env
+}
+
+/// The Secret name a tier pod's identity env refers to, if it has one.
+fn tier_secret_name_in(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .flat_map(|c| c.env.iter().flatten())
+        // Either variable may be the only one configured; both point at the
+        // same Secret, which must exist whenever either does.
+        .find(|e| {
+            matches!(
+                e.name.as_str(),
+                "INFISICAL_CLIENT_ID" | "INFISICAL_CLIENT_SECRET"
+            ) && e.value_from.is_some()
+        })?
+        .value_from
+        .as_ref()?
+        .secret_key_ref
+        .as_ref()
+        .map(|r| r.name.clone())
+}
+
+/// The per-session Secret holding a tier pod's machine identity, owned by the
+/// pod so the garbage collector deletes it with the pod (the engine's Role
+/// grants `create` only). Immutable; labelled so an orphan can be found.
+pub fn tier_identity_secret(
+    cfg: &PodConfig,
+    id: Uuid,
+    name: &str,
+    data: &[(&str, String)],
+    owner: &Pod,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(BTreeMap::from([
+                ("vogt.session".into(), id.to_string()),
+                ("vogt.kind".into(), "tier-identity".into()),
+                (ENGINE_LABEL.into(), cfg.engine_id.clone()),
+            ])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                name: owner.metadata.name.clone().unwrap_or_else(|| pod_name(id)),
+                uid: owner.metadata.uid.clone().unwrap_or_default(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        immutable: Some(true),
+        data: Some(
+            data.iter()
+                .map(|(k, v)| (k.to_string(), ByteString(v.as_bytes().to_vec())))
+                .collect(),
+        ),
+        ..Default::default()
+    }
 }
 
 fn pod_env(
@@ -1726,6 +2126,7 @@ pub fn pod_template(
     permission_mode: Option<&str>,
     codex_approval_policy: &str,
     command: &[String],
+    tier: Option<&str>,
 ) -> Pod {
     let mut labels = BTreeMap::from([
         ("vogt.session".into(), id.to_string()),
@@ -1739,6 +2140,10 @@ pub fn pod_template(
     if let Some(account) = account {
         labels.insert("vogt.account".into(), account.into());
     }
+    if tier.is_some() {
+        labels.insert(TIER_LABEL.into(), ESTATE_ADMIN_LABEL_VALUE.into());
+    }
+    let bootstrap_name = bootstrap_secret_name(id);
     let image = template
         .env
         .iter()
@@ -1752,6 +2157,21 @@ pub fn pod_template(
         permission_mode,
         codex_approval_policy,
     );
+    if let Some(tier) = tier {
+        env.push(EnvVar {
+            name: crate::pty::AGENT_AUTH_TIER_ENV.into(),
+            value: Some(tier.into()),
+            ..Default::default()
+        });
+        let secret_data = tier_identity_secret_data();
+        let keys: Vec<&str> = secret_data.iter().map(|(k, _)| *k).collect();
+        env.extend(tier_pod_env(
+            crate::pty::tier_identity_passthrough_enabled(),
+            &tier_identity_literal_pairs(),
+            &keys,
+            &tier_secret_name_for(&bootstrap_name),
+        ));
+    }
     if let Some(model) = model {
         env.push(EnvVar {
             name: "VOGT_MODEL".into(),
@@ -1789,6 +2209,8 @@ pub fn pod_template(
         value: Some("1".into()),
         ..Default::default()
     });
+    let policy = cfg.template_policies.get(&template.name);
+    push_tool_cap_env(&mut env, effective_limits(cfg, policy));
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1817,6 +2239,18 @@ pub fn pod_template(
             cli.value = Some(agent.clone());
         }
     }
+    // WI-4832: a Claude Code pod under an account with a long-lived token
+    // gets it from a per-session Secret, so the pod needs no credentials
+    // copy and has no refresh token to burn. Only the reference is in the spec.
+    if crate::claude_oauth_token::token_for_session(account, Some(command), |name| {
+        std::env::var(name).ok()
+    })
+    .is_some()
+    {
+        env.push(claude_oauth_env(&claude_oauth_secret_name_for(
+            &bootstrap_name,
+        )));
+    }
     // Any other requested argv runs in the PTY (the session agent reads it);
     // the container command stays the image entrypoint.
     if !command.is_empty() && agent.is_none() {
@@ -1833,7 +2267,6 @@ pub fn pod_template(
             ..Default::default()
         });
     }
-    let policy = cfg.template_policies.get(&template.name);
     // Each cache object is optional: an empty name leaves it out.
     let mut env_from = Vec::new();
     if !cfg.cache_env_config_map.is_empty() {
@@ -2003,7 +2436,7 @@ pub fn pod_template(
     volumes.push(Volume {
         name: BOOTSTRAP_VOLUME.into(),
         secret: Some(SecretVolumeSource {
-            secret_name: Some(bootstrap_secret_name(id)),
+            secret_name: Some(bootstrap_name.clone()),
             default_mode: Some(0o400),
             optional: Some(false),
             ..Default::default()
@@ -2560,6 +2993,38 @@ impl PodBackendFactory {
                 .map(|_| ())
                 .map_err(|e| format!("creating session cache secret: {e}"));
         }
+        if let (Ok(()), Some(tier_name)) = (&made, tier_secret_name_in(&created)) {
+            let data = tier_identity_secret_data();
+            let secret = tier_identity_secret(&self.cfg, id, &tier_name, &data, &created);
+            // The error names the Secret, never its data.
+            made = api
+                .create(&PostParams::default(), &secret)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("creating tier identity secret: {e}"));
+        }
+        if let (Ok(()), Some(secret_name)) = (&made, claude_oauth_secret_name_in(&created)) {
+            // The pod names the account; the value is read here, not carried.
+            let token = crate::claude_oauth_token::token_for(
+                created
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("vogt.account"))
+                    .map(String::as_str),
+            );
+            made = match token {
+                Some(token) => {
+                    let secret = claude_oauth_secret(&self.cfg, id, &secret_name, &token, &created);
+                    // The error names the Secret, never its data.
+                    api.create(&PostParams::default(), &secret)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("creating claude oauth secret: {e}"))
+                }
+                None => Err("the account's Claude token is no longer configured".to_string()),
+            };
+        }
         if let (Ok(()), Some((key, name))) = (&made, &tailnet) {
             let secret = session_tailnet::tailnet_secret(&self.cfg, id, name, key, &created);
             // The error names the Secret, never its data.
@@ -2971,6 +3436,10 @@ impl PodBackend {
         link: std::sync::Arc<crate::agent_stream::PodLink>,
         size: (u16, u16),
     ) -> Self {
+        // A raw 0 or 65535 must not reach `current_size()`, the engine's vt100
+        // grid or the hibernation record (WI-4567).
+        let size = crate::pty::clamp_pty_size(size.0, size.1);
+        link.set_pty_size(size);
         Self {
             id,
             link,
@@ -2988,7 +3457,9 @@ impl SessionBackend for PodBackend {
         )
     }
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let (cols, rows) = crate::pty::clamp_pty_size(cols, rows);
         *self.size.lock() = (cols, rows);
+        self.link.set_pty_size((cols, rows));
         crate::agent_stream::global()
             .send(self.id, vogt_session_agent::Frame::Resize { cols, rows })
             .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
@@ -3238,6 +3709,7 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 &[],
+                None,
             );
             let carried: SourceDescriptor =
                 serde_json::from_str(&env_value(&pod, "VOGT_SOURCE_JSON").unwrap()).unwrap();
@@ -3248,6 +3720,342 @@ mod tests {
                 Some(&repo.to_string())
             );
         }
+    }
+
+    fn env_names(env: &[EnvVar]) -> Vec<&str> {
+        env.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_tier_pod_carries_the_passthrough_mode_and_no_literal_identity_secret() {
+        let literals = vec![(
+            "INFISICAL_API_URL".to_string(),
+            "https://i.example".to_string(),
+        )];
+        let env = tier_pod_env(
+            true,
+            &literals,
+            &[TIER_SECRET_CLIENT_ID_KEY, TIER_SECRET_CLIENT_SECRET_KEY],
+            "pod-x-tier",
+        );
+        // The in-pod agent-auth.sh needs the mode, or it goes brokered and
+        // strips the tier identity.
+        let mode = env
+            .iter()
+            .find(|e| e.name == "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH")
+            .expect("mode carried");
+        assert_eq!(mode.value.as_deref(), Some("tier"));
+        for name in ["INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET"] {
+            let var = env.iter().find(|e| e.name == name).expect(name);
+            assert!(var.value.is_none(), "{name} must not be a literal value");
+            let key = var
+                .value_from
+                .as_ref()
+                .and_then(|f| f.secret_key_ref.as_ref())
+                .expect("a secretKeyRef");
+            assert_eq!(key.name, "pod-x-tier");
+        }
+        assert_eq!(
+            env.iter()
+                .find(|e| e.name == "INFISICAL_API_URL")
+                .and_then(|e| e.value.as_deref()),
+            Some("https://i.example")
+        );
+    }
+
+    #[test]
+    fn a_pod_outside_tier_passthrough_carries_no_tier_identity_env() {
+        // Non-tier pods never reach tier_pod_env's output (pod_template only
+        // calls it for a tier spawn); a tier pod on a lane without tier
+        // passthrough carries no mode and no identity either.
+        assert!(tier_pod_env(
+            false,
+            &[("INFISICAL_API_URL".into(), "x".into())],
+            &[TIER_SECRET_CLIENT_ID_KEY, TIER_SECRET_CLIENT_SECRET_KEY],
+            "n",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn pod_template_sets_no_identity_env_on_an_ordinary_pod() {
+        let cfg = PodConfig::default();
+        let template = SessionTemplate {
+            name: "t".into(),
+            description: "t".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+        };
+        let src = session_source(Some(&project_source("vogt", "rust-2")), &registry()).unwrap();
+        let pod = pod_template(
+            &cfg,
+            &template,
+            Uuid::nil(),
+            &src,
+            &source_env(&src),
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+            None,
+        );
+        let env: Vec<EnvVar> = pod
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .flat_map(|c| c.env.unwrap_or_default())
+            .collect();
+        let names = env_names(&env);
+        for reserved in [
+            "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH",
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+        ] {
+            assert!(!names.contains(&reserved), "{reserved}");
+        }
+    }
+
+    #[test]
+    fn the_tier_identity_secret_is_owned_by_the_pod_and_found_from_its_env() {
+        let cfg = PodConfig::default();
+        let mut owner = Pod::default();
+        owner.metadata.name = Some("vogt-session-x".into());
+        owner.metadata.uid = Some("uid-1".into());
+        let secret = tier_identity_secret(
+            &cfg,
+            Uuid::nil(),
+            "vogt-session-x-tier",
+            &[(TIER_SECRET_CLIENT_SECRET_KEY, "s3".into())],
+            &owner,
+        );
+        let refs = secret.metadata.owner_references.as_ref().unwrap();
+        assert_eq!(refs[0].uid, "uid-1");
+        assert_eq!(refs[0].kind, "Pod");
+        assert!(secret.data.as_ref().unwrap().contains_key("client-secret"));
+
+        let pod = Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    env: Some(tier_pod_env(
+                        true,
+                        &[],
+                        &[TIER_SECRET_CLIENT_SECRET_KEY],
+                        "vogt-session-x-tier",
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            tier_secret_name_in(&pod).as_deref(),
+            Some("vogt-session-x-tier")
+        );
+        assert_eq!(tier_secret_name_in(&Pod::default()), None);
+
+        // A config with only the client id still needs its Secret created, or
+        // the pod sits in CreateContainerConfigError.
+        let id_only = Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    env: Some(tier_pod_env(
+                        true,
+                        &[],
+                        &[TIER_SECRET_CLIENT_ID_KEY],
+                        "vogt-session-x-tier",
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            tier_secret_name_in(&id_only).as_deref(),
+            Some("vogt-session-x-tier")
+        );
+    }
+
+    /// WI-4832: a Claude pod under an account with a token gets it as a
+    /// `secretKeyRef` into a per-session Secret, never a literal value.
+    #[test]
+    fn a_claude_pod_carries_its_account_token_as_a_secret_ref_only() {
+        let cfg = PodConfig::default();
+        let templates = SessionTemplate::default_templates();
+        let template = templates
+            .iter()
+            .find(|t| t.name == "Claude Code (protected)")
+            .unwrap();
+        // A name no other test or deployment uses, so setting the variable
+        // cannot leak into another test.
+        let account = "wi4832pod";
+        let var = crate::claude_oauth_token::engine_env_name(account);
+        let build = |account: Option<&str>, command: &[String]| {
+            pod_template(
+                &cfg,
+                template,
+                Uuid::nil(),
+                &default_source(&cfg),
+                &[],
+                "session",
+                account,
+                None,
+                None,
+                None,
+                vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+                command,
+                None,
+            )
+        };
+        let command = template.command.clone().unwrap_or_default();
+        let token_env = |pod: &Pod| {
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .iter()
+                .flatten()
+                .find(|e| e.name == "CLAUDE_CODE_OAUTH_TOKEN")
+                .cloned()
+        };
+
+        // No token configured: unchanged, no new env.
+        std::env::remove_var(&var);
+        assert!(token_env(&build(Some(account), &command)).is_none());
+
+        std::env::set_var(&var, "sk-ant-oat-pod-secret-value");
+        let pod = build(Some(account), &command);
+        let env = token_env(&pod).expect("token env");
+        assert_eq!(env.value, None, "no literal value in the pod spec");
+        let key = env.value_from.unwrap().secret_key_ref.unwrap();
+        assert_eq!(key.key, "token");
+        assert!(
+            key.name.ends_with("-bootstrap-claude-oauth"),
+            "{}",
+            key.name
+        );
+        assert_eq!(
+            claude_oauth_secret_name_in(&pod).as_deref(),
+            Some(key.name.as_str())
+        );
+        assert!(
+            !serde_json::to_string(&pod)
+                .unwrap()
+                .contains("pod-secret-value"),
+            "the token value must not appear anywhere in the pod spec"
+        );
+        // Another account, no account, a non-Claude command: nothing.
+        assert!(token_env(&build(Some("other"), &command)).is_none());
+        assert!(token_env(&build(None, &command)).is_none());
+        assert!(token_env(&build(Some(account), &["codex".to_string()])).is_none());
+        std::env::remove_var(&var);
+    }
+
+    /// WI-4832: the per-session Secret holds the value, is owned by the pod
+    /// and immutable.
+    #[test]
+    fn the_claude_oauth_secret_holds_the_token_and_is_owned_by_the_pod() {
+        let cfg = PodConfig::default();
+        let owner = Pod {
+            metadata: ObjectMeta {
+                name: Some("p".into()),
+                uid: Some("u".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let secret = claude_oauth_secret(&cfg, Uuid::nil(), "p-claude-oauth", "tok", &owner);
+        assert_eq!(secret.immutable, Some(true));
+        assert_eq!(secret.data.as_ref().unwrap()["token"].0, b"tok");
+        assert_eq!(
+            secret.metadata.owner_references.as_ref().unwrap()[0].uid,
+            "u"
+        );
+        assert_eq!(
+            secret.metadata.labels.as_ref().unwrap()["vogt.kind"],
+            "claude-oauth"
+        );
+    }
+
+    #[test]
+    fn a_tiered_pod_gets_the_tier_label_and_marker_env_only_when_tiered() {
+        let cfg = PodConfig::default();
+        let template = SessionTemplate {
+            name: "t".into(),
+            description: "t".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+        };
+        let src = session_source(Some(&project_source("vogt", "rust-2")), &registry()).unwrap();
+        let tiered = pod_template(
+            &cfg,
+            &template,
+            Uuid::nil(),
+            &src,
+            &source_env(&src),
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+            Some("estate_admin"),
+        );
+        let labels = tiered.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels.get(TIER_LABEL).map(String::as_str),
+            Some(ESTATE_ADMIN_LABEL_VALUE)
+        );
+        assert_eq!(
+            env_value(&tiered, crate::pty::AGENT_AUTH_TIER_ENV).as_deref(),
+            Some("estate_admin")
+        );
+
+        let ordinary = pod_template(
+            &cfg,
+            &template,
+            Uuid::nil(),
+            &src,
+            &source_env(&src),
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+            None,
+        );
+        assert!(ordinary
+            .metadata
+            .labels
+            .as_ref()
+            .unwrap()
+            .get(TIER_LABEL)
+            .is_none());
+        assert!(env_value(&ordinary, crate::pty::AGENT_AUTH_TIER_ENV).is_none());
     }
 
     #[test]
@@ -3315,6 +4123,7 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &["bash".into()],
+            None,
         );
         let labels = pod.metadata.labels.clone().unwrap();
         assert_eq!(labels.get("vogt.session"), Some(&id.to_string()));
@@ -3503,6 +4312,7 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
+            None,
         );
         let metadata = pod.metadata;
         let labels = metadata.labels.unwrap();
@@ -3912,6 +4722,7 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 command,
+                None,
             );
             pod.spec.unwrap().containers[0]
                 .env
@@ -3960,6 +4771,7 @@ mod tests {
             permission_mode,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             template.command.as_deref().unwrap_or(&[]),
+            None,
         );
         pod.spec.unwrap().containers[0]
             .env
@@ -4039,6 +4851,7 @@ mod tests {
                 None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 template.command.as_deref().unwrap_or(&[]),
+                None,
             );
             let container = &pod.spec.as_ref().unwrap().containers[0];
             let env = container
@@ -4133,6 +4946,7 @@ mod tests {
                         "--".into(),
                         "codex".into(),
                     ],
+                    None,
                 );
                 pod.spec.unwrap().containers[0]
                     .env
@@ -4201,6 +5015,7 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
+            None,
         );
         assert_eq!(
             pod.metadata.labels.as_ref().unwrap().get(ENGINE_LABEL),
@@ -4974,6 +5789,240 @@ mod tests {
         assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
     }
 
+    /// The pod env of a template named `Pod` under `cfg` with `extra` carried.
+    fn cap_env(cfg: &PodConfig, extra: &[(String, String)]) -> BTreeMap<String, String> {
+        let mut template = SessionTemplate::default_templates_on("pod")
+            .into_iter()
+            .next()
+            .unwrap();
+        template.name = "Pod".into();
+        template.command = None;
+        let pod = pod_template(
+            cfg,
+            &template,
+            Uuid::nil(),
+            &default_source(cfg),
+            extra,
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+            None,
+        );
+        pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.value.unwrap_or_default()))
+            .collect()
+    }
+
+    fn cfg_with_memory(memory: &str) -> PodConfig {
+        cfg_with_limits(memory, "4")
+    }
+
+    fn cfg_with_limits(memory: &str, cpu: &str) -> PodConfig {
+        with_policy(&format!(
+            r#"{{"Pod":{{"resource_limits":{{"memory":"{memory}","cpu":"{cpu}"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// The smallest limit in MiB from which every larger one (to 64Gi)
+    /// derives; rounding makes a few limits just below it derive by luck.
+    fn derive_threshold_mib() -> u64 {
+        (1..=65536u64)
+            .rev()
+            .find(|m| derive_tool_caps(m << 20, None).is_none())
+            .unwrap()
+            + 1
+    }
+
+    #[test]
+    fn tool_caps_follow_the_template_memory_limit() {
+        let six = cap_env(&cfg_with_memory("6Gi"), &[]);
+        assert_eq!(six["CARGO_BUILD_JOBS"], "1");
+        assert_eq!(six["JAVA_TOOL_OPTIONS"], "-Xmx614m");
+        assert!(
+            six["GRADLE_OPTS"].contains("-Xmx1720m"),
+            "{}",
+            six["GRADLE_OPTS"]
+        );
+        assert!(six["GRADLE_OPTS"].contains("kotlin.daemon.jvmargs=-Xmx1044m"));
+        let eight = cap_env(&cfg_with_memory("8Gi"), &[]);
+        assert_eq!(eight["CARGO_BUILD_JOBS"], "2");
+        assert_eq!(eight["JAVA_TOOL_OPTIONS"], "-Xmx819m");
+        assert!(eight["GRADLE_OPTS"].contains("-Xmx2293m"));
+        // The deployment default (1Gi) is below the threshold: today's fixed
+        // ceilings, no other caps.
+        let one = cap_env(&PodConfig::default(), &[]);
+        assert_eq!(one["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!one.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!one.contains_key("JAVA_TOOL_OPTIONS"));
+    }
+
+    #[test]
+    fn a_pod_too_small_for_the_caps_to_fit_keeps_the_fixed_gradle_opts() {
+        // 2Gi: three heaps (55%) plus one 512 MiB job is 80% of the limit.
+        let env = cap_env(&cfg_with_memory("2Gi"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_eq!(derive_tool_caps(2 << 30, None), None);
+    }
+
+    #[test]
+    fn caps_derive_exactly_from_the_threshold_and_the_bound_holds_there() {
+        let t = derive_threshold_mib();
+        // About 3.4 GiB: between 3Gi and 3.5Gi.
+        assert!((3 * 1024..=3584).contains(&t), "{t}");
+        assert_eq!(derive_tool_caps((t - 1) << 20, None), None);
+        for mib in [t, t + 1, t + 100] {
+            let c = derive_tool_caps(mib << 20, None).expect("derived");
+            let total = c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512;
+            assert!(total * 100 <= mib * 70, "{mib}MiB: {total}");
+        }
+        // Just above the threshold the pod env is derived.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t + 1)), &[]);
+        assert!(env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_ne!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        // And just below it, the fallback.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t - 1)), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn cargo_jobs_are_capped_by_the_cpu_limit() {
+        // 8Gi derives 2 jobs from memory; a 1-CPU limit lowers it to 1.
+        let one_cpu = cap_env(&cfg_with_limits("8Gi", "1"), &[]);
+        assert_eq!(one_cpu["CARGO_BUILD_JOBS"], "1");
+        // 32Gi derives 9 jobs from memory; 500m rounds up to 1, 4 CPUs allow 4.
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "500m"), &[])["CARGO_BUILD_JOBS"],
+            "1"
+        );
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "4"), &[])["CARGO_BUILD_JOBS"],
+            "4"
+        );
+        // A CPU limit above the memory-derived jobs changes nothing.
+        assert_eq!(
+            cap_env(&cfg_with_limits("8Gi", "64"), &[])["CARGO_BUILD_JOBS"],
+            "2"
+        );
+        assert_eq!(derive_tool_caps(32 << 30, None).unwrap().cargo_jobs, 9);
+    }
+
+    #[test]
+    fn cpu_quantities_parse_or_are_refused() {
+        assert_eq!(cpu_limit_cores("2"), Some(2));
+        assert_eq!(cpu_limit_cores("1500m"), Some(1));
+        assert_eq!(cpu_limit_cores("500m"), Some(1));
+        assert_eq!(cpu_limit_cores("0.5"), Some(1));
+        for bad in ["", "0", "-1", "lots", "NaN"] {
+            assert_eq!(cpu_limit_cores(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_unparsable_limit_keeps_the_fixed_gradle_opts_and_sets_nothing_else() {
+        let env = cap_env(&cfg_with_memory("lots"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        let mut no_memory = PodConfig::default();
+        no_memory.resource_limits.remove("memory");
+        let env = cap_env(&no_memory, &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn an_explicit_value_is_never_overridden() {
+        let extra = [
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+            ("JAVA_TOOL_OPTIONS".to_string(), "-Xmx9g".to_string()),
+            ("GRADLE_OPTS".to_string(), "-Dmine=1".to_string()),
+        ];
+        let env = cap_env(&cfg_with_memory("6Gi"), &extra);
+        assert_eq!(env["CARGO_BUILD_JOBS"], "4");
+        assert_eq!(env["JAVA_TOOL_OPTIONS"], "-Xmx9g");
+        assert_eq!(env["GRADLE_OPTS"], "-Dmine=1");
+    }
+
+    #[test]
+    fn derived_caps_stay_within_70_percent_from_4gi_up() {
+        const MIB: u64 = 1 << 20;
+        for gib in [4u64, 5, 6, 8, 12, 16, 32, 64] {
+            let limit = gib << 30;
+            let c = derive_tool_caps(limit, None).expect("derived");
+            let total = (c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512) * MIB;
+            assert!(total * 100 <= limit * 70, "{gib}Gi: {total} of {limit}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_parse_or_are_refused() {
+        assert_eq!(memory_bytes("6Gi"), Some(6 << 30));
+        assert_eq!(memory_bytes("512Mi"), Some(512 << 20));
+        assert_eq!(memory_bytes("2G"), Some(2_000_000_000));
+        assert_eq!(memory_bytes("1048576"), Some(1 << 20));
+        for bad in [
+            "", "0", "lots", "1.5Gi", "-1Gi", "500m", "1e9", "2Ei", "1P", "1Pi",
+        ] {
+            assert_eq!(memory_bytes(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_that_overflow_or_are_zero_are_refused() {
+        // 2^24 Ti * 2^40 overflows u64; checked_mul refuses it.
+        assert_eq!(memory_bytes("16777216Ti"), None);
+        assert_eq!(memory_bytes("18446744073709551615Ki"), None);
+        assert_eq!(memory_bytes("18446744073709551615"), Some(u64::MAX));
+        for zero in ["0", "0Gi", "0Mi", "00"] {
+            assert_eq!(memory_bytes(zero), None, "{zero}");
+        }
+    }
+
+    #[test]
+    fn the_agent_container_carries_gradle_daemon_limits_outside_home() {
+        // WI-898: the `session-home` emptyDir hides `/home/vogt/.gradle`, so
+        // the limits travel as env on the agent container, which no mount can
+        // hide. Reuse the pod the tmpdir test builds.
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let env = spec.containers[0].env.as_ref().unwrap();
+        let opts = env
+            .iter()
+            .find(|e| e.name == "GRADLE_OPTS")
+            .and_then(|e| e.value.as_deref())
+            .expect("GRADLE_OPTS");
+        assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
+        // The 1Gi default limit is below the derive threshold, so the fixed
+        // ceilings stay: Kotlin 3g and Gradle 4G.
+        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
+        // The Flutter templates set `org.gradle.jvmargs=-Xmx8G ...` in the
+        // project's gradle.properties; a system property outranks that file.
+        assert!(
+            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\""),
+            "{opts}"
+        );
+        // The home mount is what hides the image's gradle.properties.
+        assert!(spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == "session-home" && m.mount_path == "/home/vogt"));
+    }
+
     #[test]
     fn the_session_tmp_is_mode_1777() {
         // GH #1466: the kubelet makes the `/tmp` emptyDir root 2777 (setgid,
@@ -5115,6 +6164,7 @@ mod tests {
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
+            None,
         )
     }
 
@@ -6374,12 +7424,9 @@ mod creation_error_tests {
     use super::*;
 
     fn api(code: u16, message: &str) -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: message.into(),
-            reason: "Forbidden".into(),
-            code,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(message, "Forbidden").with_code(code),
+        ))
     }
 
     #[test]
@@ -6410,12 +7457,13 @@ mod creation_error_tests {
     }
 
     fn race() -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again".into(),
-            reason: "Conflict".into(),
-            code: 409,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(
+                "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again",
+                "Conflict",
+            )
+            .with_code(409),
+        ))
     }
 
     #[test]
@@ -6474,12 +7522,10 @@ mod creation_error_tests {
             || {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async {
-                    Err(kube::Error::Api(kube::core::ErrorResponse {
-                        status: "Failure".into(),
-                        message: "pods \"s\" already exists".into(),
-                        reason: "AlreadyExists".into(),
-                        code: 409,
-                    }))
+                    Err(kube::Error::Api(Box::new(
+                        kube::core::Status::failure("pods \"s\" already exists", "AlreadyExists")
+                            .with_code(409),
+                    )))
                 }
             },
         )
@@ -6494,5 +7540,37 @@ mod creation_error_tests {
             creation_error(api(500, "boom")),
             ApiError::InternalSource { .. }
         ));
+    }
+
+    fn backend_sized(size: (u16, u16)) -> PodBackend {
+        let id = Uuid::new_v4();
+        let (link, _reader) = crate::agent_stream::global().register_pod(id);
+        PodBackend::new(id, link, size)
+    }
+
+    /// `current_size()` is `(rows, cols)`; it feeds the engine's vt100 grid and
+    /// the hibernation record (WI-4567).
+    #[test]
+    fn a_new_pod_backend_holds_its_size_within_bounds() {
+        assert_eq!(backend_sized((0, 0)).current_size().unwrap(), (1, 1));
+        assert_eq!(
+            backend_sized((65535, 65535)).current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, crate::pty::MAX_PTY_COLS)
+        );
+        assert_eq!(backend_sized((120, 40)).current_size().unwrap(), (40, 120));
+    }
+
+    #[test]
+    fn a_pod_backend_resize_is_clamped_before_it_is_stored() {
+        let backend = backend_sized((120, 40));
+        // No agent is attached, so the frame send may fail; the stored size
+        // is set first.
+        let _ = backend.resize(0, 65535);
+        assert_eq!(
+            backend.current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, 1)
+        );
+        let _ = backend.resize(100, 30);
+        assert_eq!(backend.current_size().unwrap(), (30, 100));
     }
 }

@@ -563,6 +563,43 @@ def test_a_worktree_session_is_cut_from_the_integration_branch(
     assert "worktree" not in engine.last_spec
 
 
+def test_only_a_profile_filled_worktree_is_marked_droppable(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-4707: a pod checks out the source itself, so the engine drops a
+    worktree the implement profile filled. A caller's own worktree, true or
+    false, is never marked: it stays a hard ask. Same rule as the Rust core.
+    """
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
+    )
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is True
+
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", worktree=True, reason=WHY
+        ),
+    )
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is False
+
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", worktree=True, reason=WHY)
+    )
+    spec = engine.last_spec["worktree"]
+    assert spec["if_supported"] is False
+
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="implement", worktree=False, reason=WHY
+        ),
+    )
+    assert "worktree" not in engine.last_spec
+
+
 def test_a_worktree_start_sends_the_checkouts_it_may_not_write_to(
     wired: AppContext, engine: StandInEngine
 ) -> None:

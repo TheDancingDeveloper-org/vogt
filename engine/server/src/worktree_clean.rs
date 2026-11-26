@@ -54,6 +54,50 @@ pub fn linked_worktree(cwd: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(cwd).ok()
 }
 
+/// Every linked worktree under `root`, at most `max_depth` directories down
+/// (the workspace's session checkouts), canonical and sorted. A worktree is
+/// not descended into, and build-output and VCS directories are skipped, so
+/// the walk stays cheap on a workspace full of `target/` trees. Symlinks are
+/// never followed.
+pub fn linked_worktrees_under(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut queue = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = queue.pop() {
+        if depth > 0 {
+            if let Some(worktree) = linked_worktree(&dir) {
+                found.push(worktree);
+                continue;
+            }
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if matches!(
+                name.to_str(),
+                Some("target" | "node_modules" | ".venv" | ".git")
+            ) {
+                continue;
+            }
+            queue.push((path, depth + 1));
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// Whether any of `cwds` (other sessions' directories) is inside the linked
 /// worktree at `root`, so that a cleanup would delete build output another
 /// session may be using. A directory that cannot be canonicalised is compared
@@ -72,6 +116,17 @@ pub fn shared_with<'a>(root: &Path, cwds: impl IntoIterator<Item = &'a str>) -> 
 /// linked worktree, or it held nothing regenerable. A directory that is a
 /// symlink, or whose canonical path escapes the worktree, is left alone.
 pub fn clean(cwd: &Path) -> Vec<Cleaned> {
+    sweep_linked(cwd, true)
+}
+
+/// What [`clean`] would remove, and removes nothing (the WI-1773 dry run).
+/// The same walk and the same fail-closed checks; only the deletion is
+/// skipped.
+pub fn plan_clean(cwd: &Path) -> Vec<Cleaned> {
+    sweep_linked(cwd, false)
+}
+
+fn sweep_linked(cwd: &Path, apply: bool) -> Vec<Cleaned> {
     let Some(root) = linked_worktree(cwd) else {
         return Vec::new();
     };
@@ -114,7 +169,12 @@ pub fn clean(cwd: &Path) -> Vec<Cleaned> {
                     continue;
                 }
                 let bytes = dir_bytes(&canonical);
-                if std::fs::remove_dir_all(&canonical).is_ok() {
+                if !apply {
+                    removed.push(Cleaned {
+                        path: canonical,
+                        bytes,
+                    });
+                } else if std::fs::remove_dir_all(&canonical).is_ok() {
                     tracing::info!(
                         path = %canonical.display(),
                         bytes,

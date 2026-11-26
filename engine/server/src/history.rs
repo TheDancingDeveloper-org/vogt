@@ -412,6 +412,21 @@ impl SessionHistory {
         Ok(())
     }
 
+    /// Clear a row's outcome when its session is woken (WI-4567): the same
+    /// row and log continue, so the `ended_at`/`exit_code`/`end_reason` of the
+    /// run that hibernated would otherwise show on a live session, because
+    /// `archive_session` never writes a NULL over a set value.
+    pub async fn reopen_session(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET ended_at = NULL, exit_code = NULL, end_reason = NULL WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApiError::internal_src("failed to reopen session", e))?;
+        Ok(())
+    }
+
     /// Update a session row's identity (WI-962): its role when given, and its
     /// conversation when given. A conversation that ends is not cleared —
     /// the row keeps the last one, which is what a resume needs. Whether a row
@@ -1075,6 +1090,73 @@ fn summarize_regular_files(path: &Path) -> Result<(usize, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rec(
+        id: Uuid,
+        ended: bool,
+        code: Option<i32>,
+        reason: Option<&'static str>,
+    ) -> ArchiveRecord {
+        ArchiveRecord {
+            id,
+            name: "w".into(),
+            created_at: OffsetDateTime::now_utc(),
+            ended_at: ended.then(OffsetDateTime::now_utc),
+            exit_code: code,
+            cwd: None,
+            command: Some("bash".into()),
+            scrollback_bytes: 0,
+            end_reason: reason,
+            identity: None,
+            economics: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn wake_clears_the_outcome_of_the_run_that_hibernated() {
+        // WI-4567: without reopen_session the COALESCE upsert keeps exit 137.
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(rec(id, true, Some(137), Some(END_EXITED)))
+            .await
+            .unwrap();
+        // The provisional write a wake makes does not clear it by itself.
+        history
+            .archive_session(rec(id, false, None, None))
+            .await
+            .unwrap();
+        assert_eq!(history.get_session(id).await.unwrap().exit_code, Some(137));
+        history.reopen_session(id).await.unwrap();
+        history
+            .archive_session(rec(id, false, None, None))
+            .await
+            .unwrap();
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(row.exit_code, None);
+        assert_eq!(row.ended_at, None);
+        assert_eq!(row.end_reason, None);
+    }
+
+    #[tokio::test]
+    async fn hibernate_row_has_no_exit_code_and_says_hibernated() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        history
+            .archive_session(rec(id, false, None, None))
+            .await
+            .unwrap();
+        history
+            .archive_session(rec(id, true, None, Some(END_HIBERNATED)))
+            .await
+            .unwrap();
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(row.exit_code, None);
+        assert!(row.ended_at.is_some());
+        assert_eq!(row.end_reason.as_deref(), Some(END_HIBERNATED));
+    }
 
     #[tokio::test]
     async fn queued_economics_coalesce_into_one_write_per_flush() {

@@ -99,37 +99,15 @@ impl Terminal {
     /// consumed while building the grid, so nothing reaches the client that
     /// the grid did not accept (WI-987).
     pub fn frame(&mut self) -> Vec<u8> {
-        let (rows, _cols) = self.parser.screen().size();
-        let mut out = Vec::new();
-        // Clear the visible screen only. RIS (`ESC c`) would also wipe the
-        // client's scrollback, which is exactly where the history below has
-        // to land, and the client already resets its terminal on reset:true.
-        // History rows, oldest first, one per line. Read straight off the
-        // grid rather than sliced out of a formatted dump: a scrolled view
-        // overlaps the next one, and slicing that overlap off dropped rows.
-        let history: Vec<Vec<u8>> = {
-            let screen = self.parser.screen_mut();
-            screen.set_scrollback(usize::MAX);
-            let total = screen.scrollback();
-            let mut rows_out = Vec::with_capacity(total);
-            let mut off = total;
-            while off > 0 {
-                let take = off.min(rows as usize);
-                screen.set_scrollback(off);
-                rows_out.extend(screen.rows_formatted(0, u16::MAX).take(take));
-                off -= take;
-            }
-            rows_out
-        };
-        for row in &history {
-            out.extend_from_slice(row);
-            out.extend_from_slice(b"\r\n");
-        }
-        self.parser.screen_mut().set_scrollback(0);
-        let screen = self.parser.screen();
-        out.extend_from_slice(&screen.state_formatted());
-        out.extend_from_slice(&screen.cursor_state_formatted());
-        out
+        render_frame(self.parser.screen_mut())
+    }
+
+    /// A copy of the grid's screen, scrollback included, to render with
+    /// [`render_frame`] after the locks that keep the grid in step with the
+    /// ring are released (WI-2699). A plain memory copy: the escape-code
+    /// formatting is the slow part, and it runs on the copy.
+    pub fn screen_copy(&self) -> vt100::Screen {
+        self.parser.screen().clone()
     }
 
     /// A hash of what the screen shows: the text of every visible cell and
@@ -807,6 +785,39 @@ pub fn redact_screen(screen: &mut SessionScreen) {
         approval.question = crate::redaction::redact(&approval.question);
         approval.command_excerpt = crate::redaction::redact(&approval.command_excerpt);
     }
+}
+
+/// Escape codes that reproduce `screen`'s visible screen, the scrollback it
+/// holds above it, and the modes and cursor: the body of [`Terminal::frame`],
+/// free of the [`Terminal`] so it can run on a [`Terminal::screen_copy`]
+/// outside the session's locks (WI-2699).
+pub fn render_frame(screen: &mut vt100::Screen) -> Vec<u8> {
+    let (rows, _cols) = screen.size();
+    let mut out = Vec::new();
+    // Clear the visible screen only. RIS (`ESC c`) would also wipe the
+    // client's scrollback, which is exactly where the history below has
+    // to land, and the client already resets its terminal on reset:true.
+    // History rows, oldest first, one per line. Read straight off the
+    // grid rather than sliced out of a formatted dump: a scrolled view
+    // overlaps the next one, and slicing that overlap off dropped rows.
+    screen.set_scrollback(usize::MAX);
+    let total = screen.scrollback();
+    let mut history: Vec<Vec<u8>> = Vec::with_capacity(total);
+    let mut off = total;
+    while off > 0 {
+        let take = off.min(rows as usize);
+        screen.set_scrollback(off);
+        history.extend(screen.rows_formatted(0, u16::MAX).take(take));
+        off -= take;
+    }
+    for row in &history {
+        out.extend_from_slice(row);
+        out.extend_from_slice(b"\r\n");
+    }
+    screen.set_scrollback(0);
+    out.extend_from_slice(&screen.state_formatted());
+    out.extend_from_slice(&screen.cursor_state_formatted());
+    out
 }
 
 #[cfg(test)]

@@ -117,7 +117,8 @@ runtime stage starts `FROM` a
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
 — Node, Rust, Java/Gradle, the Android SDK; its `INSTALL_FLUTTER` build
-argument adds Flutter for a pod that builds the Android app. A third variant,
+argument adds Flutter for a pod that builds the Android app. The base also
+pins `kubectl`, `kustomize` and `yq` for the k8s-* skills. A third variant,
 `workbench`, is `full` plus the public session tools (Chrome and `chrome-ci`,
 Python 3.12, Terraform, sshpass, pingcli, actionlint, and the Tailscale
 client, which the image never joins). `build.yml` publishes the merged image
@@ -408,17 +409,22 @@ claude mcp add --scope project rust-analyzer -- vogt-rust-analyzer-mcp
 Set `VOGT_ENGINE_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
 it from a non-Rust directory.
 
-**GitHub, Grafana, Gitea/Forgejo — optional, read-only.** The image carries
-three third-party MCP servers at exact versions, each tarball checked against a
-sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
-`github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
+**GitHub, Grafana, Gitea/Forgejo, Kubernetes — optional, read-only.** The image carries
+four third-party MCP servers at exact versions, each binary checked against a
+sha256 recorded in its Dockerfile (a bump is an edit there):
+`github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0 in
+`engine/Dockerfile`, and `kubernetes-mcp-server` 0.0.67 in
+`engine/Dockerfile.pod`.
 `vogt-mcp-bootstrap` registers each one with Claude Code, Codex and opencode
 **only while the session holds its token**, and removes the
 registration when it does not (opencode excepted: it has no `mcp remove`, so
 its entry stays and the wrapper, finding no token, refuses to start), so a deployment turns one on by adding its token to the session's
 environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
-an `ondemand` line is not in the environment when the bootstrap runs, so it
-does not register anything) and off by removing it.
+an `ondemand` line is not in the environment when the bootstrap runs, so a
+GitHub, Grafana or Forgejo server is not registered that way) and off by
+removing it. `k8s-ro` is the exception: its wrapper resolves the kubeconfig at
+spawn, so the registration exists while the kubeconfig is either exported or
+listed in `AGENT_AUTH_ONDEMAND`.
 
 A host opencode session or plain shell whose `HOME` is not writable by the engine user (vogt-dev) is launched with per-session `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` under `<state_dir>/opencode-xdg/<id>/` (mode 0700; WI-4284, WI-4298), so the bootstrap registers opencode and a hand-started `opencode` works. If a data directory still cannot be created, the bootstrap warns once per directory and skips opencode.
 
@@ -427,6 +433,7 @@ A host opencode session or plain shell whose `HOME` is not writable by the engin
 | `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
 | `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
+| `k8s-ro` | `K8S_AGENT_READONLY_KUBECONFIG` — raw or base64, exported at launch or listed `ondemand`; the wrapper fetches an `ondemand` value through the secret broker and writes it to a 0600 file | `--read-only --toolsets core` (no `configuration_view`, so no service-account token is printed), plus a service account that cannot read Secrets |
 
 Note: `forgejo-ro` `get_file_contents` returns the file base64-encoded unless line ranges are requested; pass a line range to get plain text.
 
@@ -792,6 +799,22 @@ form, and every `session.input` is audited. Calling the engine directly is
 the fallback for what they do not wrap. The recipe is in
 [Driving a session](#driving-a-session) below.
 
+Over MCP, `session.start` and `session.stop` answer compact by default (WI-3134):
+the session's `id`, `engine_session_id`, `cwd`, `name`, `project`, `work_item`,
+`activity` and `alive`, plus a start's `effective_policy` or `escalated_to`
+only when set. `mode=full` returns the complete record and `digest`. REST and
+the CLI keep the full result.
+
+`session.start`'s `resume` takes either the agent CLI's own conversation id
+(the `conversation_id` of a `session.history_list` row; its `resume_template`
+names the template to start it with) or the id of a session Vogt or the engine
+knows (`ses_…` or engine UUID). vogt-core resolves the latter before it asks
+the engine, which only ever sees conversation ids: it sends that session's
+recorded `conversation_id` and, when the caller named no `template`, its
+`resume_template`. A session with no recorded conversation, or a `template`
+that conflicts with its `resume_template`, is refused (`invalid_request`).
+A value that names no known session is passed through unchanged.
+
 #### Reaching the engine from a session
 
 Every session the engine spawns has `VOGT_ENGINE_URL` in its environment: the
@@ -1093,7 +1116,12 @@ HTTP; over the WebSocket the frame is dropped silently, because there is no
 reply channel to refuse into.
 
 `SessionSummary` carries an optional `command` field — the explicit command
-the session was created with; absent for default-shell sessions. It also
+the session was created with; absent for default-shell sessions. `session_list`
+with `mode=full` leaves `command` out of its rows (the launch line is long)
+unless `fields` names it. `started_by_session` on `session_list` keeps only
+the sessions that one started, on every list path (digest or full, with or
+without `states`); it accepts either the `ses_…` id or the engine session id,
+and unlinked sessions never match. It also
 carries `activity_changed_at`, the wall-clock instant when the current
 activity state began. The same timestamp accompanies `activity` events, so a
 client can keep an attention-sorted selection tied to session identity while
@@ -1468,7 +1496,12 @@ What is refused, and only for an agent session that carries a policy:
   (`worker_lands_by`). An oversight session, and a session with no work
   item, is not judged by these. The role is read from the live session at
   each check, so `session.set_role` takes effect without a restart. A
-  pattern that does not compile refuses the push.
+  pattern that does not compile refuses the push. The `gh pr create` rule
+  matches command text, so it is best effort: it follows the common wrappers
+  (`env`, `command`, `exec`, nested `bash -c`, `xargs`, `find -exec` /
+  `-execdir`, `eval`) and catches honest mistakes, not a determined agent.
+  Enforcement that can't be bypassed is at the credential level: worker forge
+  credentials without pull-request write (WI-4831).
 
 Two more rules read the session's workspace (WI-1326). The engine copies
 the session's workspace block (above) into its policy before the child runs:
@@ -1924,6 +1957,9 @@ normalised to `\n`.
   `/input` directly bypasses that row and leaves only the engine's
   `vogt::audit` "mutating request" log line (token name, method, path,
   status). Use the core's operation unless it cannot do what is needed.
+  The core's own system writes (the CI notice, the context-rotation ask) leave
+  the same row, with `system: true` and a `source`. `project.write` as well as
+  `work.write` maps to `sessions` here, so either can call `/input` directly.
 - **Any `sessions` holder can type into any session**, including one a
   person is using. There is no per-session grant (`API.md`, "Who may read
   and type into sessions"). The one exception is a permission prompt.
@@ -2265,6 +2301,45 @@ List the account there as well when the board should show it.
   `CLAUDE_CONFIG_DIR=<dir> claude` and `/login`.
 - Logins are never copied between accounts. Claude Code's OAuth refresh token
   rotates on use, so a copied credentials file signs one of the two copies out.
+
+**Long-lived token per account (WI-4832).** A pod holds its own copy of an
+account's login, and the refresh token is single-use: the first session to
+refresh invalidates every other pod's copy, so pods show "Login expired" every
+6-12 hours. An account can instead use a token from `claude setup-token`
+(valid about a year, no refresh) through `CLAUDE_CODE_OAUTH_TOKEN`.
+
+- **Mint it once.** Run `claude setup-token` (interactive, browser) as that
+  account's login. Store the printed token in the secrets store from stdin, and
+  never print it or put it in argv.
+- **Give it to the engine** as `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT>`: the
+  account name upper-cased with `-` as `_` (`acct1` is
+  `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_ACCT1`), through an agent-auth manifest
+  line. It is an `ENGINE_` variable, so it is stripped from every child
+  environment. The engine sets `CLAUDE_CODE_OAUTH_TOKEN` itself, as below.
+- **Who gets it.** Only a Claude Code session started under that account. A
+  shell, Codex or OpenCode session, a session with no account and a session on
+  another account get nothing. A caller's `env` cannot override it on a host.
+  The value is never logged, audited or recorded in the session's environment;
+  the engine names at most the variable and account.
+- **Host sessions:** set in the spawn environment only, never in argv.
+- **Pod sessions:** the pod spec holds only a `secretKeyRef` to a per-session
+  Secret (`<bootstrap>-claude-oauth`, key `token`), owned by the pod and
+  deleted with it, the same pattern as the tier identity Secret. The token is
+  never a literal `EnvVar`, so `get pods` shows no value. The Secret
+  is created with the pod; if the token is gone by then, the start fails.
+- **No login file.** For such a pod the engine does not copy
+  `.credentials.json` into the bundle (the config still travels, so onboarding
+  is skipped), and the entrypoint removes a top-level `.credentials.json` if
+  one is present and skips the "signed out" warning. Claude Code ranks
+  `CLAUDE_CODE_OAUTH_TOKEN` above the login file, so on a host the account
+  directory's file is left alone (other tools may share it) and never wins.
+- **No token configured:** behaviour is unchanged (the credentials copy as
+  before). A shell pod that names an account is also unchanged: it still gets
+  the credentials copy, because the token goes to Claude Code sessions only.
+- **Rotation.** Re-run `claude setup-token` before the token expires (about a
+  year), store the new value under the same secret name, and restart the engine
+  so it reads it. Running sessions keep the old token until they restart. Note
+  the mint date so the renewal is not a surprise.
 
 #### Hibernation
 
@@ -4102,6 +4177,45 @@ records from `state_dir`, rebuilds each surviving pod's stream link over the
 kept credential (WI-3205), and leaves the pods that cannot be adopted running
 for the operator to recover. Reporting is rate-limited to one warning per pod.
 
+### Reading a work item (`work.get`, WI-4726)
+
+`work.get` is lean by default. An oversight sweep reading hand-offs does not
+need every session ever linked or every observed branch, and the old default
+cost thousands of tokens per call. The `include` parameter (a list, or a
+comma-separated string) names the sections returned beside `item`:
+
+| Section | Returned |
+|---|---|
+| `comments` | the newest `comment_limit` comments (default 3 when `include` is absent or lists sections; 200 with `all`) |
+| `relations` | `item.relations`; left empty when not named |
+| `delivery` | landed / deployed / verified, with evidence |
+| `sessions` | the live sessions plus the newest 3 stopped ones; `sessions_omitted` counts the rest |
+| `branches` | the observed branches |
+| `git` | the git story; its own `branches` list is left out when `branches` is also named |
+| `all` | the full pre-WI-4726 shape: every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check` |
+
+**Default change.** An absent `include` is `comments, delivery, relations`.
+Before WI-4726 it was everything (`all`). A caller that reads `sessions`,
+`branches`, `git`, `walked` or older comments must pass `include`
+explicitly. The web UI's work-item view passes `include: ["all"]`. A section
+that is not returned has no key in the response (a client that decodes
+`WorkResult` fills the default), and `mode=summary` still drops the body and
+comments.
+
+`work.list(with_sessions=true)` (default off, then rows carry no key) adds
+`live_sessions: {count, worst, ids}` to every row from a grouped read for the
+page: the item's sessions that are alive or hibernated, `worst` the lowest
+attention class (the oversight ordering), and `count` 0 with empty `ids` where
+none is live (WI-4751). When an item has recorded un-stopped sessions and the
+engine could not be asked (absent, or it errored), its `live_sessions` is
+`null`: unknown, not "none live". Count 0 means the engine answered. The
+grouped read is one query per 500 ids, so a page of any size works (WI-4753).
+
+`board.list` and `backlog` take the same `with_sessions` (default off, no key)
+and add `live_sessions` (or `null` when unknown) to each card or ranked row of
+declared work, from one grouped read for the whole response, however many cells
+it holds; an observed subject with no work item reports count 0 (WI-4758).
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —
@@ -5707,6 +5821,18 @@ they hold `sessions`. The engine refuses:
 - an expiry in the past or more than 24 h ahead, or a `reason` over 2000
   characters (400).
 
+**Git credentials from a grant (WI-1331).** A grant whose `reason` starts with
+`git:<host>` (exact host, case-insensitive) also answers
+`GET /api/agent-auth/git-credential?host=<host>` with the session's broker
+token: `{username, token}` (`x-access-token` for github.com, else `git`), or
+404 naming `session_grant_request reason=git:<host> ...` when the session holds
+no live grant for the host. The soonest-expiring match wins; a `once` grant is
+spent whether or not the helper succeeds. Same auth and rate limit as `fetch`;
+the audit row carries `grant_id` and `host`, never the value.
+`vogt-agent-auth git-credential <host>` prints the two lines (silent exit 1 on
+refusal), and `vogt-git-askpass` calls it at a Password prompt when no token is
+in the environment and `VOGT_ENGINE_BROKER_URL` is set.
+
 The session fetches the grant with the command it already has, `vogt-agent-auth
 fetch VAR`. The fetch route checks the manifest first, then that session's own
 live grants. It runs the helper's `get VAR` with `ENGINE_AGENT_AUTH_SECRETS`
@@ -5960,7 +6086,10 @@ at `warn` and audited (`target=vogt::audit`, naming the session, never a token)
 and never holds up or fails the stop; the TTL is the backstop. The engine keeps
 the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 `0700`, like the pod stream tokens in `pod-tokens/`) from mint until the revoke
-attempt, so a pod an engine restart adopts is still revoked when it ends. A
+attempt, so a pod an engine restart adopts is still revoked when it ends. With
+no mint config at teardown (the mint token file was removed) the token cannot be
+revoked, so the file is kept for a later teardown that has one; the TTL is the
+backstop. A
 session hibernated or removed with no pod running has nothing left to revoke.
 
 For a **host-backed** session with the same graft source, the provider

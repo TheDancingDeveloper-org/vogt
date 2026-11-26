@@ -66,6 +66,9 @@ export const ROUTES = {
   "initiative.list": "/initiatives",
   "actor.list": "/actors",
   "auth.logout": "/auth/logout",
+  "auth.whoami": "/auth/whoami",
+  "decision.answer": "/decisions/answer",
+  "decision.withdraw": "/decisions/withdraw",
   "drift.list": "/drift",
   "drift.resolve": "/drift/resolve",
   deps: "/deps",
@@ -350,6 +353,8 @@ export interface InboxEntry {
     subject_key?: string;
     /** A pending grant a person approves or denies (WI-973). */
     grant_id?: string;
+    /** A pending decision a person answers (WI-1321). */
+    decision_id?: string;
     /** False when the engine would refuse the grant (WI-4523): no Approve. */
     approvable?: boolean;
     /** Why the engine would refuse it, when `approvable` is false. */
@@ -432,10 +437,24 @@ export interface BoardCellRequest {
   cursor?: string;
 }
 
+/** The live coding sessions of one work item (`with_sessions`). `worst` is
+ *  the session most in need of attention, in the core's attention words. */
+export interface LiveSessions {
+  count: number;
+  worst: string | null;
+  ids: string[];
+}
+
+/** A board card row. `live_sessions` is present only when the call asked
+ *  `with_sessions`; `null` means unknown (the engine could not be asked),
+ *  which is not the same as `{ count: 0 }`. Used by the board only: the
+ *  shared WorkItem type is untouched. */
+export type WorkListRow = WorkItem & { live_sessions?: LiveSessions | null };
+
 export interface BoardCellPage {
   lane_key: string;
   state: string;
-  items: WorkItem[];
+  items: WorkListRow[];
   total: number;
   next_cursor?: string | null;
 }
@@ -882,7 +901,7 @@ export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal)
   call<BoardListResult>("board.list", params, "POST", signal);
 
 export const getWork = (ref: string) =>
-  call<WorkDetail>("work.get", { ref, mode: "full" });
+  call<WorkDetail>("work.get", { ref, mode: "full", include: ["all"] });
 
 /** The most refs one `work.get_many` takes (`WORK_GET_MANY_LIMIT` in the
  *  core's models); a caller with more asks in pages of this size. */
@@ -1041,6 +1060,32 @@ export const decideGrant = (
   "POST",
 );
 
+/** Answer a pending decision an agent asked with one of its option labels
+ *  (WI-1321). A person's answer: the core refuses it from any agent
+ *  (`person_required`). Nothing is applied; the asker reads the answer. */
+export const decisionAnswer = (
+  id: string,
+  label: string,
+  note: string,
+  reason: string,
+) => call<{ decision: { id: string; state: string } }>(
+  "decision.answer",
+  { id, label, note, reason },
+  "POST",
+);
+
+/** Withdraw a pending decision. A person, or the session that asked. */
+export const decisionWithdraw = (id: string, reason: string) =>
+  call<{ decision: { id: string; state: string } }>(
+    "decision.withdraw",
+    { id, reason },
+    "POST",
+  );
+
+/** Who this browser's credential is, as the core decided it. */
+export const whoami = () =>
+  call<{ identity_ref: string; kind?: string }>("auth.whoami");
+
 /** The audit log, narrowed and paged.
  *
  *  `AuditListResult` carries `total` beside the records: how many match the
@@ -1165,6 +1210,12 @@ export interface SessionSweepRow {
       cpu_pct: number;
       processes: number;
       over_threshold?: boolean;
+      memory_current?: number;
+      memory_max?: number;
+      memory_peak?: number;
+      oom_kill?: number;
+      observed_at?: string;
+      memory_warning?: boolean;
     } | null;
   };
   screen_tail: string[];

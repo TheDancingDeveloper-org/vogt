@@ -258,6 +258,12 @@ pub struct SessionTemplateSummary {
 pub struct WorktreeSpec {
     pub branch: String,
     pub base_ref: String,
+    /// The worktree is a default a dispatch profile filled in, not something
+    /// the caller asked for (WI-4707). A placement that cannot cut one, a
+    /// pod that checks out the source itself, drops it instead of refusing
+    /// the start. Absent or false is a worktree the caller asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_supported: bool,
 }
 
 /// The part of a project's agent policy the engine enforces (WI-1243).
@@ -438,6 +444,12 @@ pub struct SessionSummary {
     /// `SessionSpec::role`); absent for an ordinary worker.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The estate-admin tier this session was granted, when it was
+    /// (WI-4814): `estate_admin` for a person-started oversight session on a
+    /// lane that sets `ENGINE_ESTATE_ADMIN_TIER`. Never inherited by a
+    /// session it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     /// The work item the session serves (WI-998, see
     /// `SessionSpec::work_item`); absent when it is bound to none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,13 +588,37 @@ pub struct SessionResources {
     /// CPU over the last sampling interval, in percent of one core (a busy
     /// tree on four cores reads up to 400).
     pub cpu_pct: f32,
-    /// Processes in the tree.
+    /// Processes in the tree. A real measurement always counts at least its
+    /// root process, so `0` means "not measured" (a pod session sampled for
+    /// memory only, with `rss_bytes` and `cpu_pct` also 0), never a real
+    /// zero. Readers treat it as no sample.
     pub processes: u32,
     /// RFC 3339.
     pub sampled_at: String,
     /// `rss_bytes` is at or over the deployment's `ENGINE_SESSION_RSS_WARN`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub over_threshold: bool,
+    /// The pod's cgroup memory in use, from the pod agent's latest heartbeat
+    /// that carried it (WI-4752). The four memory fields are absent for a
+    /// host session and for an agent that does not report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current: Option<u64>,
+    /// The pod's memory limit; absent when unlimited (`max`) or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_peak: Option<u64>,
+    /// Processes the kernel's OOM killer has killed in the pod's cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kill: Option<u64>,
+    /// RFC 3339: when the engine received that memory reading. Compare it with
+    /// `sampled_at`: a heartbeat without memory keeps the last reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    /// Pod memory reached 80% of `memory_max` and has not dropped below 70%
+    /// since: the engine has told the agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_warning: bool,
 }
 
 /// One session's entry in a `session-resources` event.
@@ -1402,6 +1438,16 @@ pub enum ServerEvent {
     SessionWoken {
         id: Uuid,
     },
+    /// An estate-admin tier was granted to a tier spawn (WI-4814): the
+    /// session, the person who started it, the lane, and the Infisical
+    /// identity names granted. Values are never included.
+    #[serde(rename = "agent_auth.tier_granted")]
+    AgentAuthTierGranted {
+        session: Uuid,
+        person: String,
+        lane: String,
+        names: Vec<String>,
+    },
     /// A new resource sample for every live session, once per sampling
     /// interval (WI-916). Carries only the sessions it measured.
     SessionResources {
@@ -1983,6 +2029,25 @@ mod tests {
             serde_json::to_value(&steered).unwrap()["type"],
             "task.steered"
         );
+    }
+
+    #[test]
+    fn tier_granted_event_carries_the_dotted_type_tag() {
+        let granted = ServerEvent::AgentAuthTierGranted {
+            session: Uuid::nil(),
+            person: "human:ada".into(),
+            lane: "vogt-dev".into(),
+            names: vec![
+                "INFISICAL_CLIENT_ID".into(),
+                "INFISICAL_CLIENT_SECRET".into(),
+            ],
+        };
+        let json = serde_json::to_value(&granted).unwrap();
+        assert_eq!(json["type"], "agent_auth.tier_granted");
+        assert_eq!(json["person"], "human:ada");
+        assert_eq!(json["lane"], "vogt-dev");
+        assert_eq!(json["names"][0], "INFISICAL_CLIENT_ID");
+        assert_eq!(json["names"][1], "INFISICAL_CLIENT_SECRET");
     }
 
     #[test]

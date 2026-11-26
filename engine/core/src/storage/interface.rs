@@ -12,10 +12,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+use crate::core::Principal;
 use crate::core::{
     Actor, ActorPreference, AuditRecord, AuthDecision, Charter, CodingSession, Comment,
     ContractExemption, Decision, DepRef, DriftProposal, Event, ForgeAccount, InboxTriage,
-    Initiative, Label, Moment, Observation, PasswordCredential, Principal, Project, RelationKind,
+    Initiative, Label, Moment, Observation, PasswordCredential, Project, RelationKind,
     SessionGrant, SessionReport, Suppression, Sweep, SweepOutcome, Token, Watch, WorkItem,
     WorkLink, WorkOverlay, Workflow, WriteBackRecord,
 };
@@ -78,6 +80,7 @@ pub struct CarryReport {
 
 /// The outcome of creating an instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct BootstrapResult {
     pub instance_id: String,
     pub actor: Actor,
@@ -498,6 +501,7 @@ pub trait ReadView {
         &self,
         entry_keys: &[String],
     ) -> Result<BTreeMap<String, InboxTriage>, crate::errors::VogtError>;
+    #[cfg(test)]
     fn list_inbox_triage(&self, limit: i64) -> Result<Vec<InboxTriage>, crate::errors::VogtError>;
     fn actor_preference(
         &self,
@@ -531,12 +535,6 @@ pub trait ReadView {
     /// Whether the session opted out of cold-wake compaction (WI-2037).
     fn session_cold_wake_opt_out(&self, session_id: &str)
         -> Result<bool, crate::errors::VogtError>;
-    /// The newest report each of these engine sessions made, keyed by id.
-    /// A session that never reported is absent.
-    fn latest_session_reports(
-        &self,
-        engine_session_ids: &[String],
-    ) -> Result<std::collections::BTreeMap<String, SessionReport>, crate::errors::VogtError>;
     fn list_session_reports(
         &self,
         engine_session_id: Option<&str>,
@@ -590,6 +588,14 @@ pub trait ReadView {
         offset: i64,
     ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
 
+    /// The sessions Vogt has not stopped that are bound to any of `work_item_ids`,
+    /// in one query per chunk of ids (WI-4751, WI-4753; a page of any size works). Newest first. Whether a row is still alive is the
+    /// engine's to say; the caller joins that.
+    fn unstopped_sessions_for_items(
+        &self,
+        work_item_ids: &[String],
+    ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
+
     /// The sessions Vogt has not stopped that this engine session started,
     /// newest first, at most `limit` (WI-1329: the worker cap).
     fn list_live_sessions_started_by(
@@ -624,7 +630,7 @@ pub trait WriteTxn: ReadView {
     fn commit(self) -> Result<(), crate::errors::VogtError>
     where
         Self: Sized;
-    fn txn_id(&self) -> &str;
+    #[cfg(test)]
     fn revision(&self) -> i64;
 
     fn insert_actor(&mut self, actor: &Actor) -> Result<(), crate::errors::VogtError>;
@@ -720,7 +726,6 @@ pub trait WriteTxn: ReadView {
         reason: &str,
         at: Moment,
     ) -> Result<bool, crate::errors::VogtError>;
-    fn reinstate_token(&mut self, token_id: &str) -> Result<bool, crate::errors::VogtError>;
 
     fn upsert_password_credential(
         &mut self,
@@ -754,6 +759,7 @@ pub trait WriteTxn: ReadView {
         record: &WriteBackRecord,
     ) -> Result<(), crate::errors::VogtError>;
     fn insert_session(&mut self, session: &CodingSession) -> Result<(), crate::errors::VogtError>;
+    #[cfg(test)]
     fn set_session_stopped(
         &mut self,
         session_id: &str,
@@ -814,6 +820,7 @@ pub trait WriteTxn: ReadView {
         at: Moment,
     ) -> Result<bool, crate::errors::VogtError>;
 
+    #[cfg(test)]
     fn upsert_workflow(
         &mut self,
         workflow: &Workflow,
@@ -864,6 +871,7 @@ pub trait DeclaredStore {
     fn is_initialized(&self) -> bool;
     fn schema_version(&self) -> i64;
     fn bundled_schema_version(&self) -> i64;
+    #[cfg(test)]
     fn bootstrap(&self, principal: &Principal)
         -> Result<BootstrapResult, crate::errors::VogtError>;
     fn credentials(&self) -> Result<CarriedCredentials, crate::errors::VogtError>;
@@ -917,13 +925,12 @@ pub struct BacklogCountInputs {
 /// The observed store: append-oriented evidence plus collector coverage.
 pub trait ObservedStore {
     fn migrate(&self) -> Result<MigrationReport, crate::errors::VogtError>;
-    fn is_initialized(&self) -> bool;
     fn schema_version(&self) -> i64;
     fn bundled_schema_version(&self) -> i64;
 
+    #[cfg(test)]
     fn bind_instance(&self, instance_id: &str) -> Result<(), crate::errors::VogtError>;
     fn rebind_instance(&self, instance_id: &str) -> Result<(), crate::errors::VogtError>;
-    fn instance_id(&self) -> Result<Option<String>, crate::errors::VogtError>;
     fn has_evidence_tables(&self) -> Result<bool, crate::errors::VogtError>;
 
     fn begin_sweep(
@@ -946,11 +953,6 @@ pub trait ObservedStore {
         findings: &[PendingObservation],
         at: Moment,
     ) -> Result<AppendStats, crate::errors::VogtError>;
-    fn list_sweeps(
-        &self,
-        collector: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<Sweep>, crate::errors::VogtError>;
     fn coverage(&self) -> Result<BTreeMap<String, Sweep>, crate::errors::VogtError>;
     fn coverage_by_project(
         &self,

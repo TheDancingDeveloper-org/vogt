@@ -177,3 +177,57 @@ describe("permission posture", () => {
     expect(await screen.findByText("⚠ no permission checks")).toBeTruthy();
   });
 });
+
+describe("Oversight pod sessions (WI-4759)", () => {
+  const podSession = (id: string, over: Record<string, unknown> = {}) => ({
+    ...ROW({}).session,
+    id,
+    engine_session_id: `uuid-${id}`,
+    resources: {
+      rss_bytes: 0,
+      cpu_pct: 0,
+      processes: 0,
+      sampled_at: new Date().toISOString(),
+      memory_current: 900,
+      memory_max: 1000,
+      observed_at: new Date().toISOString(),
+      memory_warning: true,
+      ...over,
+    },
+  });
+
+  it("shows the memory badge with the warning class and no 0 B rss word", async () => {
+    vi.spyOn(vogtApi, "sweepSessions").mockResolvedValue({
+      rows: [ROW({ session: podSession("ses_pod") })],
+      counts: { total: 1, needs_you: 0 },
+      swept_at: new Date().toISOString(),
+      engine: null,
+    });
+    const { container } = render(() => <Oversight />);
+    const badge = await waitFor(() => {
+      const el = container.querySelector(".oversight-memory");
+      if (!el) throw new Error("no badge");
+      return el;
+    });
+    expect(badge.textContent).toContain("mem 90%");
+    expect(badge.classList.contains("oversight-memory--warn")).toBe(true);
+    expect(container.querySelector(".oversight-resources")).toBeNull();
+    expect(container.textContent).not.toContain("0 B");
+  });
+
+  it("sorts an unmeasured pod row below a measured one under heaviest first", async () => {
+    const measured = { ...ROW({}).session, id: "ses_real", engine_session_id: "u-r",
+      resources: { rss_bytes: 10, cpu_pct: 0, processes: 1, sampled_at: "x" } };
+    vi.spyOn(vogtApi, "sweepSessions").mockResolvedValue({
+      rows: [ROW({ session: podSession("ses_pod") }), ROW({ session: measured })],
+      counts: { total: 2, needs_you: 0 },
+      swept_at: new Date().toISOString(),
+      engine: null,
+    });
+    render(() => <Oversight />);
+    await screen.findByText("ses_pod");
+    fireEvent.click(screen.getByLabelText(/heaviest/i));
+    const ids = screen.getAllByText(/^ses_(pod|real)$/).map((e) => e.textContent);
+    expect(ids).toEqual(["ses_real", "ses_pod"]);
+  });
+});

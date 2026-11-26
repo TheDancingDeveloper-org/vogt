@@ -768,16 +768,27 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
     )
     .await;
 
-    let row = wait_for_session_row(&client, &base, &ok, |s| s["exit_code"] == json!(0)).await;
-    // Well past the 200 ms idle window: nothing may move it off `exited`.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let row_later = wait_for_session_row(&client, &base, &ok, |_| true).await;
-    for r in [&row, &row_later] {
-        assert_eq!(r["activity"], "exited", "{r:?}");
-        assert_eq!(r["alive"], false, "{r:?}");
+    // Wait for the whole terminal state, not just the exit code: the activity
+    // can lag the exit code on a loaded host. Bounded by the helper's deadline.
+    let row = wait_for_session_row(&client, &base, &ok, |s| {
+        s["exit_code"] == json!(0) && s["activity"] == "exited" && s["alive"] == json!(false)
+    })
+    .await;
+    // Then hold: nothing (the PTY reader's late drain, the idle window) may
+    // move it off `exited`. Re-read the row over a span past the 200 ms idle
+    // window instead of sleeping once.
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let later = wait_for_session_row(&client, &base, &ok, |_| true).await;
+        assert_eq!(later["activity"], "exited", "{row:?} then {later:?}");
+        assert_eq!(later["alive"], false, "{row:?} then {later:?}");
+        assert_eq!(later["exit_code"], json!(0), "{row:?} then {later:?}");
     }
 
-    let row = wait_for_session_row(&client, &base, &failing, |s| s["exit_code"] == json!(3)).await;
+    let row = wait_for_session_row(&client, &base, &failing, |s| {
+        s["exit_code"] == json!(3) && s["activity"] == "errored"
+    })
+    .await;
     assert_eq!(row["activity"], "errored", "{row:?}");
     assert_eq!(row["alive"], false, "{row:?}");
 
@@ -792,7 +803,10 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
         .send()
         .await
         .unwrap();
-    let row = wait_for_session_row(&client, &base, &live, |s| !s["exit_code"].is_null()).await;
+    let row = wait_for_session_row(&client, &base, &live, |s| {
+        !s["exit_code"].is_null() && s["activity"] == "stopped"
+    })
+    .await;
     assert_eq!(row["alive"], false, "{row:?}");
     assert_eq!(row["activity"], "stopped", "{row:?}");
 
@@ -1366,4 +1380,48 @@ async fn a_claude_session_is_not_watched_so_nothing_is_typed_into_it() {
         assert!(reads.is_empty(), "autopilot {autopilot}: {reads:?}");
         session.kill().unwrap();
     }
+}
+
+/// WI-4814: a session-authenticated caller (an agent) cannot nominate an
+/// overseer. The refusal is a conflict, not the generic 403 a role change
+/// gives, so a retry cannot be read as permission it will get later. A person
+/// starting the same oversight session succeeds.
+#[tokio::test]
+async fn a_session_authenticated_oversight_start_is_a_conflict() {
+    const SESSION: &str = "session-token-wi4814-1234567890";
+    const PERSON: &str = "person-token-wi4814-1234567890";
+    const STACK: &str = "stack-secret-for-wi4814-1234567890";
+    let core = stand_in_core_knowing(vec![
+        (SESSION, "agent:session:ses_overseer", vec!["work.write"]),
+        (PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(STACK.into());
+    let (base, _guard) = boot_with_config(cfg).await;
+
+    let refused = client_for(SESSION)
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "agent-overseer",
+            "role": "oversight",
+            "command": ["/bin/cat"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT, "{refused:?}");
+
+    let created = client_for(PERSON)
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "person-overseer",
+            "role": "oversight",
+            "command": ["/bin/cat"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK, "{created:?}");
 }

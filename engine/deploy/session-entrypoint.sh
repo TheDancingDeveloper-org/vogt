@@ -78,7 +78,13 @@ done <"$tmp_dir/bundle.tsv"
 # A pod with no account bundle must still start: the CLI's own signed-out
 # state is the honest answer, not a crash. Say which login is missing so the
 # pod's log names it before the CLI's onboarding screen appears (WI-4130).
-if [ "$VOGT_CLI" = claude ] && [ -z "$(find "$CLAUDE_CONFIG_DIR" -name .credentials.json -type f -print -quit 2>/dev/null)" ]; then
+# WI-4832: a pod whose account has a long-lived token (CLAUDE_CODE_OAUTH_TOKEN,
+# from a per-session Secret) signs in with it and refreshes nothing. Claude
+# Code ranks the token above the login file; remove a stray top-level file too,
+# so a single-use refresh token never sits in the pod to be burned.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
+elif [ "$VOGT_CLI" = claude ] && [ -z "$(find "$CLAUDE_CONFIG_DIR" -name .credentials.json -type f -print -quit 2>/dev/null)" ]; then
   printf 'session-entrypoint: no Claude Code credentials in the session bundle; Claude Code starts signed out (log in inside the session, or configure ENGINE_AGENT_CLAUDE_ACCOUNTS)\n' >&2
 fi
 step=brokered-env; say brokered-env

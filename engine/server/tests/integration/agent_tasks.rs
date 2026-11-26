@@ -2022,13 +2022,17 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let log = tmp.path().join("input.log");
+    // The agent shows its prompt only once the test has blocked the session,
+    // so the nudge clock cannot start before the block lands (WI-2711).
+    let go = tmp.path().join("go");
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let opencode = bin.join("opencode");
     std::fs::write(
         &opencode,
         format!(
-            "#!/usr/bin/env bash\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            "#!/usr/bin/env bash\nuntil [ -e '{}' ]; do sleep 0.02; done\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            go.display(),
             log.display()
         ),
     )
@@ -2066,6 +2070,7 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
         .unwrap()
         .status();
     assert!(status.is_success());
+    std::fs::write(&go, "").unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         std::fs::read_to_string(&log).unwrap_or_default().is_empty(),

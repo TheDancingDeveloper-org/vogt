@@ -18,6 +18,17 @@
 # use, so two copies of one login fight and one of them is signed out. Each
 # profile logs in once, itself (`/login`).
 #
+# Long-lived token (WI-4832): a login copied into pods is burned by the first
+# refresh, so pods show "Login expired" every 6-12 hours. For an account the
+# engine runs in pods, mint a token once with `claude setup-token` (about a
+# year, no refresh), store it in the secrets store (from stdin, never argv) and
+# let the agent-auth manifest provide it to the engine as
+# ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT> (account upper-cased, `-` as `_`).
+# The engine then gives it to Claude Code sessions of that account only, as
+# CLAUDE_CODE_OAUTH_TOKEN, and copies no .credentials.json into their pods.
+# Re-run `claude setup-token` before it expires. See docs/ENGINE.md, "Claude
+# accounts".
+#
 # Environment:
 #   CLAUDE_ACCOUNTS_ROOT      where profiles live (default ~/.claude-accounts)
 #   CLAUDE_PROFILE_SHARE_FROM the directory whose settings are shared into a

@@ -31,6 +31,7 @@ import WorkItemDetail from "../WorkItemDetail";
 import { describeAge } from "../viewAge";
 import { isConnected } from "../store";
 import {
+  boardReloads,
   driftProposal,
   fakeVogt,
   freshness,
@@ -249,7 +250,7 @@ describe("the board reloads on what the front door announced", () => {
   it("re-reads when vogt-core says something changed, with no poll and no Refresh", async () => {
     const vogt = fakeVogt();
     const { container } = board();
-    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await waitFor(() => expect(boardReloads(vogt)).toBe(1));
     await liveStream(vogt);
 
     // The board is paused: it has said so on screen, and the only thing that
@@ -261,7 +262,7 @@ describe("the board reloads on what the front door announced", () => {
     });
     vogt.stream.changed();
 
-    await waitFor(() => expect(vogt.matching("GET /work").length).toBeGreaterThan(1));
+    await waitFor(() => expect(boardReloads(vogt)).toBeGreaterThan(1));
     await waitFor(() =>
       expect(container.querySelector('.board-cell[data-state="in progress"] .board-card')).toBeTruthy(),
     );
@@ -272,33 +273,33 @@ describe("the board reloads on what the front door announced", () => {
     // 296 found nothing new, and each re-read the whole board.
     const vogt = fakeVogt();
     board();
-    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await waitFor(() => expect(boardReloads(vogt)).toBe(1));
     await liveStream(vogt);
     for (let i = 0; i < 50; i += 1) {
       vogt.stream.changed({ kind: "sweep.completed", entity_kind: "sweep", entity_id: `swp_${i}`, summary: { new: 0 } });
     }
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(vogt.matching("GET /work")).toHaveLength(1);
+    expect(boardReloads(vogt)).toBe(1);
 
     vogt.stream.changed({ kind: "sweep.completed", entity_kind: "sweep", entity_id: "swp_new", summary: { new: 3 } });
-    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(2));
+    await waitFor(() => expect(boardReloads(vogt)).toBe(2));
   });
 
   it("reads a burst of real changes at most twice (WI-2328)", async () => {
     const vogt = fakeVogt();
     board();
-    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await waitFor(() => expect(boardReloads(vogt)).toBe(1));
     await liveStream(vogt);
     for (let i = 0; i < 50; i += 1) vogt.stream.changed({ entity_id: `01JWORK${i}` });
     await new Promise((resolve) => setTimeout(resolve, 900));
     // Leading read plus one trailing read for the rest of the burst.
-    expect(vogt.matching("GET /work").length).toBeLessThanOrEqual(3);
+    expect(boardReloads(vogt)).toBeLessThanOrEqual(3);
   });
 
   it("does not re-read under a reason somebody is typing", async () => {
     const vogt = fakeVogt();
     const { container } = board();
-    await waitFor(() => expect(vogt.matching("GET /work")).toHaveLength(1));
+    await waitFor(() => expect(boardReloads(vogt)).toBe(1));
     await liveStream(vogt);
 
     // Drop a card, which opens the reason composer every write requires. A refetch here
@@ -314,7 +315,7 @@ describe("the board reloads on what the front door announced", () => {
     vogt.stream.changed();
     await settle();
 
-    expect(vogt.matching("GET /work")).toHaveLength(1);
+    expect(boardReloads(vogt)).toBe(1);
     expect(
       container.querySelector('.board-cell[data-state="in progress"] textarea'),
     ).toBeTruthy();

@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch, Notify};
 use uuid::Uuid;
 use vogt_engine_contract::source::SourceDescriptor;
-use vogt_session_agent::Frame;
+use vogt_session_agent::{CgroupMemory, Frame};
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
 /// Frames the engine may queue for one attached agent. Control frames are
@@ -182,6 +182,13 @@ pub struct PodLink {
     /// An agent has completed its hello on this link at least once.
     ever_connected: AtomicBool,
     last_heartbeat: parking_lot::Mutex<Instant>,
+    /// The pod's cgroup memory from the latest heartbeat that carried it
+    /// (WI-4749). An older agent never sends one.
+    memory: parking_lot::Mutex<Option<PodMemory>>,
+    /// The PTY size `(cols, rows)` the engine last set for this session: the
+    /// viewer's size, or the size a woken session was hibernated at. The agent
+    /// starts its PTY at its own default, so this is replayed on every hello.
+    pty_size: parking_lot::Mutex<Option<(u16, u16)>>,
     /// When the current agent's socket was lost, while it is not connected.
     disconnected_at: parking_lot::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
@@ -199,6 +206,19 @@ pub struct PodLink {
     /// The session's output log. Set by [`Self::keep_log`] before the reader
     /// takes output; each durable offset is checkpointed beside it.
     log: parking_lot::Mutex<Option<std::path::PathBuf>>,
+}
+
+/// A pod's cgroup memory and when the engine received it (RFC 3339).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodMemory {
+    pub memory: CgroupMemory,
+    pub observed_at: String,
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Output queued for the session reader: the stream offset just past the
@@ -234,6 +254,8 @@ impl PodLink {
             connected: AtomicBool::new(false),
             ever_connected: AtomicBool::new(false),
             last_heartbeat: parking_lot::Mutex::new(Instant::now()),
+            memory: parking_lot::Mutex::new(None),
+            pty_size: parking_lot::Mutex::new(None),
             disconnected_at: parking_lot::Mutex::new(None),
             adopted: AtomicBool::new(false),
             durable: watch::Sender::new(0),
@@ -348,6 +370,39 @@ impl PodLink {
 
     pub fn heartbeat_age(&self) -> Duration {
         self.last_heartbeat.lock().elapsed()
+    }
+
+    /// The pod's latest reported cgroup memory, if its agent sends it.
+    /// Remember the PTY size `(cols, rows)` to replay when an agent dials in.
+    pub fn set_pty_size(&self, size: (u16, u16)) {
+        *self.pty_size.lock() = Some(crate::pty::clamp_pty_size(size.0, size.1));
+    }
+    pub fn pty_size(&self) -> Option<(u16, u16)> {
+        *self.pty_size.lock()
+    }
+    pub fn memory(&self) -> Option<CgroupMemory> {
+        self.memory.lock().as_ref().map(|m| m.memory.clone())
+    }
+
+    /// The latest cgroup memory with when it was observed (WI-4752). A
+    /// heartbeat without memory keeps the last value, so `observed_at` is the
+    /// only way to tell a stale reading from a fresh one.
+    pub fn memory_observed(&self) -> Option<PodMemory> {
+        self.memory.lock().clone()
+    }
+
+    fn note_memory(&self, memory: Option<CgroupMemory>) {
+        self.note_memory_at(memory, now_rfc3339());
+    }
+
+    pub(crate) fn note_memory_at(&self, memory: Option<CgroupMemory>, observed_at: String) {
+        if let Some(memory) = memory {
+            tracing::debug!(?memory, "pod cgroup memory");
+            *self.memory.lock() = Some(PodMemory {
+                memory,
+                observed_at,
+            });
+        }
     }
 
     fn note_heartbeat(&self) {
@@ -1192,8 +1247,11 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
 fn with_onboarding_config(
     mut files: Vec<(String, Vec<u8>)>,
     work_dirs: &[&str],
+    token_login: bool,
 ) -> Vec<(String, Vec<u8>)> {
-    if !files.iter().any(|(path, _)| path == ".credentials.json") {
+    // A pod signed in by `CLAUDE_CODE_OAUTH_TOKEN` carries no login file, but
+    // Claude Code still needs the config to skip its first-run flow (WI-4832).
+    if !token_login && !files.iter().any(|(path, _)| path == ".credentials.json") {
         return files;
     }
     let config = match files.iter().position(|(path, _)| path == ".claude.json") {
@@ -1242,6 +1300,21 @@ fn resumes_conversation(path: &str, conversation: &str) -> bool {
     vogt_session_agent::is_conversation_transcript(path, conversation)
 }
 
+/// The files a pod's account bundle carries. With a token login (WI-4832) the
+/// single-use `.credentials.json` is not copied, so no pod holds a refresh
+/// token to burn or a stale file that could be refreshed over the token; the
+/// onboarding config still travels so Claude Code skips its first-run flow.
+fn bundle_files(
+    mut files: Vec<(String, Vec<u8>)>,
+    work_dirs: &[&str],
+    token_login: bool,
+) -> Vec<(String, Vec<u8>)> {
+    if token_login {
+        files.retain(|(path, _)| path != ".credentials.json");
+    }
+    with_onboarding_config(files, work_dirs, token_login)
+}
+
 /// The account bundle a pod resumes from: the login, the global config, a
 /// woken session's transcript, and project memory when it is on. Returns the
 /// bundle and whether it carries the session's conversation.
@@ -1268,7 +1341,12 @@ fn pod_bundle(
             .sessions
             .secret_broker()
             .bundle_snapshot(account, conversation.unwrap_or(""));
-        for (path, bytes) in with_onboarding_config(files, onboarding_dirs) {
+        // WI-4832: an account with a long-lived token signs the pod in through
+        // `CLAUDE_CODE_OAUTH_TOKEN`. Other accounts and CLIs are unchanged.
+        let token_login = cli == "claude"
+            && !account.is_empty()
+            && crate::claude_oauth_token::is_configured(Some(account));
+        for (path, bytes) in bundle_files(files, onboarding_dirs, token_login) {
             // Claude keeps `<conversation>.jsonl`; a Codex rollout is
             // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
             // woken Codex pod starts a fresh conversation and loses its
@@ -1733,6 +1811,11 @@ where
             signal: "kill".into(),
         });
     }
+    // The agent's PTY starts at its own default size; put it at the size the
+    // engine holds, so a woken or redialled pod matches the viewer's terminal.
+    if let Some((cols, rows)) = link.pty_size() {
+        let _ = tx.try_send(Frame::Resize { cols, rows });
+    }
     let mut resync = ResyncGate::default();
     // Output is acknowledged only once the log holds it: `owed` is the offset
     // the agent is waiting on, and `durable` wakes the loop as the log catches up.
@@ -1870,8 +1953,9 @@ where
                             link.salvages.fetch_add(1, Ordering::AcqRel);
                             link.salvage_notify.notify_waiters();
                         }
-                        Frame::Heartbeat { .. } => {
+                        Frame::Heartbeat { memory, .. } => {
                             link.note_heartbeat();
+                            link.note_memory(memory);
                             let next = link.next_offset();
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }
@@ -2245,6 +2329,60 @@ mod tests {
         next.await.unwrap();
     }
 
+    /// WI-4567: a woken pod's agent starts its PTY at its own default size.
+    /// The engine replays the size it holds for the session on hello.
+    #[tokio::test]
+    async fn hello_replays_the_sessions_pty_size_to_the_agent() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        link.set_pty_size((101, 33));
+        let mut agent = connect(&auth, id).await;
+        let (frames, closed) = agent.drain().await;
+        assert!(!closed);
+        assert!(
+            frames.contains(&Frame::Resize {
+                cols: 101,
+                rows: 33
+            }),
+            "{frames:?}"
+        );
+        // A session with no known size sends none.
+        let other = Uuid::new_v4();
+        let (_l, _r) = auth.register_pod(other);
+        let mut agent = connect(&auth, other).await;
+        let (frames, _) = agent.drain().await;
+        assert!(!frames.iter().any(|f| matches!(f, Frame::Resize { .. })));
+    }
+
+    /// WI-4567: a size restored from storage or sent by a client is clamped
+    /// when stored, so the replay never sends 0 or an absurd size.
+    #[tokio::test]
+    async fn hello_replays_a_clamped_pty_size() {
+        use crate::pty::{MAX_PTY_COLS, MAX_PTY_ROWS};
+        for (given, want) in [
+            ((0, 0), (1, 1)),
+            ((65535, 65535), (MAX_PTY_COLS, MAX_PTY_ROWS)),
+            ((120, 40), (120, 40)),
+        ] {
+            let auth = Arc::new(AgentAuth::default());
+            let id = Uuid::new_v4();
+            let (link, _reader) = auth.register_pod(id);
+            link.set_pty_size(given);
+            assert_eq!(link.pty_size(), Some(want));
+            let mut agent = connect(&auth, id).await;
+            let (frames, _) = agent.drain().await;
+            let sent: Vec<_> = frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::Resize { cols, rows } => Some((*cols, *rows)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, vec![want], "{given:?}");
+        }
+    }
+
     #[tokio::test]
     async fn relay_sends_one_resync_for_a_burst_of_refused_frames() {
         let auth = Arc::new(AgentAuth::default());
@@ -2363,8 +2501,63 @@ mod tests {
             "{frames:?}"
         );
         assert_eq!(frames[1..], [Frame::Resync { offset: 0 }]);
-        agent.send(Frame::Heartbeat { cursor: 0 });
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: None,
+        });
         assert_eq!(agent.drain().await, (vec![Frame::Ack { offset: 0 }], false));
+    }
+
+    /// WI-4749: the latest heartbeat's cgroup memory is kept per link, and a
+    /// heartbeat without one (an older agent) leaves the last value alone.
+    #[tokio::test]
+    async fn heartbeat_memory_is_stored_on_the_link() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        assert_eq!(link.memory(), None);
+        let memory = CgroupMemory {
+            memory_current: Some(42),
+            oom_kill: Some(1),
+            ..Default::default()
+        };
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: Some(memory.clone()),
+        });
+        agent.drain().await;
+        assert_eq!(link.memory(), Some(memory.clone()));
+        agent.send(Frame::Heartbeat {
+            cursor: 0,
+            memory: None,
+        });
+        agent.drain().await;
+        assert_eq!(link.memory(), Some(memory));
+    }
+
+    /// WI-4752: the observed-at stamp is set with the value, replaced by a
+    /// newer reading, and kept (not refreshed) by a heartbeat without memory.
+    #[test]
+    fn memory_observed_at_is_set_and_kept() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let link = PodLink::new(sender);
+        assert_eq!(link.memory_observed(), None);
+        let memory = CgroupMemory {
+            memory_current: Some(7),
+            ..Default::default()
+        };
+        link.note_memory_at(Some(memory.clone()), "2026-01-01T00:00:00Z".into());
+        let first = link.memory_observed().unwrap();
+        assert_eq!(first.observed_at, "2026-01-01T00:00:00Z");
+        assert_eq!(first.memory, memory);
+        link.note_memory_at(None, "2026-01-01T00:00:30Z".into());
+        assert_eq!(link.memory_observed(), Some(first));
+        link.note_memory_at(Some(memory), "2026-01-01T00:01:00Z".into());
+        assert_eq!(
+            link.memory_observed().unwrap().observed_at,
+            "2026-01-01T00:01:00Z"
+        );
     }
 
     #[test]
@@ -2801,12 +2994,37 @@ mod tests {
         ));
     }
 
+    /// WI-4832: with a token login the bundle has no `.credentials.json`
+    /// (the single-use refresh token is not copied) but keeps the config; with
+    /// none, the login travels exactly as before.
+    #[test]
+    fn a_token_login_bundle_drops_the_login_file_and_keeps_the_config() {
+        let files = || {
+            vec![
+                (".credentials.json".to_string(), b"{\"refresh\":1}".to_vec()),
+                (".claude.json".to_string(), b"{}".to_vec()),
+            ]
+        };
+        let with = bundle_files(files(), &["/work"], true);
+        assert!(with.iter().all(|(p, _)| p != ".credentials.json"));
+        assert!(with.iter().any(|(p, _)| p == ".claude.json"));
+        let seeded: serde_json::Value =
+            serde_json::from_slice(&with.iter().find(|(p, _)| p == ".claude.json").unwrap().1)
+                .unwrap();
+        assert_eq!(seeded["hasCompletedOnboarding"], true);
+        // Without a token: the login is copied, as before.
+        let without = bundle_files(files(), &["/work"], false);
+        assert!(without.iter().any(|(p, _)| p == ".credentials.json"));
+        // No login and no token: untouched (no config invented).
+        assert!(bundle_files(Vec::new(), &["/work"], false).is_empty());
+    }
+
     /// WI-2000: an alternate account's bundle gets trust and the external
     /// import approval for the checkout and for the workspace root.
     #[test]
     fn the_bundle_config_approves_every_given_directory() {
         let files = vec![(".credentials.json".to_string(), b"{}".to_vec())];
-        let files = with_onboarding_config(files, &["/work", "/home/a/Working"]);
+        let files = with_onboarding_config(files, &["/work", "/home/a/Working"], false);
         let config = files.iter().find(|(p, _)| p == ".claude.json").unwrap();
         let config: serde_json::Value = serde_json::from_slice(&config.1).unwrap();
         for dir in ["/work", "/home/a/Working"] {

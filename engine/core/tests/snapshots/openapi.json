@@ -789,6 +789,18 @@
             "description": "Include done and wont_do items."
           },
           {
+            "name": "with_sessions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+              "title": "With Sessions",
+              "type": "boolean"
+            },
+            "description": "Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0."
+          },
+          {
             "name": "mode",
             "in": "query",
             "required": false,
@@ -855,8 +867,8 @@
     "/api/work/get": {
       "get": {
         "operationId": "work_get",
-        "summary": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
-        "description": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+        "summary": "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
+        "description": "Fetch one work item (`id` is accepted for `ref`). Lean by default: the item with its relations and labels, the newest 3 comments, and its `delivery` (landed, deployed per lane, verified, each with its evidence). Pass `include` to choose sections (comments, sessions, branches, git, delivery, relations); `include=[all]` returns everything, as the default did before WI-4726.",
         "parameters": [
           {
             "name": "ref",
@@ -874,12 +886,43 @@
             "in": "query",
             "required": false,
             "schema": {
-              "default": 50,
+              "description": "How many comments to return. Default 3 (the newest); with `include` containing `all`, 200.",
               "maximum": 500,
               "minimum": 0,
               "title": "Comment Limit",
               "type": "integer"
-            }
+            },
+            "description": "How many comments to return. Default 3 (the newest); with `include` containing `all`, 200."
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "comments",
+                      "sessions",
+                      "branches",
+                      "git",
+                      "delivery",
+                      "relations",
+                      "all"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it.",
+              "title": "Include"
+            },
+            "description": "Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it."
           },
           {
             "name": "mode",
@@ -1456,6 +1499,18 @@
               "type": "boolean"
             },
             "description": "Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`."
+          },
+          {
+            "name": "with_sessions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+              "title": "With Sessions",
+              "type": "boolean"
+            },
+            "description": "Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0."
           },
           {
             "name": "mode",
@@ -3000,8 +3055,8 @@
     "/api/sessions": {
       "post": {
         "operationId": "session_start",
-        "summary": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
-        "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
+        "summary": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. `resume` continues an agent conversation: pass a `conversation_id` from session_history_list (whose `resume_template` names the template to use), or the id of a session (ses_… or engine UUID), whose recorded conversation and `resume_template` are used; a session with no recorded conversation is refused, and a `template` that conflicts with its `resume_template` is refused. Any other value is passed to the agent CLI as its own conversation id. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
+        "description": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. `cwd` opens it in an existing worktree under the workspace Active/ directory instead of the project's checkout; it cannot be combined with `worktree=true`. `resume` continues an agent conversation: pass a `conversation_id` from session_history_list (whose `resume_template` names the template to use), or the id of a session (ses_… or engine UUID), whose recorded conversation and `resume_template` are used; a session with no recorded conversation is refused, and a `template` that conflicts with its `resume_template` is refused. Any other value is passed to the agent CLI as its own conversation id. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3037,8 +3092,8 @@
       },
       "get": {
         "operationId": "session_list",
-        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
-        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…). `fields` accepts a list or a comma-separated string.",
+        "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
+        "description": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`. `started_by_session` keeps only the sessions that one started (engine id or ses_…), on every path (digest or full, any `states`). `fields` accepts a list or a comma-separated string. `mode=full` omits the long launch `command` unless `fields` names it.",
         "parameters": [
           {
             "name": "project",
@@ -3110,7 +3165,7 @@
             "required": false,
             "schema": {
               "default": "digest",
-              "description": "`digest` (default) or `full` (every SessionSummary field).",
+              "description": "`digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it).",
               "enum": [
                 "digest",
                 "full"
@@ -3118,7 +3173,7 @@
               "title": "Mode",
               "type": "string"
             },
-            "description": "`digest` (default) or `full` (every SessionSummary field)."
+            "description": "`digest` (default) or `full` (every SessionSummary field except `command`, which is left out unless `fields` names it)."
           },
           {
             "name": "fields",
@@ -3126,14 +3181,14 @@
             "required": false,
             "schema": {
               "default": [],
-              "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list.",
+              "description": "Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list.",
               "items": {
                 "type": "string"
               },
               "title": "Fields",
               "type": "array"
             },
-            "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list."
+            "description": "Extra SessionSummary attribute names on each digest row, or the only columns kept on a `full` row. Naming `command` returns the launch command, which `mode=full` omits by default. A comma-separated string is accepted as well as a list."
           },
           {
             "name": "starters_only",
@@ -3160,10 +3215,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
+              "description": "Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.",
               "title": "Started By Session"
             },
-            "description": "Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match."
+            "description": "Keep only sessions this one started, on every path (digest or full, with or without `states`): the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match."
           },
           {
             "name": "states",
@@ -3282,8 +3337,8 @@
     "/api/sessions/stop": {
       "post": {
         "operationId": "session_stop",
-        "summary": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
-        "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+        "summary": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
+        "description": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable. `mode` compact (default) returns a few fields (ids, name, activity, alive); `mode=full` returns the complete session record.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5804,8 +5859,8 @@
     "/api/sessions/history": {
       "get": {
         "operationId": "session_history_list",
-        "summary": "List archived sessions (history), newest first.",
-        "description": "List archived sessions (history), newest first.",
+        "summary": "List archived sessions (history), newest first. Each row carries `conversation_id` (the agent's own id, for session_start `resume`) and `resume_template` (the template session_start should use with it); session_start `resume` also takes a row's session id.",
+        "description": "List archived sessions (history), newest first. Each row carries `conversation_id` (the agent's own id, for session_start `resume`) and `resume_template` (the template session_start should use with it); session_start `resume` also takes a row's session id.",
         "parameters": [
           {
             "name": "limit",
@@ -12405,6 +12460,71 @@
             "description": "At or over the deployment's ENGINE_SESSION_RSS_WARN.",
             "title": "Over Threshold",
             "type": "boolean"
+          },
+          "memory_current": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pod's cgroup memory in use, from the pod agent's latest heartbeat\nthat carried it. The memory fields are absent for a host session or an\nagent that does not report them.",
+            "title": "Memory Current"
+          },
+          "memory_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pod's memory limit; absent when unlimited or unknown.",
+            "title": "Memory Max"
+          },
+          "memory_peak": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Peak"
+          },
+          "oom_kill": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Processes the OOM killer has killed in the pod's cgroup.",
+            "title": "Oom Kill"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the engine received that memory reading; a heartbeat without\nmemory keeps the last reading, so compare it with `sampled_at`.",
+            "title": "Observed At"
+          },
+          "memory_warning": {
+            "description": "Pod memory is at 80% of its limit or more and has not dropped below\n70% since.",
+            "title": "Memory Warning",
+            "type": "boolean"
           }
         },
         "required": [
@@ -13880,7 +14000,7 @@
                 "type": "array"
               }
             ],
-            "description": "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode.",
+            "description": "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode. With `with_sessions`, each row also carries `live_sessions`.",
             "title": "Items"
           },
           "total": {
@@ -14125,6 +14245,12 @@
               }
             ],
             "title": "Label"
+          },
+          "with_sessions": {
+            "default": false,
+            "description": "Add `live_sessions` {count, worst, ids} to every card: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.",
+            "title": "With Sessions",
+            "type": "boolean"
           },
           "lane_mode": {
             "default": "none",
@@ -18259,6 +18385,16 @@
             "description": "Why this write is being made (audited).",
             "minLength": 1,
             "title": "Reason",
+            "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
             "type": "string"
           }
         },

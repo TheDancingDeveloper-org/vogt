@@ -1754,6 +1754,75 @@ textarea {
   color: var(--activity-errored);
 }
 
+/* A pending decision (WI-1339): the question, folded context, one button per
+   option with the recommended one first, an optional note. Options wrap and,
+   at phone width, each takes the full row so a thumb hits it. */
+.inbox-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.inbox-decision-question {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.inbox-decision-context p {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inbox-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inbox-decision-option {
+  min-height: 44px;
+  padding: 6px 12px;
+}
+
+.inbox-decision-option.recommended {
+  border-color: var(--accent, currentColor);
+  font-weight: 600;
+}
+
+.inbox-decision-recommended {
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.inbox-decision-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inbox-decision-note input {
+  min-height: 36px;
+}
+
+.inbox-decision-withdraw {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 4px 0;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+}
+
+@media (max-width: 768px) {
+  .inbox-decision-option {
+    flex: 1 1 100%;
+  }
+}
+
 .inbox-entry-heading h2 {
   flex: 1 1 240px;
   margin: 0;
@@ -8422,6 +8491,32 @@ textarea {
   }
 }
 
+/* Live sessions on an in-progress card: a dot coloured by the worst session's
+   attention, and the count. A muted `?` is unknown, never "none". */
+.board-card-meta .board-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  --live-tone: var(--fg-muted);
+}
+.board-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live-tone);
+}
+.board-live--unknown .board-live-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--fg-muted);
+}
+.board-live--waiting { --live-tone: var(--activity-waiting); }
+.board-live--done { --live-tone: var(--activity-done); }
+.board-live--warning { --live-tone: var(--activity-warning); }
+.board-live--running { --live-tone: var(--activity-running); }
+.board-live--idle { --live-tone: var(--activity-idle); }
+
 .board-card-meta {
   display: flex;
   flex-wrap: nowrap;
@@ -12358,10 +12453,28 @@ a.vogt-projects-tag:hover {
   white-space: pre;
 }
 
-.oversight-controls { display: flex; align-items: center; gap: 12px; }
+.oversight-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; max-width: 100%; }
+.oversight-groupby { display: inline-flex; max-width: 100%; }
+.oversight-groupby-btn { font-size: 13px; min-width: 0; }
+.oversight-groupby-btn--on { border-color: var(--activity-waiting); font-weight: 600; }
+.oversight-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.oversight-group-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  min-width: 0;
+}
+.oversight-group-title { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.oversight-group-count { font-size: 12px; color: var(--fg-muted); }
 .oversight-controls label { display: flex; align-items: center; gap: 4px; font-size: 13px; }
 .oversight-resources { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
 .oversight-resources--over { color: var(--activity-errored); font-weight: 600; }
+.oversight-memory { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); max-width: 100%; overflow-wrap: anywhere; }
+.oversight-memory--warn { color: var(--activity-warning); font-weight: 600; }
+.oversight-memory-age { color: var(--fg-muted); font-weight: 400; opacity: 0.8; }
 
 .oversight-answers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .oversight-answer { font-size: 12px; text-align: left; overflow-wrap: anywhere; }

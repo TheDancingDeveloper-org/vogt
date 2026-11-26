@@ -3,12 +3,7 @@
 //! A branch belongs to a work item when its name carries that item's
 //! reference. Nothing here reads git or the store.
 
-#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::sync::LazyLock;
-
-pub const DEFAULT_BRANCH_PATTERNS: [&str; 2] =
-    [r"(?i)\bwi-?(?P<n>\d+)\b", r"(?i)\bgh-(?P<forge>\d+)\b"];
-pub const DEFAULT_BRANCH_TEMPLATE: &str = "wi-{number}";
 
 static WI_REF: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)^wi-(\d+)$").unwrap());
@@ -137,6 +132,7 @@ pub fn default_branch_name(work_ref: &str, template: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{DEFAULT_BRANCH_PATTERNS, DEFAULT_BRANCH_TEMPLATE};
 
     #[test]
     fn the_shipped_patterns_bind_the_documented_shapes() {
@@ -231,6 +227,7 @@ mod tests {
         let _ = seen;
     }
 
+    #[test]
     fn a_session_branch_renders_by_ref_shape() {
         assert_eq!(default_branch_name("WI-7", DEFAULT_BRANCH_TEMPLATE), "wi-7");
         assert_eq!(

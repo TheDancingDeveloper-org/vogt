@@ -21,8 +21,8 @@ use crate::application::services::preferences::InboxSavedFilter;
 use crate::application::services::{context_parts, dispatch, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{
-    Clock, CodingSession, DriftProposal, IdFactory, InboxTriage, Moment, Observation, Project,
-    SessionGrant, Sweep, TriageState, WorkItem,
+    Clock, DriftProposal, IdFactory, InboxTriage, Moment, Observation, Project, Sweep, TriageState,
+    WorkItem,
 };
 use crate::decisions::{self, digest_of};
 use crate::errors::VogtError;
@@ -914,7 +914,14 @@ where
                     | decisions::BranchState::Failed
                     | decisions::BranchState::Cancelled
             ) {
-                entries.push(bound_branch_entry(ctx, &overlay, &branch, &ci, &projects));
+                let suspects = crate::application::ci_watch::branch_flaky_suspects(
+                    view,
+                    &overlay.project_id,
+                    &ci,
+                )?;
+                entries.push(bound_branch_entry(
+                    ctx, &overlay, &branch, &ci, &projects, &suspects,
+                ));
             }
             // WI-1334: one entry per hung run; it goes when the run concludes.
             for hung in &ci.hung {
@@ -1381,6 +1388,7 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
     branch: &str,
     ci: &decisions::BranchCi,
     projects: &BTreeMap<String, Project>,
+    suspects: &[(String, String)],
 ) -> Value {
     let project = projects.get(&overlay.project_id);
     let newest = ci
@@ -1447,7 +1455,11 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
             json!({"subject_key": newest.observation.subject_key}),
         ),
         actor: &actors::system_actor(),
-        extra: json!({}),
+        extra: if suspects.is_empty() {
+            json!({})
+        } else {
+            json!({"flaky_suspects": suspects.iter().map(|(reference, _)| reference).collect::<Vec<_>>()})
+        },
     })
 }
 
@@ -2579,17 +2591,6 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, ()> {
     }
     Ok(out)
 }
-
-// The session and grant entry builders need the live engine session list joined
-// with declared sessions. They stay here so the shapes are pinned, and are
-// reached once the engine session join lands. Until then `collect` reports the
-// agent source as unconfigured coverage rather than inventing entries.
-#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
-fn session_shapes(session: &CodingSession, grant: &SessionGrant) -> (String, String) {
-    (session.id.clone(), grant.id.clone())
-}
-
-const _BRANCH_KIND: &str = BRANCH_CONCLUDED_KIND;
 
 #[cfg(test)]
 mod tests {

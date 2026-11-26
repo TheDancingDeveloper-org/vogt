@@ -311,22 +311,68 @@ fn is_main(branch: &str, mains: &[&str]) -> bool {
 }
 
 /// Each simple command on the line, and each simple command a quoted word
-/// carries (`bash -c "git push …"`), so a worker's push is judged inside a
-/// wrapper too.
+/// carries (`bash -c "git push …"`), recursively, so a worker's push is
+/// judged inside nested wrappers too (`bash -c "sh -c '…'"`). Nesting deeper
+/// than [`WORKER_NESTING_LIMIT`] is cut off; the deepest level is still
+/// judged as a plain command.
 fn worker_commands(command: &str) -> Vec<String> {
     let mut out = Vec::new();
+    collect_worker_commands(command, 0, &mut out);
+    out
+}
+
+const WORKER_NESTING_LIMIT: usize = 8;
+
+fn collect_worker_commands(command: &str, depth: usize, out: &mut Vec<String>) {
     for simple in split_commands(command) {
-        for word in command_words(&simple) {
-            out.extend(split_commands(&word));
+        if depth < WORKER_NESTING_LIMIT {
+            if let Some(payload) = worker_wrapped(&command_words(&simple)) {
+                collect_worker_commands(&payload, depth + 1, out);
+            }
+            for word in command_words(&simple) {
+                // A word that is itself the whole simple command adds nothing.
+                if word != simple {
+                    collect_worker_commands(&word, depth + 1, out);
+                }
+            }
         }
         out.push(simple);
     }
-    out
+}
+
+/// The command a wrapper that runs another command carries: `xargs [opts]
+/// cmd …`, `find … -exec|-execdir cmd … ;|+` and `eval word …`, joined back
+/// into one line. `None` for any other command.
+fn worker_wrapped(words: &[String]) -> Option<String> {
+    match words.first().map(|w| base(w)) {
+        Some("xargs") => Some(xargs_command(words).join(" ")),
+        Some("eval") => Some(words[1..].join(" ")),
+        Some("find") => {
+            let payloads: Vec<String> = words
+                .split(|w| w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir")
+                .skip(1)
+                .map(|rest| {
+                    rest.iter()
+                        .take_while(|w| *w != ";" && *w != "\\;" && *w != "+")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect();
+            Some(payloads.join(" ; "))
+        }
+        _ => None,
+    }
 }
 
 /// The worker rule for one simple command (WI-1327): a `git push` must name
 /// only the worker's own branch, and a `gh pr create` is refused when the
 /// project does not let a worker open one. `None` when the command is allowed.
+///
+/// The PR-open rule matches command text, so it is best effort: it catches
+/// the common forms and honest mistakes (wrappers, nested shells, `xargs`,
+/// `find -exec`, `eval`), not a determined agent. Credential-level
+/// enforcement is WI-4831.
 fn worker_branch(
     policy: &SessionPolicy,
     pattern: &str,
@@ -729,31 +775,38 @@ fn worker_ref(branch: &str, pattern: &str, policy: &SessionPolicy) -> Option<Str
 /// The `gh pr <verb>` verb, when this is a pull-request subcommand. Global
 /// flags in front of the subcommand are skipped, so `gh -R o/r pr merge` is
 /// still a merge.
-fn gh_pr(words: &[String]) -> Option<&str> {
-    let mut args = words.iter().map(String::as_str).skip(1);
-    let mut sub = None;
+/// gh flags (global, or persistent on `pr`) that take a value as the next
+/// word when not written `--flag=value`.
+const GH_VALUE_FLAGS: &[&str] = &["-R", "--repo", "--hostname"];
+
+/// The next positional word of a gh argv, skipping flags and the values of
+/// value-taking flags (`-R x`, `--repo x`; `--repo=x` is one word). A `--`
+/// makes the following word positional.
+fn gh_positional<'a, I: Iterator<Item = &'a str>>(args: &mut I) -> Option<&'a str> {
     while let Some(arg) = args.next() {
         if arg == "--" {
-            sub = args.next();
-            break;
+            return args.next();
         }
-        if arg.starts_with("--repo=") {
-            continue;
-        }
-        if arg == "-R" || arg == "--repo" {
+        if GH_VALUE_FLAGS.contains(&arg) {
             args.next();
             continue;
         }
         if arg.starts_with('-') {
             continue;
         }
-        sub = Some(arg);
-        break;
-    }
-    if sub == Some("pr") {
-        return args.find(|a| !a.starts_with('-'));
+        return Some(arg);
     }
     None
+}
+
+/// The `gh pr` verb of a gh argv (`gh [flags] pr [flags] <verb>`), with
+/// `new`, gh's built-in alias, normalised to `create` (WI-1327).
+fn gh_pr(words: &[String]) -> Option<&str> {
+    let mut args = words.iter().map(String::as_str).skip(1);
+    if gh_positional(&mut args)? != "pr" {
+        return None;
+    }
+    gh_positional(&mut args).map(|verb| if verb == "new" { "create" } else { verb })
 }
 
 /// The path a `git commit` reads its message from, when it uses `-F`.
@@ -5551,6 +5604,130 @@ mod tests {
             ..worker_on_1298()
         };
         assert!(!refused(&unstated, "gh pr create --title t", &cwd));
+    }
+
+    #[test]
+    fn a_worker_pr_refusal_covers_the_alias_wrappers_and_nested_shells() {
+        let cwd = cwd();
+        let closed = worker_on_1298();
+        let lines = [
+            "gh pr new --title t",
+            "gh -R o/r pr new -t x",
+            "env A=1 gh pr new -t x",
+            "command gh pr create -t x",
+            "exec gh pr create -t x",
+            "gh -R o/r pr create -t x",
+            "bash -c \"sh -c 'gh pr create -t x'\"",
+            "bash -c \"sh -c 'gh pr new -t x'\"",
+            "bash -c \"sh -c 'git push origin wi-1299-x'\"",
+            "gh pr -R o/r create -t x",
+            "gh pr --repo o/r create -t x",
+            "gh pr --repo=o/r new -t x",
+            "gh pr --repo o/r new -t x",
+            "gh --repo=o/r pr create -t x",
+            "gh --repo o/r pr -R o/r create -t x",
+            "env A=1 gh pr -R o/r new -t x",
+            "bash -c \"sh -c 'gh pr -R o/r create -t x'\"",
+        ];
+        let allowed: Vec<&str> = lines
+            .into_iter()
+            .filter(|line| !refused(&closed, line, &cwd))
+            .collect();
+        assert!(allowed.is_empty(), "not refused: {allowed:?}");
+        assert!(!refused(
+            &closed,
+            "bash -c \"sh -c 'git push origin wi-1298-x'\"",
+            &cwd
+        ));
+    }
+
+    #[test]
+    fn a_worker_pr_refusal_covers_xargs_find_exec_and_eval() {
+        let cwd = cwd();
+        let closed = worker_on_1298();
+        let lines = [
+            "echo x | xargs gh pr create",
+            "echo x | xargs -0 -I{} gh pr create -t {}",
+            "echo x | xargs -I {} gh pr new -t {}",
+            "find . -exec gh pr create \\;",
+            "find . -name x -execdir gh pr create -t x +",
+            "eval \"gh pr create\"",
+            "eval gh pr create -t x",
+            "echo x | xargs git push origin wi-1299-x",
+        ];
+        let allowed: Vec<&str> = lines
+            .into_iter()
+            .filter(|line| !refused(&closed, line, &cwd))
+            .collect();
+        assert!(allowed.is_empty(), "not refused: {allowed:?}");
+        assert!(!refused(
+            &closed,
+            "bash -c \"sh -c 'git push origin wi-1298-x'\"",
+            &cwd
+        ));
+    }
+
+    #[test]
+    fn every_pr_wrapper_form_is_allowed_to_a_session_that_may_open_pull_requests() {
+        let cwd = cwd();
+        let lines = [
+            "gh pr create --title t",
+            "gh pr new --title t",
+            "gh -R o/r pr new -t x",
+            "env A=1 gh pr create -t x",
+            "command gh pr create -t x",
+            "exec gh pr create -t x",
+            "bash -c \"gh pr create -t x\"",
+            "sh -c 'gh pr create -t x'",
+            "bash -c \"sh -c 'gh pr create -t x'\"",
+            "echo x | xargs gh pr create",
+            "echo x | xargs -0 -I{} gh pr create -t {}",
+            "find . -exec gh pr create \\;",
+            "find . -name x -execdir gh pr create -t x +",
+            "eval \"gh pr create\"",
+            "eval gh pr create -t x",
+        ];
+        let sessions = [
+            (
+                "open_pr_allowed=Some(true)",
+                SessionPolicy {
+                    open_pr_allowed: Some(true),
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "open_pr_allowed=None",
+                SessionPolicy {
+                    open_pr_allowed: None,
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "oversight",
+                SessionPolicy {
+                    session_role: Some("oversight".into()),
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "role None",
+                SessionPolicy {
+                    session_role: None,
+                    ..worker_on_1298()
+                },
+            ),
+        ];
+        for (name, policy) in &sessions {
+            let wrongly_refused: Vec<&str> = lines
+                .iter()
+                .copied()
+                .filter(|line| refused(policy, line, &cwd))
+                .collect();
+            assert!(
+                wrongly_refused.is_empty(),
+                "{name}: refused {wrongly_refused:?}"
+            );
+        }
     }
 
     #[test]

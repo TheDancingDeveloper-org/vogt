@@ -6,11 +6,17 @@
 //! parent's status unless it sets its own, which is how `InvalidParams` is 422
 //! while every other `InvalidRequest` is 400.
 
-#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::fmt;
 
 /// One deliberate failure. The string is the message, `str(exc)` in Python.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "AlreadyInitialized, ImportParityRefused and MigrationLocked keep the Python error table; nothing constructs them yet"
+    )
+)]
 pub enum VogtError {
     NotInitialized(String),
     AlreadyInitialized(String),
@@ -39,6 +45,10 @@ pub enum VogtError {
     },
     EngineOnly(String),
     InvalidRequest(String),
+    /// A parameter-validation failure (`invalid_request`, 400) that carries the
+    /// structured report beside its text, so the transports read the report off
+    /// the error itself rather than from ambient state (WI-4620).
+    InvalidArguments(Box<ValidationReport>),
     InstallClosed(String),
     LoginThrottled(String),
     InvalidCursor(String),
@@ -63,6 +73,8 @@ pub enum VogtError {
     InvalidSnooze(String),
     MissingReason(String),
     InvalidParams(String),
+    /// A start's model is one the project or the template will not run (WI-1590).
+    PolicyRefused(String),
     MigrationError(String),
     MigrationLocked(String),
     /// SQLite reported the database busy or locked past its busy timeout.
@@ -158,6 +170,7 @@ impl VogtError {
     pub fn message(&self) -> &str {
         match self {
             Self::Escalated { message, .. } => message,
+            Self::InvalidArguments(report) => &report.text,
             Self::NotInitialized(m)
             | Self::AlreadyInitialized(m)
             | Self::NotFound(m)
@@ -196,6 +209,7 @@ impl VogtError {
             | Self::InvalidSnooze(m)
             | Self::MissingReason(m)
             | Self::InvalidParams(m)
+            | Self::PolicyRefused(m)
             | Self::MigrationError(m)
             | Self::NotImplemented(m)
             | Self::MigrationLocked(m)
@@ -231,7 +245,7 @@ impl VogtError {
             Self::ReportRefused(_) => "report_refused",
             Self::PersonRequired(_) | Self::Escalated { .. } => "person_required",
             Self::EngineOnly(_) => "engine_only",
-            Self::InvalidRequest(_) => "invalid_request",
+            Self::InvalidRequest(_) | Self::InvalidArguments(_) => "invalid_request",
             Self::InstallClosed(_) => "install_closed",
             Self::LoginThrottled(_) => "login_throttled",
             Self::InvalidCursor(_) => "invalid_cursor",
@@ -256,6 +270,7 @@ impl VogtError {
             Self::InvalidSnooze(_) => "invalid_snooze",
             Self::MissingReason(_) => "missing_reason",
             Self::InvalidParams(_) => "invalid_params",
+            Self::PolicyRefused(_) => "policy_refused",
             Self::MigrationError(_) => "migration_error",
             Self::MigrationLocked(_) => "migration_locked",
             Self::StorageBusy(_) => "storage_busy",
@@ -314,6 +329,7 @@ impl VogtError {
             | Self::Escalated { .. }
             | Self::EngineOnly(_) => 403,
             Self::InvalidRequest(_)
+            | Self::InvalidArguments(_)
             | Self::InvalidCursor(_)
             | Self::ForgeAccountsNotConfigured(_)
             | Self::LinkRefused(_)
@@ -328,7 +344,7 @@ impl VogtError {
             | Self::GitHubUnavailable(_)
             | Self::PeerUnavailable { .. }
             | Self::ForgejoUnavailable(_) => 502,
-            Self::InvalidParams(_) => 422,
+            Self::InvalidParams(_) | Self::PolicyRefused(_) => 422,
             Self::MigrationError(_) => 500,
             Self::MigrationLocked(_) | Self::StorageBusy(_) | Self::GitHubRateLimited(_) => 503,
             Self::TransitionRejected { .. } => 409,
@@ -341,6 +357,7 @@ impl VogtError {
     }
 
     /// The body `adapters/http/app.py` writes for a `VogtError`.
+    #[cfg(test)]
     pub fn http_body(&self) -> String {
         serde_json::json!({
             "error": {"code": self.code(), "message": self.message()}
@@ -379,7 +396,7 @@ impl Loc {
 /// One rejected field, in the shape pydantic's `error` dict carries and
 /// FastAPI's 422 `detail` repeats: where, the error code, the message, and the
 /// value that was refused.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldError {
     pub loc: Vec<Loc>,
     pub error_type: String,
@@ -412,41 +429,26 @@ impl FieldError {
 
 /// A validation failure as data. `text` is the CLI message, unchanged. `errors`
 /// is what the HTTP and MCP renderers read, so neither has to parse that text.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReport {
     pub text: String,
     pub errors: Vec<FieldError>,
 }
 
-thread_local! {
-    static VALIDATION: std::cell::RefCell<Option<ValidationReport>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Remember the report for the validation error that is about to be returned.
-///
-/// `VogtError::InvalidRequest` carries only a string, and twenty-six sites build
-/// one, so the structured half travels beside it rather than inside it. The
-/// validator sets it and the transport reads it in the same call.
-pub fn record_validation(report: ValidationReport) {
-    VALIDATION.with(|slot| *slot.borrow_mut() = Some(report));
-}
-
-/// The report recorded for this error, if it is the validation failure just
-/// produced. A mismatch means the slot holds an older failure, and reading it
-/// would describe the wrong request, so it is dropped instead.
-pub fn take_validation(error: &VogtError) -> Option<ValidationReport> {
-    let VogtError::InvalidRequest(message) = error else {
-        return None;
-    };
-    VALIDATION.with(|slot| match slot.borrow_mut().take() {
-        Some(report) if report.text == *message => Some(report),
-        _ => None,
-    })
+impl VogtError {
+    /// The structured report a validation failure carries, if this is one. It
+    /// travels in the error, so it cannot be mistaken for another request's.
+    pub fn validation_report(&self) -> Option<&ValidationReport> {
+        match self {
+            Self::InvalidArguments(report) => Some(report),
+            _ => None,
+        }
+    }
 }
 
 /// Every `(code, http_status)` pair, in the order `errors.py` declares them.
 /// The base `VogtError` (`error`, 500) is never raised on its own.
+#[cfg(test)]
 pub fn error_table() -> &'static [(&'static str, u16)] {
     &[
         ("not_initialized", 409),
@@ -487,6 +489,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("invalid_snooze", 400),
         ("missing_reason", 400),
         ("invalid_params", 422),
+        ("policy_refused", 422),
         ("migration_error", 500),
         ("migration_locked", 503),
         ("engine_unavailable", 502),
@@ -578,6 +581,7 @@ mod tests {
             "invalid_snooze" => VogtError::InvalidSnooze(message),
             "missing_reason" => VogtError::MissingReason(message),
             "invalid_params" => VogtError::InvalidParams(message),
+            "policy_refused" => VogtError::PolicyRefused(message),
             "migration_error" => VogtError::MigrationError(message),
             "migration_locked" => VogtError::MigrationLocked(message),
             "engine_unavailable" => VogtError::EngineUnavailable(message),
@@ -688,7 +692,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 49);
+        assert_eq!(error_table().len(), 50);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
