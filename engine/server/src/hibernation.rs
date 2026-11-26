@@ -149,6 +149,11 @@ pub struct Record {
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The estate-admin tier this session was granted, when it was
+    /// (WI-4814): `estate_admin`, kept on the record so a wake keeps it.
+    /// Never inherited by a session this one starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
@@ -273,6 +278,7 @@ impl Record {
             budget_hard_done: false,
             budget_session_secs: 0,
             role: SessionRole::Worker,
+            tier: None,
             work_item: None,
             supervisor: None,
             wake_on: Vec::new(),
