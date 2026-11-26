@@ -804,6 +804,19 @@ jobs:
           shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh
           bash engine/deploy/tests/session-entrypoint.sh
 
+      - name: vogt-lsp (shellcheck and contract test)
+        if: always() && !cancelled() && needs.changes.outputs.session_entrypoint == 'true'
+        run: |
+          shellcheck engine/deploy/vogt-lsp.sh engine/deploy/tests/vogt-lsp.sh
+          bash engine/deploy/tests/vogt-lsp.sh
+
+      # The tailnet ssh/curl helpers baked into the session pod image (WI-4716).
+      - name: tailnet-connect (shellcheck and contract test)
+        if: always() && !cancelled() && needs.changes.outputs.session_entrypoint == 'true'
+        run: |
+          shellcheck engine/deploy/pod/vogt-tailnet-connect engine/deploy/pod/tcurl engine/deploy/tests/tailnet-connect.sh
+          bash engine/deploy/tests/tailnet-connect.sh
+
       # A session-agent-only PR runs its own tests directly, rather than
       # relying on it happening to be covered by a workspace-wide run that a
       # different path was what requested (WI-3888).

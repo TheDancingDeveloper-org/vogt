@@ -1,0 +1,62 @@
+name: integrate-linear
+
+# Backstop for the linear-history rule on `main` (WI-1315). `main` is
+# rebase-only, so a pull request whose range holds a merge commit cannot land
+# ("This branch can't be rebased"). `graft-mirror pr-batch` exports one commit
+# per land and `work.land` refuses merges at the source; this job catches
+# whatever slips past both, before review time is spent.
+#
+# It covers the heads that carry integrated work: `graft/batch-*` (the batch
+# pull request) and `integrate/*` (the older integration branch). Any other
+# head skips the job; a skipped job reports as passing, so the check is safe
+# to require later. Making it required on `main` is the operator's call.
+#
+# Separate from ci.yml on purpose: a push trigger there would run the whole
+# classify/matrix on every integration push. This job is one checkout and one
+# `git rev-list`.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["integrate/**", "graft/batch-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrate-linear-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrate-linear:
+    # On pull_request only integrate/* and graft/batch-* heads are checked; a
+    # push or manual run is already limited by its branch filter.
+    if: >-
+      github.event_name != 'pull_request' ||
+      startsWith(github.head_ref, 'integrate/') ||
+      startsWith(github.head_ref, 'graft/batch-')
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # The PR head itself, not the synthetic merge ref, which would
+          # always contain a merge commit. Full history for the range.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: no merge commits in origin/main..HEAD
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          merges=$(git rev-list --merges origin/main..HEAD)
+          if [ -n "$merges" ]; then
+            echo "::error::origin/main..HEAD contains merge commits; main is rebase-only. Rebase onto origin/main instead of merging."
+            while read -r sha; do
+              echo "merge commit: $sha $(git log -1 --format=%s "$sha")"
+            done <<<"$merges"
+            exit 1
+          fi
+          echo "origin/main..HEAD is linear"

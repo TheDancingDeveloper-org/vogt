@@ -105,6 +105,9 @@ pub struct AppState {
     pub chats: Option<Arc<ChatRuntime>>,
     /// Cached workspace tree sizes for `GET /api/workspaces` (WI-1340).
     pub workspace_sizes: Arc<crate::workspaces::WorkspaceSizes>,
+    /// The nightly sweep for orphaned worktree build output (WI-1773): its
+    /// mode and the last report, for `GET /api/status`.
+    pub worktree_sweep: Arc<crate::worktree_sweep::WorktreeSweepState>,
     /// The process-lifetime background tasks spawned at boot (WI-4650).
     pub boot_tasks: Arc<crate::boot_tasks::BootTasks>,
 }
@@ -274,6 +277,9 @@ async fn build_state(cfg: Config) -> Arc<AppState> {
         hibernation,
         chats,
         workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::new(workspace_size_ttl)),
+        worktree_sweep: Arc::new(crate::worktree_sweep::WorktreeSweepState::new(
+            crate::worktree_sweep::SweepMode::from_env(),
+        )),
         boot_tasks: Default::default(),
     })
 }
@@ -356,6 +362,8 @@ fn spawn_background_tasks(state: &Arc<AppState>) {
     // daily schedule, so `history.db` and the raw `session-logs/` cannot
     // grow without bound. A no-op when history is disabled or the horizon is 0.
     spawn_history_retention_sweeper(Arc::clone(state));
+    crate::worktree_sweep::spawn_nightly_sweep(Arc::clone(state));
+    crate::graft_token_sweep::spawn_sweep(Arc::clone(state));
     // Background task: bound what stopped sessions keep in memory (WI-4290).
     spawn_stopped_session_reaper(Arc::clone(state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(state));
@@ -681,6 +689,11 @@ fn broker_routes() -> Router<Arc<AppState>> {
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
         .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
+        // A forge token for `git` from a `git:<host>` grant (WI-1331).
+        .route(
+            secret_broker::GIT_CREDENTIAL_ROUTE,
+            get(secret_broker::git_credential),
+        )
 }
 
 fn ws_routes() -> Router<Arc<AppState>> {

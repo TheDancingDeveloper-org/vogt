@@ -41,6 +41,17 @@ with open(os.environ["SHIM_OUT"], "w") as fh:
     json.dump({"argv": sys.argv, "env": dict(os.environ)}, fh)
 """
 
+BROKER_SHIM = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["BROKER_OUT"], "w") as fh:
+    json.dump(sys.argv, fh)
+if sys.argv[1:] != ["fetch", os.environ["BROKER_VAR"]]:
+    sys.exit(1)
+if os.environ.get("BROKER_FAIL") == "1":
+    sys.exit(1)
+sys.stdout.write(os.environ["BROKER_VALUE"] + "\\n")
+"""
+
 
 def shim_dir(tmp_path: Path, *names: str) -> Path:
     bindir = tmp_path / "bin"
@@ -58,6 +69,12 @@ def run(
     out = tmp_path / "shim.json"
     if out.exists():
         out.unlink()
+    if "BROKER_OUT" in env and "vogt-agent-auth" not in {
+        p.name for p in bindir.iterdir()
+    }:
+        broker = bindir / "vogt-agent-auth"
+        broker.write_text(BROKER_SHIM, encoding="utf-8")
+        broker.chmod(0o755)
     full_env = {
         "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
         "HOME": str(tmp_path),
@@ -1313,7 +1330,9 @@ def test_k8s_is_read_only_and_keeps_the_kubeconfig_out_of_argv(
     assert rec is not None
     argv = rec["argv"]
     assert argv[1] == "--read-only"
-    assert argv[2] == "--kubeconfig"
+    assert argv[2:4] == ["--toolsets", "core"]
+    assert argv[4] == "--kubeconfig"
+    assert argv[5] == rec["path"]
     assert kubeconfig.strip() not in " ".join(argv)
     assert rec["mode"] == 0o600
     assert rec["dirmode"] == 0o700
@@ -1329,3 +1348,98 @@ def test_k8s_missing_kubeconfig_refuses(tmp_path: Path) -> None:
     proc, rec = run(READONLY, ["k8s"], {}, tmp_path, bindir)
     assert proc.returncode == 64
     assert rec is None
+
+
+@pytest.mark.parametrize("encoded", (False, True))
+def test_k8s_fetches_an_ondemand_kubeconfig_into_a_0600_file(
+    tmp_path: Path, encoded: bool
+) -> None:
+    """A manifest `ondemand` line never exports the value at launch, so the
+    wrapper fetches it through the secret broker at spawn and still keeps it
+    out of argv and out of the process environment."""
+    import base64
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "kubernetes-mcp-server"
+    shim.write_text(K8S_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    kubeconfig = "apiVersion: v1\nclusters: []\nkind: Config\n"
+    value = base64.b64encode(kubeconfig.encode()).decode() if encoded else kubeconfig
+    broker_out = tmp_path / "broker.json"
+    proc, rec = run(
+        READONLY,
+        ["k8s"],
+        {
+            "AGENT_AUTH_ONDEMAND": "K8S_AGENT_READONLY_KUBECONFIG",
+            "VOGT_AGENT_AUTH": str(bindir / "vogt-agent-auth"),
+            "BROKER_OUT": str(broker_out),
+            "BROKER_VAR": "K8S_AGENT_READONLY_KUBECONFIG",
+            "BROKER_VALUE": value,
+            "TMPDIR": str(tmp_path),
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    assert rec["mode"] == 0o600
+    assert rec["dirmode"] == 0o700
+    assert rec["content"].strip() == kubeconfig.strip()
+    assert "K8S_AGENT_READONLY_KUBECONFIG" not in rec["env"]
+    assert kubeconfig.strip() not in " ".join(rec["argv"])
+    assert json.loads(broker_out.read_text(encoding="utf-8")) == [
+        str(bindir / "vogt-agent-auth"),
+        "fetch",
+        "K8S_AGENT_READONLY_KUBECONFIG",
+    ]
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"K8S_AGENT_READONLY_KUBECONFIG": "kubeconfig-value"},
+        {"AGENT_AUTH_ONDEMAND": "K8S_AGENT_READONLY_KUBECONFIG"},
+    ],
+    ids=["exported", "ondemand"],
+)
+def test_bootstrap_registers_k8s_ro_for_exported_and_ondemand(
+    tmp_path: Path, extra: dict[str, str]
+) -> None:
+    import tomllib
+
+    _shims(tmp_path, ("codex", "kubernetes-mcp-server"))
+    wrapper = tmp_path / "readonly-mcp"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    proc = _codex_bootstrap(
+        tmp_path, {"VOGT_READONLY_MCP_WRAPPER": str(wrapper), **extra}
+    )
+    assert proc.returncode == 0, proc.stderr
+    config = tmp_path / "codex" / "config.toml"
+    servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
+    entry = servers["k8s-ro"]
+    assert entry["command"] == str(wrapper)
+    assert entry["args"] == ["k8s"]
+    assert "K8S_AGENT_READONLY_KUBECONFIG" in entry["env_vars"]
+    for var in (
+        "VOGT_ENGINE_BROKER_URL",
+        "VOGT_ENGINE_URL",
+        "VOGT_ENGINE_BROKER_TOKEN_FILE",
+        "VOGT_SESSION_TOKEN_FILE",
+        "VOGT_ENGINE_EXTRA_CA_FILE",
+        "ENGINE_AGENT_AUTH_EXTRA_CA_FILE",
+    ):
+        assert var in entry["env_vars"], var
+
+    # A second run replaces the table in place rather than duplicating it.
+    first = config.read_text(encoding="utf-8")
+    again = _codex_bootstrap(
+        tmp_path, {"VOGT_READONLY_MCP_WRAPPER": str(wrapper), **extra}
+    )
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8") == first

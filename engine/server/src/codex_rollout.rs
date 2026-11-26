@@ -45,16 +45,87 @@ pub(crate) enum RolloutEvent {
         turn_id: Option<String>,
         reason: String,
     },
+    /// A tool call was issued (`response_item` `function_call`); `empty` when
+    /// its arguments are absent, `""` or an empty object (WI-3402).
+    ToolCall {
+        call_id: String,
+        empty: bool,
+    },
+    /// A tool call's result (`function_call_output`); `missing_arg` when the
+    /// output is a missing-required-argument error (WI-3402).
+    ToolOutput {
+        call_id: String,
+        missing_arg: bool,
+    },
+}
+
+/// Error texts a tool gives for a call that lacks a required argument, as the
+/// brief's rollouts show them: Codex's own parser ("failed to parse function
+/// arguments: missing field `cmd`") and the MCP servers ("needs argument
+/// 'service'", "missing required parameter 'ref'").
+const MISSING_ARG_MARKERS: [&str; 4] = [
+    "missing field",
+    "needs argument",
+    "missing required parameter",
+    "missing required argument",
+];
+
+fn is_missing_arg_error(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    MISSING_ARG_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// A `function_call` / `function_call_output` line, when `payload` is one.
+fn parse_tool_item(entry: &Value) -> Option<RolloutEvent> {
+    let payload = entry.get("payload")?;
+    let call_id = payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    match payload.get("type").and_then(Value::as_str)? {
+        "function_call" => {
+            let empty = match payload.get("arguments") {
+                None | Some(Value::Null) => true,
+                Some(Value::String(a)) => {
+                    let a = a.trim();
+                    a.is_empty()
+                        || serde_json::from_str::<Value>(a)
+                            .is_ok_and(|v| v.as_object().is_some_and(|o| o.is_empty()))
+                }
+                Some(Value::Object(o)) => o.is_empty(),
+                Some(_) => false,
+            };
+            Some(RolloutEvent::ToolCall { call_id, empty })
+        }
+        "function_call_output" => {
+            let out = payload.get("output");
+            let text = match out {
+                Some(Value::String(t)) => t.as_str(),
+                Some(o) => o.get("content").and_then(Value::as_str).unwrap_or(""),
+                None => "",
+            };
+            Some(RolloutEvent::ToolOutput {
+                call_id,
+                missing_arg: is_missing_arg_error(text),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// The rollout event a JSONL line records, if it records one this module
 /// reads. Anything else, malformed lines included, is `None`.
 pub(crate) fn parse_line(line: &str) -> Option<RolloutEvent> {
     // Cheap pre-filter: most rollout lines are responses and tool output.
-    if !line.contains("\"event_msg\"") {
+    let tool = line.contains("\"function_call");
+    if !tool && !line.contains("\"event_msg\"") {
         return None;
     }
     let entry: Value = serde_json::from_str(line.trim()).ok()?;
+    if tool && entry.get("type").and_then(Value::as_str) == Some("response_item") {
+        return parse_tool_item(&entry);
+    }
     if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
     }
@@ -139,6 +210,32 @@ pub(crate) struct RolloutTurns {
     screen_ready: bool,
     last_ready: Option<String>,
     last_done: Option<String>,
+    /// A turn ended while a goal was active, so its `ready` was held back; it
+    /// is announced if the goal ends with the session still at rest.
+    held_ready: bool,
+    /// The turn id of a held turn whose final message said done; announced
+    /// with the held `ready` when the goal ends with the session at rest.
+    held_done: Option<String>,
+    /// Calls issued and not yet answered, by call id: whether each had empty
+    /// arguments (WI-3402). Bounded; a flood clears it.
+    pending_calls: std::collections::HashMap<String, bool>,
+    /// Consecutive empty-argument calls that failed on a missing argument.
+    empty_arg_streak: u32,
+    /// The nudge was sent; the next run of three reports blocked.
+    empty_arg_nudged: bool,
+}
+
+/// Consecutive empty-argument failures that raise the guard (WI-3402).
+pub(crate) const EMPTY_ARG_LIMIT: u32 = 3;
+const MAX_PENDING_CALLS: usize = 256;
+
+/// What the empty-argument guard asks for (WI-3402).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyArgs {
+    /// First run of three: nudge the session once.
+    Nudge,
+    /// A second run of three after the nudge: needs an overseer.
+    Block,
 }
 
 /// What applying a batch of rollout events asks the caller to publish.
@@ -148,6 +245,8 @@ pub(crate) struct Outcome {
     pub done: bool,
     /// Why the last turn in the batch failed or was aborted, if it did.
     pub failed: Option<String>,
+    /// The empty-argument guard fired in this batch (WI-3402).
+    pub empty_args: Option<EmptyArgs>,
 }
 
 impl RolloutTurns {
@@ -188,20 +287,86 @@ impl RolloutTurns {
                     self.running = false;
                     out.failed = None;
                     self.end_turn(Some(turn_id), swallow, &mut swallowed, &mut out);
-                    if *done && self.last_done.as_deref() != Some(turn_id) {
-                        self.last_done = Some(turn_id.clone());
-                        // A short turn can end before the first poll reads the
-                        // rollout; that is still this session's turn, not
-                        // history, so only turns that ended before it began
-                        // are held back.
-                        out.done = !replay || completed_at.is_some_and(|t| t >= since);
+                    // A short turn can end before the first poll reads the
+                    // rollout; that is still this session's turn, not history,
+                    // so only turns that ended before it began are held back.
+                    let live = !replay || completed_at.is_some_and(|t| t >= since);
+                    if self.goal_active {
+                        // An active goal continues itself: this turn ending is
+                        // not the session coming to rest, so neither ready nor
+                        // done now. Both wait for the goal to end.
+                        self.held_ready |= std::mem::take(&mut out.ready);
+                        if *done && live && self.last_done.as_deref() != Some(turn_id) {
+                            self.held_done = Some(turn_id.clone());
+                        }
+                    } else {
+                        // A turn ending with no goal supersedes anything held
+                        // for an earlier goal (it ended while a turn ran).
+                        self.held_ready = false;
+                        self.held_done = None;
+                        if *done && self.last_done.as_deref() != Some(turn_id) {
+                            self.last_done = Some(turn_id.clone());
+                            out.done = live;
+                        }
                     }
                 }
-                RolloutEvent::Goal { active } => self.goal_active = *active,
+                RolloutEvent::Goal { active } => {
+                    self.goal_active = *active;
+                    if !*active && !self.running {
+                        if std::mem::take(&mut self.held_ready) {
+                            out.ready = true;
+                        }
+                        if let Some(id) = self.held_done.take() {
+                            self.last_done = Some(id);
+                            out.done = true;
+                        }
+                    }
+                }
+                RolloutEvent::ToolCall { call_id, empty } => {
+                    if self.pending_calls.len() >= MAX_PENDING_CALLS {
+                        self.pending_calls.clear();
+                    }
+                    self.pending_calls.insert(call_id.clone(), *empty);
+                }
+                RolloutEvent::ToolOutput {
+                    call_id,
+                    missing_arg,
+                } => {
+                    // An output with no recorded call (a reset tail) is not
+                    // known to be empty-argument, so it breaks the run.
+                    let empty = self.pending_calls.remove(call_id).unwrap_or(false);
+                    if empty && *missing_arg {
+                        self.empty_arg_streak += 1;
+                        if self.empty_arg_streak == EMPTY_ARG_LIMIT {
+                            self.empty_arg_streak = 0;
+                            // History replayed at an engine restart is not a
+                            // live loop: it settles state but raises nothing.
+                            if !replay {
+                                out.empty_args = Some(if self.empty_arg_nudged {
+                                    EmptyArgs::Block
+                                } else {
+                                    self.empty_arg_nudged = true;
+                                    EmptyArgs::Nudge
+                                });
+                            }
+                        }
+                    } else {
+                        self.empty_arg_streak = 0;
+                    }
+                }
                 RolloutEvent::Failed { turn_id, reason } => {
                     self.running = false;
                     out.failed = Some(reason.clone());
                     self.end_turn(turn_id.as_ref(), swallow, &mut swallowed, &mut out);
+                    // Like a completed turn: under an active goal the session
+                    // is not at rest, so the ready waits for the goal to end;
+                    // otherwise it supersedes anything held.
+                    if self.goal_active {
+                        self.held_ready |= std::mem::take(&mut out.ready);
+                    } else {
+                        self.held_ready = false;
+                        self.held_done = None;
+                    }
                 }
             }
         }
@@ -256,9 +421,34 @@ impl RolloutTurns {
     }
 }
 
+const EMPTY_ARGS_NUDGE: &str = "Your last tool calls had empty arguments and failed. Make one \
+tool call at a time, with the required arguments filled in; if a call fails with a \
+missing-argument error, read it and fix the argument instead of repeating the call.";
+
+/// Why a session whose tool calls keep arriving with no arguments needs an
+/// overseer (WI-3402).
+fn empty_args_report() -> vogt_engine_contract::BlockedReport {
+    vogt_engine_contract::BlockedReport {
+        reason: "tool calls keep arriving with empty arguments and failing on a missing \
+                 argument, even after a nudge"
+            .to_string(),
+        items: vec![
+            "check the model route (parallel tool calls can lose their arguments), then \
+             restart the session or stop it"
+                .to_string(),
+        ],
+        since: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+        needs: vogt_engine_contract::EscalationNeeds::Overseer,
+        boundary: vogt_engine_contract::EscalationBoundary::Other,
+        ..Default::default()
+    }
+}
+
 /// Publish what a batch of rollout events says about `session`.
 pub(crate) fn apply(
-    session: &Session,
+    session: &std::sync::Arc<Session>,
     registry: &SessionRegistry,
     bus: &crate::events::EventBus,
     events: &[RolloutEvent],
@@ -273,6 +463,29 @@ pub(crate) fn apply(
             reason = %reason,
             "codex turn ended without finishing; session at rest"
         );
+    }
+    match out.empty_args {
+        Some(EmptyArgs::Nudge) => {
+            tracing::warn!(
+                session = %session.id,
+                event = "codex.empty_args_nudge",
+                "three tool calls in a row had empty arguments and failed; nudging once"
+            );
+            let session = std::sync::Arc::clone(session);
+            tokio::spawn(async move {
+                let _ = crate::autopilot::type_line(&session, EMPTY_ARGS_NUDGE, "empty-args nudge")
+                    .await;
+            });
+        }
+        Some(EmptyArgs::Block) => {
+            tracing::warn!(
+                session = %session.id,
+                event = "codex.empty_args_blocked",
+                "empty-argument tool failures continued after the nudge; reporting blocked"
+            );
+            let _ = session.set_blocked(Some(empty_args_report()), bus);
+        }
+        None => {}
     }
     if out.ready {
         session.announce_rollout_ready(bus);
@@ -374,7 +587,8 @@ mod tests {
             Outcome {
                 ready: true,
                 done: false,
-                failed: None
+                failed: None,
+                ..Default::default()
             }
         );
         // The same line read again (a reset tail) is not a second turn.
@@ -396,7 +610,8 @@ mod tests {
             Outcome {
                 ready: true,
                 done: true,
-                failed: None
+                failed: None,
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -410,9 +625,93 @@ mod tests {
             Outcome {
                 ready: true,
                 done: false,
-                failed: None
+                failed: None,
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn an_active_goal_holds_ready_and_done_until_it_ends() {
+        let goal = |active| RolloutEvent::Goal { active };
+        let complete = |t: &str, done| RolloutEvent::Complete {
+            turn_id: t.into(),
+            done,
+            completed_at: None,
+        };
+        let mut turns = RolloutTurns::default();
+        assert_eq!(
+            turns.apply(&[goal(true), complete("a", true)], false, 0),
+            Outcome::default()
+        );
+        assert_eq!(
+            turns.apply(&[goal(false)], false, 0),
+            Outcome {
+                ready: true,
+                done: true,
+                failed: None,
+                ..Default::default()
+            }
+        );
+        // Nothing further is held, and the marker fires once.
+        assert_eq!(turns.apply(&[goal(false)], false, 0), Outcome::default());
+        assert_eq!(
+            turns.apply(&[complete("a", true), goal(true), goal(false)], false, 0),
+            Outcome::default()
+        );
+    }
+
+    #[test]
+    fn a_goal_that_ends_mid_turn_leaves_nothing_held_for_the_next_goal() {
+        let goal = |active| RolloutEvent::Goal { active };
+        let started = |t: &str| RolloutEvent::Started { turn_id: t.into() };
+        let complete = |t: &str, done| RolloutEvent::Complete {
+            turn_id: t.into(),
+            done,
+            completed_at: None,
+        };
+        let mut turns = RolloutTurns::default();
+        // Goal on, turn A completes (held), the next turn runs, the goal ends
+        // while it runs, and B completes normally: one ready, and B's done.
+        assert_eq!(
+            turns.apply(&[goal(true), complete("a", true), started("b")], false, 0),
+            Outcome::default()
+        );
+        assert_eq!(turns.apply(&[goal(false)], false, 0), Outcome::default());
+        assert_eq!(
+            turns.apply(&[complete("b", false)], false, 0),
+            Outcome {
+                ready: true,
+                done: false,
+                failed: None,
+                ..Default::default()
+            }
+        );
+        // A later goal that starts and ends at rest announces nothing.
+        assert_eq!(
+            turns.apply(&[goal(true), goal(false)], false, 0),
+            Outcome::default()
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_under_an_active_goal_is_held_like_a_completed_one() {
+        let goal = |active| RolloutEvent::Goal { active };
+        let mut turns = RolloutTurns::default();
+        let out = turns.apply(
+            &[
+                goal(true),
+                RolloutEvent::Failed {
+                    turn_id: Some("a".into()),
+                    reason: "429".into(),
+                },
+            ],
+            false,
+            0,
+        );
+        assert!(!out.ready && !out.done);
+        let out = turns.apply(&[goal(false)], false, 0);
+        assert!(out.ready && !out.done);
     }
 
     #[test]
@@ -475,7 +774,8 @@ mod tests {
             Outcome {
                 ready: true,
                 done: false,
-                failed: None
+                failed: None,
+                ..Default::default()
             }
         );
     }
@@ -571,7 +871,8 @@ mod tests {
             Outcome {
                 ready: true,
                 done: false,
-                failed: Some("429 Too Many Requests".into())
+                failed: Some("429 Too Many Requests".into()),
+                ..Default::default()
             }
         );
 
@@ -580,5 +881,143 @@ mod tests {
         assert!(turns.apply(&[aborted.unwrap()], false, 0).ready);
         assert!(!turns.running);
         assert!(turns.at_rest_since().is_some());
+    }
+
+    // Shapes: `response_item` / `function_call` with `arguments` a JSON string
+    // and a `call_id` (the fixture in economics.rs tests), and
+    // `function_call_output` with `call_id` and a string `output`
+    // (core session_economics tests). Error texts are from WI-3395.
+    fn item(payload: Value) -> String {
+        serde_json::json!({"timestamp": "t", "type": "response_item", "payload": payload})
+            .to_string()
+    }
+    fn call(id: &str, args: &str) -> RolloutEvent {
+        parse_line(&item(serde_json::json!({
+            "type": "function_call", "name": "exec_command", "arguments": args, "call_id": id
+        })))
+        .unwrap()
+    }
+    fn output(id: &str, text: &str) -> RolloutEvent {
+        parse_line(&item(serde_json::json!({
+            "type": "function_call_output", "call_id": id, "output": text
+        })))
+        .unwrap()
+    }
+    const MISSING: &str = "failed to parse function arguments: missing field `cmd`";
+
+    /// One failing empty call and its output, as two events.
+    fn failing(id: &str) -> [RolloutEvent; 2] {
+        [call(id, "{}"), output(id, MISSING)]
+    }
+
+    #[test]
+    fn reads_tool_calls_and_missing_argument_outputs() {
+        assert_eq!(
+            call("c1", "{}"),
+            RolloutEvent::ToolCall {
+                call_id: "c1".into(),
+                empty: true
+            }
+        );
+        assert_eq!(
+            call("c2", r#"{"cmd":"ls"}"#),
+            RolloutEvent::ToolCall {
+                call_id: "c2".into(),
+                empty: false
+            }
+        );
+        assert_eq!(
+            output("c1", "work_get: missing required parameter 'ref'"),
+            RolloutEvent::ToolOutput {
+                call_id: "c1".into(),
+                missing_arg: true
+            }
+        );
+        assert_eq!(
+            output("c1", "ok"),
+            RolloutEvent::ToolOutput {
+                call_id: "c1".into(),
+                missing_arg: false
+            }
+        );
+    }
+
+    #[test]
+    fn three_empty_argument_failures_nudge_once_then_block_after_three_more() {
+        let mut turns = RolloutTurns::default();
+        let mut events = Vec::new();
+        for n in 0..2 {
+            events.extend(failing(&format!("a{n}")));
+        }
+        assert_eq!(turns.apply(&events, false, 0).empty_args, None);
+        assert_eq!(
+            turns.apply(&failing("a2"), false, 0).empty_args,
+            Some(EmptyArgs::Nudge)
+        );
+        // Further failures in the same run do not raise it on every call.
+        assert_eq!(turns.apply(&failing("a3"), false, 0).empty_args, None);
+        assert_eq!(turns.apply(&failing("a4"), false, 0).empty_args, None);
+        // The next run of three, after the nudge, blocks.
+        assert_eq!(
+            turns.apply(&failing("a5"), false, 0).empty_args,
+            Some(EmptyArgs::Block)
+        );
+        assert_eq!(turns.apply(&failing("a6"), false, 0).empty_args, None);
+    }
+
+    #[test]
+    fn a_success_or_a_filled_call_resets_the_count() {
+        let mut turns = RolloutTurns::default();
+        let mut events = Vec::new();
+        events.extend(failing("a"));
+        events.extend(failing("b"));
+        events.extend([call("ok", r#"{"cmd":"ls"}"#), output("ok", "file.txt")]);
+        events.extend(failing("c"));
+        events.extend(failing("d"));
+        assert_eq!(turns.apply(&events, false, 0).empty_args, None);
+        // A filled call that fails on a missing argument is not empty either.
+        let mut turns = RolloutTurns::default();
+        let mut events = Vec::new();
+        events.extend(failing("a"));
+        events.extend(failing("b"));
+        events.extend([call("f", r#"{"x":1}"#), output("f", MISSING)]);
+        events.extend(failing("c"));
+        assert_eq!(turns.apply(&events, false, 0).empty_args, None);
+    }
+
+    #[test]
+    fn parallel_batches_and_replayed_history_are_handled() {
+        // A parallel batch: three calls issued, then three outputs.
+        let mut turns = RolloutTurns::default();
+        let events = [
+            call("p1", "{}"),
+            call("p2", "{}"),
+            call("p3", "{}"),
+            output("p1", "needs argument 'service'"),
+            output("p2", "needs argument 'intent'"),
+            output("p3", MISSING),
+        ];
+        assert_eq!(
+            turns.apply(&events, false, 0).empty_args,
+            Some(EmptyArgs::Nudge)
+        );
+        // History read at an engine restart raises nothing.
+        let mut replayed = RolloutTurns::default();
+        let mut events = Vec::new();
+        for n in 0..3 {
+            events.extend(failing(&format!("r{n}")));
+        }
+        assert_eq!(replayed.apply(&events, true, 0).empty_args, None);
+    }
+
+    #[test]
+    fn normal_sessions_are_unaffected() {
+        let mut turns = RolloutTurns::default();
+        let mut events = Vec::new();
+        for n in 0..10 {
+            let id = format!("n{n}");
+            events.extend([call(&id, r#"{"cmd":"ls"}"#), output(&id, "ok")]);
+        }
+        assert_eq!(turns.apply(&events, false, 0), Outcome::default());
     }
 }

@@ -991,6 +991,8 @@ impl ErrorName for VogtError {
             Self::InvalidSnooze(_) => "InvalidSnooze",
             Self::MissingReason(_) => "MissingReason",
             Self::InvalidParams(_) => "InvalidParams",
+            Self::InvalidArguments(_) => "InvalidArguments",
+            Self::PolicyRefused(_) => "PolicyRefused",
             Self::MigrationError(_) => "MigrationError",
             Self::MigrationLocked(_) => "MigrationLocked",
             Self::StorageBusy(_) => "StorageBusy",

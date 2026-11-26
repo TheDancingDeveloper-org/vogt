@@ -4,6 +4,7 @@ use crate::{
     error::{ApiError, Result},
     session_backend::SessionBackend,
     session_cache::{self, CacheProvisioner, HttpCacheProvisioner},
+    session_tailnet::{self, HttpTailnetMinter, TailnetKey, TailnetMinter},
 };
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
@@ -45,6 +46,10 @@ pub struct PodTemplatePolicy {
     /// (`activeDeadlineSeconds`). Unset keeps the deployment default.
     #[serde(default)]
     pub active_deadline_seconds: Option<i64>,
+    /// Whether this template's pods get a tailnet sidecar of their own
+    /// (WI-4715). Takes effect only while `ENGINE_POD_TAILNET` is on.
+    #[serde(default)]
+    pub tailnet: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -187,6 +192,12 @@ pub struct PodConfig {
     /// stable for a deployment and distinct between deployments.
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
+    /// Per-pod tailnet identity (`ENGINE_POD_TAILNET=1`, WI-4715): a template
+    /// whose policy sets `tailnet: true` gets a tailscale sidecar with a key
+    /// the engine mints for that pod. Unset keeps the pre-feature spec. Holds
+    /// no credential; see [`crate::session_tailnet`].
+    #[serde(default)]
+    pub tailnet: Option<crate::session_tailnet::PodTailnet>,
 }
 /// The read-only workspace tree every session pod gets (WI-3373) and the
 /// writable per-pod clone beneath it (WI-3374). Off unless
@@ -776,6 +787,7 @@ impl Default for PodConfig {
             orphan_ttl: default_orphan_ttl(),
             workspace: None,
             engine_id: default_engine_id(),
+            tailnet: None,
         }
     }
 }
@@ -1080,6 +1092,32 @@ impl PodConfig {
                 )));
             }
         }
+        let tailnet_enabled = match text("ENGINE_POD_TAILNET").as_deref() {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(other) => {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_TAILNET must be true or false, got {other:?}"
+                )))
+            }
+        };
+        if tailnet_enabled {
+            let mut tailnet = crate::session_tailnet::PodTailnet::default();
+            if let Some(image) = text("ENGINE_POD_TAILNET_IMAGE").filter(|v| !v.is_empty()) {
+                tailnet.image = image;
+            }
+            if let Some(url) = text("ENGINE_POD_TAILNET_API_URL").filter(|v| !v.is_empty()) {
+                if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
+                    return Err(ApiError::Config(
+                        "ENGINE_POD_TAILNET_API_URL must be an https URL \
+                         (plain http needs ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true)"
+                            .into(),
+                    ));
+                }
+                tailnet.api_url = url.trim_end_matches('/').to_string();
+            }
+            cfg.tailnet = Some(tailnet);
+        }
         if let Some(url) = &cfg.cache_provisioner_url {
             if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
                 return Err(ApiError::Config(
@@ -1236,6 +1274,168 @@ const PRIVATE_CACHE_ENV: &[(&str, &str)] = &[
     ("PIP_CACHE_DIR", "/cache/pip"),
     ("UV_CACHE_DIR", "/cache/uv"),
 ];
+
+/// Gradle/Kotlin daemon hygiene (WI-898), carried in the pod spec because the
+/// `session-home` emptyDir hides anything the image put under `/home/vogt`
+/// (a `~/.gradle/gradle.properties` would never be seen). Sources: Gradle
+/// "Configuring the build environment" docs.
+///
+/// - `org.gradle.daemon.idletimeout` (ms) ends an idle daemon after 30
+///   minutes instead of the 3 hour default.
+/// - `org.gradle.jvmargs` sets the daemon's JVM arguments. The docs say
+///   `GRADLE_OPTS` can pass it as a system property, and that system
+///   properties outrank a project's `gradle.properties`. That is how the pod
+///   caps the `-Xmx8G -XX:MaxMetaspaceSize=4G` the Flutter templates
+///   (aus-price-scanner, farmeggs) ship, which this repo does not control.
+///   It also lifts a smaller project value (mobile/ uses `-Xmx1536m`) to 4G;
+///   that is a ceiling, not a reservation.
+/// - `-Dorg.gradle.project.<name>` is the documented system-property form of
+///   project property `<name>`; `kotlin.daemon.jvmargs` is the Kotlin Gradle
+///   plugin's property for the Kotlin compile daemon (otherwise it inherits
+///   the Gradle daemon's heap), capped at 3 GiB.
+///
+/// Not run against a real Gradle here (none in the build pod): confirm in a
+/// deployed pod with `jps -v` after a build.
+const GRADLE_OPTS: &str = "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g \
+-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\"";
+
+/// Tool caps derived from a pod's memory limit (WI-4748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolCaps {
+    cargo_jobs: u64,
+    gradle_mib: u64,
+    kotlin_mib: u64,
+    jvm_mib: u64,
+}
+
+/// Bytes of a Kubernetes memory quantity (`1Gi`, `6144Mi`, `2G`, `500000`).
+/// `None` for anything else: zero, a milli-suffix, a decimal (`1.5Gi`), an
+/// exponent form (`1e9`), the `E`/`P`/`Pi`/`Ei` suffixes, or a value that
+/// overflows `u64`. A pod whose limit is refused keeps today's fixed
+/// `GRADLE_OPTS` and gets no derived caps.
+fn memory_bytes(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, factor) = [
+        ("Ti", 1u64 << 40),
+        ("Gi", 1 << 30),
+        ("Mi", 1 << 20),
+        ("Ki", 1 << 10),
+        ("T", 1_000_000_000_000),
+        ("G", 1_000_000_000),
+        ("M", 1_000_000),
+        ("K", 1_000),
+        ("k", 1_000),
+    ]
+    .into_iter()
+    .find_map(|(suffix, f)| raw.strip_suffix(suffix).map(|d| (d, f)))
+    .unwrap_or((raw, 1));
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(factor)?;
+    (bytes > 0).then_some(bytes)
+}
+
+/// Whole CPUs of a Kubernetes CPU quantity (`2`, `1500m`, `0.5`), rounded
+/// down and at least 1; `None` when it does not parse or is not positive.
+fn cpu_limit_cores(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let cores = match raw.strip_suffix('m') {
+        Some(milli) => milli.parse::<f64>().ok()? / 1000.0,
+        None => raw.parse::<f64>().ok()?,
+    };
+    (cores.is_finite() && cores > 0.0).then(|| (cores.floor() as u64).max(1))
+}
+
+/// Splits 70% of the pod memory limit between the build tools, so a heavy
+/// build cannot push the pod over its limit and get OOM-killed.
+///
+/// Shares of the limit: Gradle daemon heap 28%, Kotlin daemon heap 17%, any
+/// other JVM (`JAVA_TOOL_OPTIONS`, e.g. Soot) 10%, cargo 15% at an estimated
+/// 512 MiB per job, rounded down, at least one job and, when `cpu_cores` is
+/// known, at most that many jobs. Each heap is at least 128 MiB.
+///
+/// The 70% counts the three heaps and the cargo jobs only. Gradle's
+/// `MaxMetaspaceSize=1G` and JVM native memory are not counted.
+///
+/// Returns `None` when the heaps and jobs would not fit in 70% of the limit
+/// (below about 3.4 GiB, where the one-job minimum and the floors dominate):
+/// the caller then keeps today's fixed `GRADLE_OPTS` ceilings and sets no
+/// `JAVA_TOOL_OPTIONS` or `CARGO_BUILD_JOBS`, as for an unparsable limit.
+///
+/// | limit | cargo jobs | Gradle | Kotlin | other JVM | sum (jobs at 512 MiB) |
+/// |-------|-----------|--------|--------|-----------|-----------------------|
+/// | 1Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
+/// | 2Gi   | -         | 4G fixed | 3G fixed | -         | fallback              |
+/// | 6Gi   | 1         | 1720m  | 1044m  | 614m      | 3890m (63%)           |
+/// | 8Gi   | 2         | 2293m  | 1392m  | 819m      | 5528m (67%)           |
+///
+/// With a 1-CPU limit the 8Gi row gets 1 job.
+fn derive_tool_caps(limit_bytes: u64, cpu_cores: Option<u64>) -> Option<ToolCaps> {
+    const MIB: u64 = 1 << 20;
+    let mib = limit_bytes / MIB;
+    let heap = |percent: u64| (mib * percent / 100).max(128);
+    let by_memory = (mib * 15 / 100 / 512).max(1);
+    let caps = ToolCaps {
+        cargo_jobs: cpu_cores.map_or(by_memory, |c| by_memory.min(c.max(1))),
+        gradle_mib: heap(28),
+        kotlin_mib: heap(17),
+        jvm_mib: heap(10),
+    };
+    let total = caps.gradle_mib + caps.kotlin_mib + caps.jvm_mib + caps.cargo_jobs * 512;
+    (total * 100 <= mib * 70).then_some(caps)
+}
+
+/// `GRADLE_OPTS` with the Gradle and Kotlin heaps taken from `caps`.
+fn gradle_opts_for(caps: &ToolCaps) -> String {
+    format!(
+        "-Dorg.gradle.daemon.idletimeout=1800000 \
+-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx{}m \
+-Dorg.gradle.jvmargs=\"-Xmx{}m -XX:MaxMetaspaceSize=1G\"",
+        caps.kotlin_mib, caps.gradle_mib
+    )
+}
+
+/// The memory and CPU limits the pod gets: the deployment default with the
+/// template policy's map merged over it, as `pod_template` builds the
+/// container.
+fn effective_limits(
+    cfg: &PodConfig,
+    policy: Option<&PodTemplatePolicy>,
+) -> (Option<u64>, Option<u64>) {
+    let limits = merge_resources(
+        &cfg.resource_limits,
+        policy.and_then(|p| p.resource_limits.as_ref()),
+    );
+    (
+        limits.get("memory").and_then(|q| memory_bytes(&q.0)),
+        limits.get("cpu").and_then(|q| cpu_limit_cores(&q.0)),
+    )
+}
+
+/// Adds the derived caps to `env`, leaving every name already set (by the
+/// operator or the template) alone. No limit, one that does not parse, or one
+/// too small for the caps to fit in 70% keeps the fixed `GRADLE_OPTS` and sets
+/// nothing else.
+fn push_tool_cap_env(env: &mut Vec<EnvVar>, limits: (Option<u64>, Option<u64>)) {
+    let (limit_bytes, cpu_cores) = limits;
+    let caps = limit_bytes.and_then(|l| derive_tool_caps(l, cpu_cores));
+    let mut set = |name: &str, value: String| {
+        if !env.iter().any(|e| e.name == name) {
+            env.push(EnvVar {
+                name: name.into(),
+                value: Some(value),
+                ..Default::default()
+            });
+        }
+    };
+    match caps {
+        Some(caps) => {
+            set("GRADLE_OPTS", gradle_opts_for(&caps));
+            set("CARGO_BUILD_JOBS", caps.cargo_jobs.to_string());
+            set("JAVA_TOOL_OPTIONS", format!("-Xmx{}m", caps.jvm_mib));
+        }
+        None => set("GRADLE_OPTS", GRADLE_OPTS.into()),
+    }
+}
 
 /// Volumes in `pod` that a session can write and another session's pod can
 /// also mount: any claim, host path, NFS or CSI source without both the
@@ -1751,6 +1951,8 @@ pub fn pod_template(
         value: Some("1".into()),
         ..Default::default()
     });
+    let policy = cfg.template_policies.get(&template.name);
+    push_tool_cap_env(&mut env, effective_limits(cfg, policy));
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1795,7 +1997,6 @@ pub fn pod_template(
             ..Default::default()
         });
     }
-    let policy = cfg.template_policies.get(&template.name);
     // Each cache object is optional: an empty name leaves it out.
     let mut env_from = Vec::new();
     if !cfg.cache_env_config_map.is_empty() {
@@ -1994,6 +2195,16 @@ pub fn pod_template(
                 .chain(
                     active_deadline_seconds
                         .map(|s| (DEADLINE_ANNOTATION.to_string(), s.to_string())),
+                )
+                // The sidecar itself is added at create, and only once the
+                // engine holds a key for it (WI-4715).
+                .chain(
+                    (cfg.tailnet.is_some() && policy.is_some_and(|p| p.tailnet)).then(|| {
+                        (
+                            crate::session_tailnet::TAILNET_ANNOTATION.to_string(),
+                            crate::session_tailnet::TAILNET_REQUESTED.to_string(),
+                        )
+                    }),
                 )
                 .collect(),
             ),
@@ -2314,13 +2525,36 @@ pub struct PodBackendFactory {
     /// Pod uid to the kache allocation it holds, so teardown can release it.
     /// Filled at create and from listed pods' labels (an adopted pod).
     allocations: Arc<dashmap::DashMap<String, String>>,
+    /// Mints each tailnet pod's auth key (WI-4715); `None` when the
+    /// deployment has the flag off or no OAuth secret.
+    tailnet: Option<Arc<dyn TailnetMinter>>,
 }
 impl PodBackendFactory {
     pub async fn new(cfg: PodConfig) -> Result<Self> {
         let client = cfg.client().await?;
         let cache = HttpCacheProvisioner::from_config(&cfg)?
             .map(|p| Arc::new(p) as Arc<dyn CacheProvisioner>);
-        Ok(Self::from_parts(Arc::new(cfg), client, cache))
+        let tailnet = match &cfg.tailnet {
+            Some(tailnet) => {
+                let minter =
+                    HttpTailnetMinter::from_lookup(tailnet, |name| std::env::var(name).ok())?;
+                if minter.is_none() {
+                    tracing::warn!(
+                        "ENGINE_POD_TAILNET is on but {} is not set; tailnet pods start \
+                         without their sidecar",
+                        session_tailnet::OAUTH_SECRET_ENV
+                    );
+                }
+                minter.map(|m| Arc::new(m) as Arc<dyn TailnetMinter>)
+            }
+            None => None,
+        };
+        Ok(Self::from_parts(Arc::new(cfg), client, cache).with_tailnet(tailnet))
+    }
+    /// The factory with `minter` minting its tailnet pods' keys.
+    pub fn with_tailnet(mut self, minter: Option<Arc<dyn TailnetMinter>>) -> Self {
+        self.tailnet = minter;
+        self
     }
     pub fn from_parts(
         cfg: Arc<PodConfig>,
@@ -2332,6 +2566,52 @@ impl PodBackendFactory {
             client,
             cache,
             allocations: Arc::default(),
+            tailnet: None,
+        }
+    }
+    /// Mint the pod's tailnet key and give the pod its sidecar, when the
+    /// template asked for one. A mint that fails never fails the session: the
+    /// pod starts without the sidecar, marked `unavailable`, and the session's
+    /// output and the audit log say why (the reason carries no secret).
+    async fn prepare_tailnet(&self, id: Uuid, pod: &mut Pod) -> Option<(TailnetKey, String)> {
+        if !session_tailnet::requested(pod) {
+            return None;
+        }
+        let minted = match (&self.cfg.tailnet, &self.tailnet) {
+            (Some(cfg), Some(minter)) => minter.mint(id).await.map(|key| (cfg, key)),
+            (None, _) => Err(ApiError::Config("ENGINE_POD_TAILNET is off".into())),
+            (Some(_), None) => Err(ApiError::Config(format!(
+                "{} is not set",
+                session_tailnet::OAUTH_SECRET_ENV
+            ))),
+        };
+        match minted {
+            Ok((cfg, key)) => {
+                let name = session_tailnet::tailnet_secret_name(id);
+                session_tailnet::attach(pod, cfg, id, &name);
+                tracing::info!(
+                    target: "vogt::audit", session_id = %id, key_id = %key.id,
+                    node = %session_tailnet::node_hostname(id),
+                    "minted the session pod's tailnet key"
+                );
+                Some((key, name))
+            }
+            Err(e) => {
+                session_tailnet::mark(pod, session_tailnet::TAILNET_UNAVAILABLE);
+                note_tailnet_unavailable(id, &e.to_string());
+                None
+            }
+        }
+    }
+    /// Revoke a key whose pod will never use it; it would expire on its own,
+    /// so a failure is only logged.
+    async fn revoke_tailnet(&self, id: Uuid, key: &TailnetKey) {
+        let Some(minter) = &self.tailnet else { return };
+        if let Err(e) = minter.revoke(&key.id).await {
+            tracing::warn!(
+                target: "vogt::audit", session_id = %id, key_id = %key.id, error = %e,
+                "could not revoke the unused tailnet key; it expires on its own"
+            );
         }
     }
     /// Release a kache allocation; a failure is logged, the provisioner's
@@ -2411,6 +2691,7 @@ impl PodBackendFactory {
             }
             None => None,
         };
+        let tailnet = self.prepare_tailnet(id, &mut pod).await;
         let auth = crate::agent_stream::global();
         auth.issue(id, token).await;
         let created = match self.create(pod).await {
@@ -2419,6 +2700,9 @@ impl PodBackendFactory {
                 auth.withdraw(id).await;
                 if let Some(alloc) = &allocation {
                     self.release_cache(id, &alloc.allocation_id).await;
+                }
+                if let Some((key, _)) = &tailnet {
+                    self.revoke_tailnet(id, key).await;
                 }
                 return Err(e);
             }
@@ -2439,6 +2723,15 @@ impl PodBackendFactory {
                 .map(|_| ())
                 .map_err(|e| format!("creating session cache secret: {e}"));
         }
+        if let (Ok(()), Some((key, name))) = (&made, &tailnet) {
+            let secret = session_tailnet::tailnet_secret(&self.cfg, id, name, key, &created);
+            // The error names the Secret, never its data.
+            made = api
+                .create(&PostParams::default(), &secret)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("creating session tailnet secret: {e}"));
+        }
         if let Err(e) = made {
             // No pod will ever present the bootstrap credential.
             auth.withdraw(id).await;
@@ -2452,6 +2745,9 @@ impl PodBackendFactory {
             }
             if let Some(alloc) = &allocation {
                 self.release_cache(id, &alloc.allocation_id).await;
+            }
+            if let Some((key, _)) = &tailnet {
+                self.revoke_tailnet(id, key).await;
             }
             return Err(ApiError::Internal(e));
         }
@@ -2624,6 +2920,25 @@ where
 /// other refusal, an RBAC 403 or an admission 422, is the engine's own fault:
 /// it is logged in full and reaches the caller as a generic error that names
 /// neither the service account nor the namespace.
+/// Record on the session that its pod starts without a tailnet: the audit
+/// log, and the session's own output when its stream is registered. `why`
+/// names the failure (an HTTP status, a missing setting), never a secret.
+fn note_tailnet_unavailable(id: Uuid, why: &str) {
+    tracing::warn!(
+        target: "vogt::audit",
+        session = %id,
+        reason = why,
+        "session tailnet key unavailable; the pod starts without its tailnet sidecar"
+    );
+    if let Some(link) = crate::agent_stream::global().pod(id) {
+        let note = format!(
+            "\r\nsession tailnet unavailable: {why}; this pod has no tailnet sidecar, \
+             so tailnet ssh and curl will fail in this session\r\n"
+        );
+        let _ = link.ingest(link.next_offset(), note.as_bytes());
+    }
+}
+
 fn creation_error(e: kube::Error) -> ApiError {
     match &e {
         kube::Error::Api(status)
@@ -2819,6 +3134,10 @@ impl PodBackend {
         link: std::sync::Arc<crate::agent_stream::PodLink>,
         size: (u16, u16),
     ) -> Self {
+        // A raw 0 or 65535 must not reach `current_size()`, the engine's vt100
+        // grid or the hibernation record (WI-4567).
+        let size = crate::pty::clamp_pty_size(size.0, size.1);
+        link.set_pty_size(size);
         Self {
             id,
             link,
@@ -2836,7 +3155,9 @@ impl SessionBackend for PodBackend {
         )
     }
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let (cols, rows) = crate::pty::clamp_pty_size(cols, rows);
         *self.size.lock() = (cols, rows);
+        self.link.set_pty_size((cols, rows));
         crate::agent_stream::global()
             .send(self.id, vogt_session_agent::Frame::Resize { cols, rows })
             .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
@@ -4822,6 +5143,239 @@ mod tests {
         assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
     }
 
+    /// The pod env of a template named `Pod` under `cfg` with `extra` carried.
+    fn cap_env(cfg: &PodConfig, extra: &[(String, String)]) -> BTreeMap<String, String> {
+        let mut template = SessionTemplate::default_templates_on("pod")
+            .into_iter()
+            .next()
+            .unwrap();
+        template.name = "Pod".into();
+        template.command = None;
+        let pod = pod_template(
+            cfg,
+            &template,
+            Uuid::nil(),
+            &default_source(cfg),
+            extra,
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &[],
+        );
+        pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.value.unwrap_or_default()))
+            .collect()
+    }
+
+    fn cfg_with_memory(memory: &str) -> PodConfig {
+        cfg_with_limits(memory, "4")
+    }
+
+    fn cfg_with_limits(memory: &str, cpu: &str) -> PodConfig {
+        with_policy(&format!(
+            r#"{{"Pod":{{"resource_limits":{{"memory":"{memory}","cpu":"{cpu}"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// The smallest limit in MiB from which every larger one (to 64Gi)
+    /// derives; rounding makes a few limits just below it derive by luck.
+    fn derive_threshold_mib() -> u64 {
+        (1..=65536u64)
+            .rev()
+            .find(|m| derive_tool_caps(m << 20, None).is_none())
+            .unwrap()
+            + 1
+    }
+
+    #[test]
+    fn tool_caps_follow_the_template_memory_limit() {
+        let six = cap_env(&cfg_with_memory("6Gi"), &[]);
+        assert_eq!(six["CARGO_BUILD_JOBS"], "1");
+        assert_eq!(six["JAVA_TOOL_OPTIONS"], "-Xmx614m");
+        assert!(
+            six["GRADLE_OPTS"].contains("-Xmx1720m"),
+            "{}",
+            six["GRADLE_OPTS"]
+        );
+        assert!(six["GRADLE_OPTS"].contains("kotlin.daemon.jvmargs=-Xmx1044m"));
+        let eight = cap_env(&cfg_with_memory("8Gi"), &[]);
+        assert_eq!(eight["CARGO_BUILD_JOBS"], "2");
+        assert_eq!(eight["JAVA_TOOL_OPTIONS"], "-Xmx819m");
+        assert!(eight["GRADLE_OPTS"].contains("-Xmx2293m"));
+        // The deployment default (1Gi) is below the threshold: today's fixed
+        // ceilings, no other caps.
+        let one = cap_env(&PodConfig::default(), &[]);
+        assert_eq!(one["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!one.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!one.contains_key("JAVA_TOOL_OPTIONS"));
+    }
+
+    #[test]
+    fn a_pod_too_small_for_the_caps_to_fit_keeps_the_fixed_gradle_opts() {
+        // 2Gi: three heaps (55%) plus one 512 MiB job is 80% of the limit.
+        let env = cap_env(&cfg_with_memory("2Gi"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_eq!(derive_tool_caps(2 << 30, None), None);
+    }
+
+    #[test]
+    fn caps_derive_exactly_from_the_threshold_and_the_bound_holds_there() {
+        let t = derive_threshold_mib();
+        // About 3.4 GiB: between 3Gi and 3.5Gi.
+        assert!((3 * 1024..=3584).contains(&t), "{t}");
+        assert_eq!(derive_tool_caps((t - 1) << 20, None), None);
+        for mib in [t, t + 1, t + 100] {
+            let c = derive_tool_caps(mib << 20, None).expect("derived");
+            let total = c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512;
+            assert!(total * 100 <= mib * 70, "{mib}MiB: {total}");
+        }
+        // Just above the threshold the pod env is derived.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t + 1)), &[]);
+        assert!(env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(env.contains_key("JAVA_TOOL_OPTIONS"));
+        assert_ne!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        // And just below it, the fallback.
+        let env = cap_env(&cfg_with_memory(&format!("{}Mi", t - 1)), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn cargo_jobs_are_capped_by_the_cpu_limit() {
+        // 8Gi derives 2 jobs from memory; a 1-CPU limit lowers it to 1.
+        let one_cpu = cap_env(&cfg_with_limits("8Gi", "1"), &[]);
+        assert_eq!(one_cpu["CARGO_BUILD_JOBS"], "1");
+        // 32Gi derives 9 jobs from memory; 500m rounds up to 1, 4 CPUs allow 4.
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "500m"), &[])["CARGO_BUILD_JOBS"],
+            "1"
+        );
+        assert_eq!(
+            cap_env(&cfg_with_limits("32Gi", "4"), &[])["CARGO_BUILD_JOBS"],
+            "4"
+        );
+        // A CPU limit above the memory-derived jobs changes nothing.
+        assert_eq!(
+            cap_env(&cfg_with_limits("8Gi", "64"), &[])["CARGO_BUILD_JOBS"],
+            "2"
+        );
+        assert_eq!(derive_tool_caps(32 << 30, None).unwrap().cargo_jobs, 9);
+    }
+
+    #[test]
+    fn cpu_quantities_parse_or_are_refused() {
+        assert_eq!(cpu_limit_cores("2"), Some(2));
+        assert_eq!(cpu_limit_cores("1500m"), Some(1));
+        assert_eq!(cpu_limit_cores("500m"), Some(1));
+        assert_eq!(cpu_limit_cores("0.5"), Some(1));
+        for bad in ["", "0", "-1", "lots", "NaN"] {
+            assert_eq!(cpu_limit_cores(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_unparsable_limit_keeps_the_fixed_gradle_opts_and_sets_nothing_else() {
+        let env = cap_env(&cfg_with_memory("lots"), &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+        assert!(!env.contains_key("JAVA_TOOL_OPTIONS"));
+        let mut no_memory = PodConfig::default();
+        no_memory.resource_limits.remove("memory");
+        let env = cap_env(&no_memory, &[]);
+        assert_eq!(env["GRADLE_OPTS"], GRADLE_OPTS);
+        assert!(!env.contains_key("CARGO_BUILD_JOBS"));
+    }
+
+    #[test]
+    fn an_explicit_value_is_never_overridden() {
+        let extra = [
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+            ("JAVA_TOOL_OPTIONS".to_string(), "-Xmx9g".to_string()),
+            ("GRADLE_OPTS".to_string(), "-Dmine=1".to_string()),
+        ];
+        let env = cap_env(&cfg_with_memory("6Gi"), &extra);
+        assert_eq!(env["CARGO_BUILD_JOBS"], "4");
+        assert_eq!(env["JAVA_TOOL_OPTIONS"], "-Xmx9g");
+        assert_eq!(env["GRADLE_OPTS"], "-Dmine=1");
+    }
+
+    #[test]
+    fn derived_caps_stay_within_70_percent_from_4gi_up() {
+        const MIB: u64 = 1 << 20;
+        for gib in [4u64, 5, 6, 8, 12, 16, 32, 64] {
+            let limit = gib << 30;
+            let c = derive_tool_caps(limit, None).expect("derived");
+            let total = (c.gradle_mib + c.kotlin_mib + c.jvm_mib + c.cargo_jobs * 512) * MIB;
+            assert!(total * 100 <= limit * 70, "{gib}Gi: {total} of {limit}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_parse_or_are_refused() {
+        assert_eq!(memory_bytes("6Gi"), Some(6 << 30));
+        assert_eq!(memory_bytes("512Mi"), Some(512 << 20));
+        assert_eq!(memory_bytes("2G"), Some(2_000_000_000));
+        assert_eq!(memory_bytes("1048576"), Some(1 << 20));
+        for bad in [
+            "", "0", "lots", "1.5Gi", "-1Gi", "500m", "1e9", "2Ei", "1P", "1Pi",
+        ] {
+            assert_eq!(memory_bytes(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn memory_quantities_that_overflow_or_are_zero_are_refused() {
+        // 2^24 Ti * 2^40 overflows u64; checked_mul refuses it.
+        assert_eq!(memory_bytes("16777216Ti"), None);
+        assert_eq!(memory_bytes("18446744073709551615Ki"), None);
+        assert_eq!(memory_bytes("18446744073709551615"), Some(u64::MAX));
+        for zero in ["0", "0Gi", "0Mi", "00"] {
+            assert_eq!(memory_bytes(zero), None, "{zero}");
+        }
+    }
+
+    #[test]
+    fn the_agent_container_carries_gradle_daemon_limits_outside_home() {
+        // WI-898: the `session-home` emptyDir hides `/home/vogt/.gradle`, so
+        // the limits travel as env on the agent container, which no mount can
+        // hide. Reuse the pod the tmpdir test builds.
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let env = spec.containers[0].env.as_ref().unwrap();
+        let opts = env
+            .iter()
+            .find(|e| e.name == "GRADLE_OPTS")
+            .and_then(|e| e.value.as_deref())
+            .expect("GRADLE_OPTS");
+        assert!(opts.contains("-Dorg.gradle.daemon.idletimeout=1800000"));
+        // The 1Gi default limit is below the derive threshold, so the fixed
+        // ceilings stay: Kotlin 3g and Gradle 4G.
+        assert!(opts.contains("-Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx3g"));
+        // The Flutter templates set `org.gradle.jvmargs=-Xmx8G ...` in the
+        // project's gradle.properties; a system property outranks that file.
+        assert!(
+            opts.contains("-Dorg.gradle.jvmargs=\"-Xmx4G -XX:MaxMetaspaceSize=1G\""),
+            "{opts}"
+        );
+        // The home mount is what hides the image's gradle.properties.
+        assert!(spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == "session-home" && m.mount_path == "/home/vogt"));
+    }
+
     #[test]
     fn the_session_tmp_is_mode_1777() {
         // GH #1466: the kubelet makes the `/tmp` emptyDir root 2777 (setgid,
@@ -5844,6 +6398,377 @@ mod tests {
         )
         .is_err());
     }
+
+    // ---- WI-4715: the per-pod tailnet sidecar ----
+
+    fn tailnet_cfg(policy: &str) -> PodConfig {
+        PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "1"),
+                ("ENGINE_POD_TEMPLATE_POLICIES", policy),
+            ]),
+            None,
+        )
+        .unwrap()
+    }
+
+    const TAILNET_POLICY: &str = r#"{"Pod":{"tailnet":true}}"#;
+
+    /// The pod as JSON, with the bootstrap Secret's random name part blanked.
+    fn spec_json(pod: &Pod) -> serde_json::Value {
+        let mut value = serde_json::to_value(pod).unwrap();
+        for v in value["spec"]["volumes"].as_array_mut().unwrap() {
+            if v["name"] == "bootstrap" {
+                v["secret"]["secretName"] = "bootstrap".into();
+            }
+        }
+        value
+    }
+
+    /// Captures what `tracing` writes while the guard lives (a current-thread
+    /// test runtime keeps the whole create on this thread).
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    impl LogCapture {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::TRACE)
+                    .finish(),
+            );
+            // Another test thread may have cached a callsite's interest while
+            // no subscriber wanted it; without this the capture can miss the
+            // event when the suite runs in parallel.
+            tracing::callsite::rebuild_interest_cache();
+            guard
+        }
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn tailnet_factory(
+        cfg: &PodConfig,
+        secret_posts: Vec<u16>,
+        minter: Option<Arc<crate::session_tailnet::tests::FakeMinter>>,
+    ) -> (PodBackendFactory, mock_create::Seen) {
+        let (client, seen) = mock_create::client(secret_posts);
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None)
+            .with_tailnet(minter.map(|m| m as Arc<dyn TailnetMinter>));
+        (factory, seen)
+    }
+
+    fn mounts_volume(container: &Container, volume: &str) -> bool {
+        container
+            .volume_mounts
+            .iter()
+            .flatten()
+            .any(|m| m.name == volume)
+    }
+
+    #[test]
+    fn with_the_tailnet_flag_off_the_pod_spec_is_unchanged() {
+        let plain = spec_json(&pod_template_for(&PodConfig::default()));
+        // A template that opts in changes nothing while the flag is off.
+        let opted = with_policy(TAILNET_POLICY).unwrap();
+        assert!(opted.tailnet.is_none());
+        assert_eq!(spec_json(&pod_template_for(&opted)), plain);
+        // The flag alone changes nothing for a template that did not opt in.
+        let flag_only = tailnet_cfg("{}");
+        assert!(flag_only.tailnet.is_some());
+        assert_eq!(spec_json(&pod_template_for(&flag_only)), plain);
+        let other = tailnet_cfg(r#"{"Other":{"tailnet":true}}"#);
+        assert_eq!(spec_json(&pod_template_for(&other)), plain);
+    }
+
+    #[test]
+    fn an_opted_in_template_is_only_marked_until_the_engine_holds_a_key() {
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let pod = pod_template_for(&cfg);
+        assert!(crate::session_tailnet::requested(&pod));
+        // No sidecar and no key volume in the template itself.
+        let plain = pod_template_for(&PodConfig::default());
+        assert_eq!(spec_json(&pod)["spec"], spec_json(&plain)["spec"]);
+    }
+
+    #[test]
+    fn the_tailnet_flag_is_read_and_checked() {
+        let cfg = tailnet_cfg("{}");
+        let tailnet = cfg.tailnet.unwrap();
+        assert_eq!(tailnet.image, "ghcr.io/tailscale/tailscale:v1.104.7");
+        assert_eq!(tailnet.api_url, "https://api.tailscale.com");
+        for off in ["", "0", "false"] {
+            let cfg = PodConfig::from_lookup(lookup(&[("ENGINE_POD_TAILNET", off)]), None);
+            assert!(cfg.unwrap().tailnet.is_none());
+        }
+        assert!(PodConfig::from_lookup(lookup(&[("ENGINE_POD_TAILNET", "yes")]), None).is_err());
+        let plain_http = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "1"),
+                ("ENGINE_POD_TAILNET_API_URL", "http://127.0.0.1:9"),
+            ]),
+            None,
+        );
+        assert!(plain_http.is_err());
+        let custom = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_TAILNET", "true"),
+                (
+                    "ENGINE_POD_TAILNET_IMAGE",
+                    "registry.local/tailscale:v1.104.7",
+                ),
+                ("ENGINE_POD_TAILNET_API_URL", "https://ts.example/"),
+            ]),
+            None,
+        )
+        .unwrap()
+        .tailnet
+        .unwrap();
+        assert_eq!(custom.image, "registry.local/tailscale:v1.104.7");
+        assert_eq!(custom.api_url, "https://ts.example");
+        // The policy field is accepted (deny_unknown_fields would refuse it).
+        assert!(with_policy(TAILNET_POLICY).unwrap().template_policies["Pod"].tailnet);
+    }
+
+    #[tokio::test]
+    async fn a_minted_key_gives_the_pod_a_locked_down_sidecar_that_alone_mounts_it() {
+        use crate::session_tailnet::tests::{FakeMinter, KEY, KEY_ID};
+        let logs = LogCapture::default();
+        let _guard = logs.install();
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::minting();
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter.clone()));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        assert_eq!(*minter.minted.lock().unwrap(), [id]);
+        assert!(minter.revoked.lock().unwrap().is_empty());
+        let seen = seen.lock().unwrap();
+        let paths: Vec<_> = seen.iter().map(|(m, p, _)| format!("{m} {p}")).collect();
+        assert_eq!(
+            paths,
+            [
+                "POST /api/v1/namespaces/vogt-sessions/pods",
+                "POST /api/v1/namespaces/vogt-sessions/secrets",
+                "POST /api/v1/namespaces/vogt-sessions/secrets",
+            ]
+        );
+        assert!(!seen[0].2.contains(KEY), "key in the pod spec");
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(
+            pod.metadata.annotations.as_ref().unwrap()[crate::session_tailnet::TAILNET_ANNOTATION],
+            "sidecar"
+        );
+        let spec = pod.spec.clone().unwrap();
+        assert_ne!(
+            spec.share_process_namespace,
+            Some(true),
+            "a shared process namespace would show the sidecar to the agent"
+        );
+        let inits = spec.init_containers.clone().unwrap();
+        let sidecar = inits.last().unwrap();
+        assert_eq!(sidecar.name, "tailnet");
+        assert_eq!(
+            sidecar.image.as_deref(),
+            Some("ghcr.io/tailscale/tailscale:v1.104.7")
+        );
+        assert_eq!(
+            sidecar.restart_policy.as_deref(),
+            Some("Always"),
+            "a native sidecar"
+        );
+        assert!(
+            sidecar.startup_probe.is_none()
+                && sidecar.readiness_probe.is_none()
+                && sidecar.liveness_probe.is_none(),
+            "the agent must never wait on the sidecar"
+        );
+        let sc = sidecar.security_context.as_ref().unwrap();
+        assert_eq!(sc.run_as_user, Some(1001));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop.as_deref(),
+            Some(&["ALL".to_string()][..])
+        );
+        assert!(sc.capabilities.as_ref().unwrap().add.is_none());
+        let env: BTreeMap<_, _> = sidecar
+            .env
+            .iter()
+            .flatten()
+            .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(env["TS_HOSTNAME"], format!("vs-{}", id.simple()));
+        assert_eq!(env["TS_AUTH_ONCE"], "true");
+        assert_eq!(env["TS_USERSPACE"], "true");
+        assert_eq!(env["TS_SOCKS5_SERVER"], "127.0.0.1:1055");
+        assert_eq!(env["TS_OUTBOUND_HTTP_PROXY_LISTEN"], "127.0.0.1:1056");
+        assert!(
+            sidecar.env.iter().flatten().all(|e| e.value_from.is_none()),
+            "the key is a file, never an env value"
+        );
+        let script = sidecar.command.as_ref().unwrap().join(" ");
+        assert!(script.contains("--tun=userspace-networking"), "{script}");
+        assert!(script.contains("trap leave TERM"), "{script}");
+        assert!(script.contains("logout"), "{script}");
+        assert!(
+            script.contains("--auth-key=\"file:$TS_AUTHKEY_FILE\""),
+            "{script}"
+        );
+        // The key volume: the Secret the engine made, 0400, in the sidecar only.
+        let volumes = spec.volumes.clone().unwrap();
+        let key_volume = volumes.iter().find(|v| v.name == "tailnet-key").unwrap();
+        let secret_volume = key_volume.secret.as_ref().unwrap();
+        assert_eq!(secret_volume.default_mode, Some(0o400));
+        assert!(mounts_volume(sidecar, "tailnet-key"));
+        for other in spec.containers.iter().chain(&inits[..inits.len() - 1]) {
+            assert!(
+                !mounts_volume(other, "tailnet-key") && !mounts_volume(other, "tailnet-state"),
+                "{} mounts the tailnet key or state",
+                other.name
+            );
+        }
+        // The agent learns only where the proxies are.
+        let agent = &spec.containers[0];
+        assert_eq!(agent.name, SESSION_CONTAINER);
+        let secret_name = secret_volume.secret_name.clone().unwrap();
+        let agent_json = serde_json::to_string(agent).unwrap();
+        assert!(!agent_json.contains(&secret_name), "{agent_json}");
+        assert!(!agent_json.contains(KEY));
+        assert_eq!(
+            env_value(&pod, "VOGT_TAILNET_SOCKS5").as_deref(),
+            Some("127.0.0.1:1055")
+        );
+        // The Secret is the one the sidecar mounts, owned by the pod.
+        let secret: Secret = serde_json::from_str(&seen[2].2).unwrap();
+        assert_eq!(secret.metadata.name.as_deref(), Some(secret_name.as_str()));
+        assert!(secret_name.starts_with(&format!("vogt-ts-{}-", id.simple())));
+        assert_eq!(secret.metadata.owner_references.unwrap()[0].uid, "uid-pod");
+        assert_eq!(secret.immutable, Some(true));
+        assert_eq!(
+            secret.metadata.labels.as_ref().unwrap()["vogt.kind"],
+            "tailnet"
+        );
+        assert_eq!(secret.data.unwrap()["authkey"].0, KEY.as_bytes());
+        // The audit log names the key by id, never by value.
+        let text = logs.text();
+        assert!(text.contains(KEY_ID), "{text}");
+        assert!(!text.contains(KEY), "the key reached the log: {text}");
+        assert!(!text.contains("s3cretTailnetKeyValue"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_mint_starts_the_pod_without_the_sidecar_and_the_session_says_why() {
+        use crate::session_tailnet::tests::FakeMinter;
+        use std::io::Read;
+        let logs = LogCapture::default();
+        let _guard = logs.install();
+        let id = Uuid::new_v4();
+        let (_link, mut reader) = crate::agent_stream::global().register_pod(id);
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::answering(Err(ApiError::Internal(
+            "tailscale API refused the session key: HTTP 403".into(),
+        )));
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .expect("a mint failure never stops the session");
+        crate::agent_stream::global().forget_pod(id);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the pod and its bootstrap Secret only");
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(
+            pod.metadata.annotations.as_ref().unwrap()[crate::session_tailnet::TAILNET_ANNOTATION],
+            "unavailable"
+        );
+        // Apart from the mark, the spec is the pre-feature one.
+        let plain = pod_for(&PodConfig::default(), id);
+        assert_eq!(spec_json(&pod)["spec"], spec_json(&plain)["spec"]);
+        // The session's output records it.
+        let mut buf = vec![0u8; 4096];
+        let n = reader.read(&mut buf).unwrap();
+        let note = String::from_utf8_lossy(&buf[..n]);
+        assert!(note.contains("session tailnet unavailable"), "{note}");
+        assert!(note.contains("HTTP 403"), "{note}");
+        assert!(logs.text().contains("tailnet key unavailable"));
+    }
+
+    #[tokio::test]
+    async fn without_an_oauth_secret_a_tailnet_pod_starts_without_the_sidecar() {
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let (factory, seen) = tailnet_factory(&cfg, vec![], None);
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert!(crate::session_tailnet::secret_name_in(&pod).is_none());
+        assert!(pod
+            .spec
+            .unwrap()
+            .init_containers
+            .unwrap()
+            .iter()
+            .all(|c| c.name != "tailnet"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_tailnet_secret_deletes_the_pod_and_revokes_the_key() {
+        use crate::session_tailnet::tests::{FakeMinter, KEY, KEY_ID};
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg(TAILNET_POLICY);
+        let minter = FakeMinter::minting();
+        // The bootstrap Secret is made; the tailnet Secret is refused.
+        let (factory, seen) = tailnet_factory(&cfg, vec![201, 403], Some(minter.clone()));
+        let err = factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .expect_err("a pod whose sidecar can never get its key is removed");
+        assert!(!err.to_string().contains(KEY), "{err}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.last().unwrap().0, "DELETE");
+        assert!(seen.last().unwrap().1.contains("/pods/"));
+        assert_eq!(*minter.revoked.lock().unwrap(), [KEY_ID]);
+    }
+
+    #[tokio::test]
+    async fn a_template_that_did_not_opt_in_never_mints() {
+        use crate::session_tailnet::tests::FakeMinter;
+        let id = Uuid::new_v4();
+        let cfg = tailnet_cfg("{}");
+        let minter = FakeMinter::minting();
+        let (factory, seen) = tailnet_factory(&cfg, vec![], Some(minter.clone()));
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        assert!(minter.minted.lock().unwrap().is_empty());
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -5851,12 +6776,9 @@ mod creation_error_tests {
     use super::*;
 
     fn api(code: u16, message: &str) -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: message.into(),
-            reason: "Forbidden".into(),
-            code,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(message, "Forbidden").with_code(code),
+        ))
     }
 
     #[test]
@@ -5887,12 +6809,13 @@ mod creation_error_tests {
     }
 
     fn race() -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again".into(),
-            reason: "Conflict".into(),
-            code: 409,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(
+                "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again",
+                "Conflict",
+            )
+            .with_code(409),
+        ))
     }
 
     #[test]
@@ -5951,12 +6874,10 @@ mod creation_error_tests {
             || {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async {
-                    Err(kube::Error::Api(kube::core::ErrorResponse {
-                        status: "Failure".into(),
-                        message: "pods \"s\" already exists".into(),
-                        reason: "AlreadyExists".into(),
-                        code: 409,
-                    }))
+                    Err(kube::Error::Api(Box::new(
+                        kube::core::Status::failure("pods \"s\" already exists", "AlreadyExists")
+                            .with_code(409),
+                    )))
                 }
             },
         )
@@ -5971,5 +6892,37 @@ mod creation_error_tests {
             creation_error(api(500, "boom")),
             ApiError::InternalSource { .. }
         ));
+    }
+
+    fn backend_sized(size: (u16, u16)) -> PodBackend {
+        let id = Uuid::new_v4();
+        let (link, _reader) = crate::agent_stream::global().register_pod(id);
+        PodBackend::new(id, link, size)
+    }
+
+    /// `current_size()` is `(rows, cols)`; it feeds the engine's vt100 grid and
+    /// the hibernation record (WI-4567).
+    #[test]
+    fn a_new_pod_backend_holds_its_size_within_bounds() {
+        assert_eq!(backend_sized((0, 0)).current_size().unwrap(), (1, 1));
+        assert_eq!(
+            backend_sized((65535, 65535)).current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, crate::pty::MAX_PTY_COLS)
+        );
+        assert_eq!(backend_sized((120, 40)).current_size().unwrap(), (40, 120));
+    }
+
+    #[test]
+    fn a_pod_backend_resize_is_clamped_before_it_is_stored() {
+        let backend = backend_sized((120, 40));
+        // No agent is attached, so the frame send may fail; the stored size
+        // is set first.
+        let _ = backend.resize(0, 65535);
+        assert_eq!(
+            backend.current_size().unwrap(),
+            (crate::pty::MAX_PTY_ROWS, 1)
+        );
+        let _ = backend.resize(100, 30);
+        assert_eq!(backend.current_size().unwrap(), (30, 100));
     }
 }

@@ -448,6 +448,7 @@ fn a_dead_engine_hides_no_linked_sessions() {
             stall_after_minutes: 10,
             include_hidden: false,
             fields: None,
+            started_by_session: None,
         },
     )
     .unwrap();
@@ -914,6 +915,27 @@ fn session_start_audit(built: &Built) -> serde_json::Value {
         .summary
 }
 
+/// WI-4707: a worktree the caller asked for is not marked droppable, so a pod
+/// still refuses it.
+#[test]
+fn a_callers_own_worktree_is_not_marked_droppable() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "implement");
+    params.worktree = Some(true);
+    start_session(ctx, &params).unwrap();
+    let asked = script.seen.lock().unwrap().join("\n");
+    assert!(asked.contains(r#""base_ref":"main""#), "{asked}");
+    assert!(asked.contains(r#""if_supported":false"#), "{asked}");
+}
+
 #[test]
 fn a_profile_sets_budget_worktree_and_repo_map_and_the_audit_records_them() {
     let script = script_with(vec![(
@@ -931,6 +953,8 @@ fn a_profile_sets_budget_worktree_and_repo_map_and_the_audit_records_them() {
     assert!(asked.contains(r#""turns":120"#), "{asked}");
     assert!(asked.contains(r#""wall_clock_minutes":90"#), "{asked}");
     assert!(asked.contains(r#""base_ref":"main""#), "{asked}");
+    // WI-4707: the profile's worktree is a default the engine may drop on a pod.
+    assert!(asked.contains(r#""if_supported":true"#), "{asked}");
     let audit = session_start_audit(&built);
     assert_eq!(audit["purpose"], "implement");
     assert_eq!(audit["overrides"], serde_json::json!([]));
@@ -1092,6 +1116,7 @@ fn digest_params() -> ListSessionsParams {
         stall_after_minutes: 10,
         include_hidden: false,
         fields: None,
+        started_by_session: None,
     }
 }
 
@@ -1384,12 +1409,17 @@ fn full_mode_with_fields_slims_each_row_to_id_and_the_named_fields() {
     let mut params = digest_params();
     params.mode = "full".to_string();
     let whole = serde_json::to_value(list_sessions(ctx, &params).unwrap()).unwrap();
-    // Default output is unchanged: no fields, every column.
+    // No fields: every column but the long launch `command` (WI-4725).
+    let mut expected = whole.clone();
+    expected["sessions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("command");
     let mut untouched = whole.clone();
     super::sessions::slim_full_rows(&mut untouched, None);
-    assert_eq!(untouched, whole);
+    assert_eq!(untouched, expected);
     super::sessions::slim_full_rows(&mut untouched, Some(&[]));
-    assert_eq!(untouched, whole);
+    assert_eq!(untouched, expected);
     let mut slim = whole.clone();
     super::sessions::slim_full_rows(
         &mut slim,
@@ -2096,4 +2126,469 @@ fn a_starters_read_can_name_the_work_item_without_asking_the_engine() {
     assert_eq!(find("eng-a")["work_item"], "WI-9");
     assert!(find("eng-b")["work_item"].is_null());
     assert!(find("eng-a").get("started_by_session").is_none());
+}
+
+// WI-2024: the start's model policy (WI-1590, WI-1852), ported from Python
+// `_refuse_forbidden_model`.
+
+/// A project `beta` whose agent policy is `policy`, plus the engine script a
+/// refused start must leave untouched.
+fn policied_start(policy: serde_json::Value) -> (Built, Arc<Script>) {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-p","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut project = Project::new("prj_beta", "beta", "beta", "/work/tree", moment());
+    project.link_state = LinkState::Unlinked;
+    project.agent_policy = serde_json::from_value(policy).unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_project(&project).unwrap();
+    txn.commit().unwrap();
+    (built, script)
+}
+
+fn start_on(
+    built: &Built,
+    template: &str,
+    model: &str,
+) -> Result<super::sessions::SessionResult, VogtError> {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!()
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.template = Some(template.to_string());
+    params.model = Some(model.to_string());
+    start_session(ctx, &params)
+}
+
+fn assert_refused_before_the_engine(
+    outcome: Result<super::sessions::SessionResult, VogtError>,
+    script: &Script,
+    needle: &str,
+) {
+    let Err(VogtError::PolicyRefused(message)) = outcome else {
+        panic!("expected policy_refused, got {outcome:?}");
+    };
+    assert!(message.contains(needle), "{message}");
+    assert!(
+        script.seen.lock().unwrap().is_empty(),
+        "the engine was asked"
+    );
+}
+
+#[test]
+fn a_claude_template_with_a_non_claude_model_is_refused() {
+    let (built, script) = policied_start(json!({}));
+    assert_refused_before_the_engine(
+        start_on(&built, "claude", "grok-4.7"),
+        &script,
+        "does not take model 'grok-4.7'",
+    );
+    assert!(start_on(&built, "claude", "claude-opus-4-1").is_ok());
+}
+
+#[test]
+fn a_bare_claude_alias_on_another_agent_is_refused() {
+    let (built, script) = policied_start(json!({}));
+    assert_refused_before_the_engine(
+        start_on(&built, "codex", "opus"),
+        &script,
+        "does not resolve the Claude Code alias 'opus'",
+    );
+}
+
+#[test]
+fn a_model_on_the_projects_never_models_is_refused() {
+    let (built, script) = policied_start(json!({"review": {"never_models": ["gpt-9"]}}));
+    assert_refused_before_the_engine(start_on(&built, "codex", "gpt-9"), &script, "never_models");
+    assert!(start_on(&built, "codex", "gpt-8").is_ok());
+}
+
+#[test]
+fn a_model_matching_forbidden_text_is_refused_and_a_bad_pattern_is_skipped() {
+    let (built, script) = policied_start(json!({"forbidden_text": ["(?=x)", "(?i)grok"]}));
+    assert_refused_before_the_engine(
+        start_on(&built, "opencode", "GROK-4.7"),
+        &script,
+        "forbidden_text pattern '(?i)grok'",
+    );
+    assert!(start_on(&built, "opencode", "other-model").is_ok());
+}
+
+/// WI-4737: the allowed half of the model policy. A false refusal would block
+/// legitimate starts on every deployment, so each pair the fleet really uses
+/// must start, under a project policy that has live rules.
+#[test]
+fn the_fleets_legitimate_model_template_pairs_are_not_refused() {
+    let cases: [(&str, Option<&str>); 18] = [
+        ("claude", Some("claude-sonnet-5-5")),
+        ("claude", Some("claude-opus-5-5")),
+        ("claude", Some("claude-haiku-5-5")),
+        ("claude", Some("claude-fable-5-2")),
+        ("claude", Some("opus")),
+        ("claude", Some("sonnet")),
+        ("claude", Some("haiku")),
+        ("codex", Some("gpt-5.6")),
+        ("opencode", Some("gpt-5.6")),
+        ("codex", Some("openai/gpt-5.6")),
+        ("opencode", Some("anthropic/claude-sonnet-5-5")),
+        ("opencode", Some("openrouter/claude-opus-5-5")),
+        ("Claude Code (protected)", Some("claude-sonnet-5-5")),
+        ("claude", None),
+        ("codex", None),
+        ("opencode", None),
+        ("claude", Some("claude-opus-4-1")),
+        ("codex", Some("gpt-8")),
+    ];
+    let (built, script) = policied_start(json!({
+        "review": {"never_models": ["gpt-9"]},
+        "forbidden_text": ["(?i)grok"]
+    }));
+    *script.answers.lock().unwrap() = (0..cases.len() + 4)
+        .map(|n| {
+            (
+                200,
+                format!(r#"{{"id":"eng-ok-{n}","name":"beta-{n}","cwd":"/work/tree"}}"#),
+            )
+        })
+        .collect();
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    for (template, model) in cases {
+        let mut params = start_params(Some("beta"), None, "because");
+        params.template = Some(template.to_string());
+        params.model = model.map(str::to_string);
+        let outcome = start_session(ctx, &params);
+        assert!(
+            outcome.is_ok(),
+            "{template} / {model:?} was refused: {outcome:?}"
+        );
+    }
+    // A work item with no project has no project policy to judge.
+    {
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_work_item(&WorkItem {
+            id: "wrk_WI-77".to_string(),
+            reference: "WI-77".to_string(),
+            kind: WorkKind::Feature,
+            title: "Orphan".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            priority: Priority::P2,
+            effort: None,
+            project_id: None,
+            project_slug: None,
+            initiative_id: None,
+            origin: Origin::Created,
+            trust_state: TrustState::Unverified,
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: moment(),
+            updated_at: moment(),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    let mut params = start_params(None, None, "because");
+    params.work_item = Some("WI-77".to_string());
+    params.template = Some("codex".to_string());
+    params.model = Some("gpt-5.6".to_string());
+    // It cannot open without a scratch project, but that is not a model refusal.
+    let outcome = start_session(ctx, &params);
+    assert!(
+        !matches!(outcome, Err(VogtError::PolicyRefused(_))),
+        "project-less item was refused by the model policy: {outcome:?}"
+    );
+    // A purpose profile that fills the model (review: claude / opus).
+    let params = with_purpose(start_params(Some("beta"), None, "because"), "review");
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.session.model.as_deref(), Some("opus"));
+    assert_eq!(started.session.template.as_deref(), Some("claude"));
+}
+
+/// WI-4725: `started_by_session` keeps only that starter's sessions on every
+/// path: full and digest, with and without `states`, by engine id or `ses_…`
+/// id, and never an unlinked row.
+#[test]
+fn started_by_session_filters_every_list_path() {
+    let body = r#"{"sessions":[
+        {"id":"eng-parent","name":"p","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-child","name":"c","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-other","name":"o","cwd":"/w","activity":"idle","alive":true},
+        {"id":"eng-shell","name":"s","cwd":"/w","activity":"idle","alive":true}]}"#;
+    let script = script_with((0..8).map(|_| (200, body.to_string())).collect());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    seed_child_session(&built, "eng-parent", None, None);
+    seed_child_session(&built, "eng-child", Some("oversight"), Some("eng-parent"));
+    seed_child_session(&built, "eng-other", Some("oversight"), Some("eng-else"));
+    for starter in ["eng-parent", "ses_eng-parent"] {
+        for mode in ["full", "digest"] {
+            for states in [json!(null), json!([])] {
+                let listed = list_sessions_op(
+                    &built,
+                    json!({"mode": mode, "started_by_session": starter, "states": states}),
+                )
+                .unwrap();
+                let rows = if mode == "full" {
+                    listed["sessions"].as_array().unwrap()
+                } else {
+                    listed["digests"].as_array().unwrap()
+                };
+                let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+                assert_eq!(ids, vec!["ses_eng-child"], "{mode} {starter} {listed}");
+                assert_eq!(listed["total"], 1, "{mode} {starter} {listed}");
+            }
+        }
+    }
+}
+
+/// WI-4725: a full row leaves out the long launch `command` unless `fields`
+/// names it.
+#[test]
+fn full_rows_drop_command_unless_asked_for() {
+    let body = r#"{"sessions":[{"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true,"command":"claude --very-long-launch-line"}]}"#;
+    let script = script_with(vec![(200, body.to_string()), (200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let plain = list_sessions_op(&built, json!({"mode": "full"})).unwrap();
+    assert!(
+        plain["sessions"][0].get("command").is_none(),
+        "{}",
+        plain["sessions"][0]
+    );
+    let asked = list_sessions_op(&built, json!({"mode": "full", "fields": ["command"]})).unwrap();
+    assert_eq!(
+        asked["sessions"][0]["command"],
+        "claude --very-long-launch-line"
+    );
+}
+
+// WI-4738: `resume` may name a Vogt session (ses_… or engine UUID).
+
+const PRIOR_ENGINE_ID: &str = "0a1b2c3d-0000-4000-8000-00000000abcd";
+
+/// A project `beta` with one finished session, started through the engine
+/// script, returning the built context, the script, and the session's
+/// `ses_…` id. The script's answers are left empty for the test to load.
+fn with_prior_session() -> (Built, Arc<Script>, String) {
+    let script = script_with(vec![(
+        200,
+        format!(r#"{{"id":"{PRIOR_ENGINE_ID}","name":"beta","cwd":"/work/tree"}}"#),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let prior = start_session(ctx, &start_params(Some("beta"), None, "first")).unwrap();
+    script.seen.lock().unwrap().clear();
+    script.answers.lock().unwrap().clear();
+    (built, script, prior.session.id)
+}
+
+/// Start a resume of `resume`; `answers` are the engine's replies in the
+/// order the client asks (the history row first). Returns the outcome and
+/// the requests the engine saw.
+fn resume_of(
+    built: &Built,
+    script: &Script,
+    resume: &str,
+    template: Option<&str>,
+    mut answers: Vec<(u16, String)>,
+) -> (Result<super::sessions::SessionResult, VogtError>, String) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!()
+    };
+    answers.reverse();
+    *script.answers.lock().unwrap() = answers;
+    script.seen.lock().unwrap().clear();
+    let mut params = start_params(Some("beta"), None, "resume");
+    params.resume = Some(resume.to_string());
+    params.template = template.map(str::to_string);
+    let outcome = start_session(ctx, &params);
+    let seen = script.seen.lock().unwrap().join("\n");
+    (outcome, seen)
+}
+
+fn archived(conversation: Option<&str>, resume_template: Option<&str>) -> (u16, String) {
+    (
+        200,
+        json!({
+            "id": PRIOR_ENGINE_ID,
+            "created_at": "2026-11-25T00:00:00Z",
+            "conversation_id": conversation,
+            "resume_template": resume_template,
+        })
+        .to_string(),
+    )
+}
+
+fn started_reply(id: &str) -> (u16, String) {
+    (
+        200,
+        format!(r#"{{"id":"{id}","name":"beta","cwd":"/work/tree"}}"#),
+    )
+}
+
+fn assert_resumes_stored(outcome: &Result<super::sessions::SessionResult, VogtError>, seen: &str) {
+    assert!(outcome.is_ok(), "{outcome:?}\n{seen}");
+    assert!(seen.contains(r#""resume":"conv-123""#), "{seen}");
+    assert!(seen.contains(r#""template":"codex""#), "{seen}");
+    assert!(!seen.contains(r#""resume":"ses_"#), "{seen}");
+}
+
+#[test]
+fn resume_by_vogt_session_id_sends_the_stored_conversation_and_template() {
+    let (built, script, ses) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![
+            archived(Some("conv-123"), Some("codex")),
+            started_reply("eng-new"),
+        ],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn resume_by_engine_uuid_sends_the_stored_conversation_and_template() {
+    let (built, script, _) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        PRIOR_ENGINE_ID,
+        None,
+        vec![
+            archived(Some("conv-123"), Some("codex")),
+            started_reply("eng-new"),
+        ],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn an_unknown_resume_string_passes_through_to_the_engine() {
+    let (built, script, _) = with_prior_session();
+    // A raw conversation id (plain, UUID-shaped but unknown to the history
+    // and the engine, and an unknown ses_ id such as OpenCode's own) keeps
+    // today's behaviour. Only the UUID is looked up, so only it sees 404s.
+    let cases: [(&str, Vec<(u16, String)>); 3] = [
+        ("conv-raw", vec![started_reply("eng-1")]),
+        (
+            "11111111-2222-4333-8444-555555555555",
+            vec![
+                (404, "{}".to_string()),
+                (404, "{}".to_string()),
+                started_reply("eng-2"),
+            ],
+        ),
+        ("ses_notavogtsession", vec![started_reply("eng-3")]),
+    ];
+    for (raw, answers) in cases {
+        let (outcome, seen) = resume_of(&built, &script, raw, Some("claude"), answers);
+        assert!(outcome.is_ok(), "{raw}: {outcome:?}\n{seen}");
+        assert!(seen.contains(&format!(r#""resume":"{raw}""#)), "{seen}");
+    }
+}
+
+#[test]
+fn a_session_without_a_recorded_conversation_is_a_clear_refusal() {
+    let (built, script, ses) = with_prior_session();
+    for resume in [ses.as_str(), PRIOR_ENGINE_ID] {
+        let (outcome, seen) = resume_of(&built, &script, resume, None, vec![archived(None, None)]);
+        let Err(VogtError::InvalidRequest(message)) = outcome else {
+            panic!("expected invalid_request, got {outcome:?}");
+        };
+        assert!(
+            message.contains("no recorded agent conversation"),
+            "{message}"
+        );
+        assert!(!seen.contains("POST"), "the engine started a pane: {seen}");
+    }
+}
+
+#[test]
+fn a_resume_template_that_conflicts_with_the_asked_one_is_refused() {
+    let (built, script, ses) = with_prior_session();
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        Some("claude"),
+        vec![archived(Some("conv-123"), Some("codex"))],
+    );
+    let Err(VogtError::InvalidRequest(message)) = outcome else {
+        panic!("expected invalid_request, got {outcome:?}");
+    };
+    assert!(message.contains("resumes through template"), "{message}");
+    assert!(!seen.contains("POST"), "{seen}");
+}
+
+// WI-4738 review: a live (not yet archived) session resumes through its own
+// template, so a codex or opencode conversation never reaches `claude --resume`.
+
+/// The engine's live row for the prior session: the archive lookup 404s first.
+fn live(conversation: Option<(&str, &str)>, template: Option<&str>) -> [(u16, String); 2] {
+    let mut row = json!({
+        "id": PRIOR_ENGINE_ID, "name": "beta", "cwd": "/work/tree",
+        "activity": "idle", "alive": true, "role": "worker",
+        "template": template,
+    });
+    if let Some((agent, id)) = conversation {
+        row["conversation"] = json!({"agent": agent, "id": id});
+    }
+    [(404, "{}".to_string()), (200, row.to_string())]
+}
+
+#[test]
+fn a_live_codex_session_resumes_through_its_own_template() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("codex", "conv-123")), Some("codex"));
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![missing, row, started_reply("eng-new")],
+    );
+    assert_resumes_stored(&outcome, &seen);
+}
+
+#[test]
+fn a_live_session_template_that_conflicts_with_the_asked_one_is_refused() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("codex", "conv-123")), Some("codex"));
+    let (outcome, seen) = resume_of(&built, &script, &ses, Some("claude"), vec![missing, row]);
+    let Err(VogtError::InvalidRequest(message)) = outcome else {
+        panic!("expected invalid_request, got {outcome:?}");
+    };
+    assert!(message.contains("resumes through template"), "{message}");
+    assert!(!seen.contains("POST"), "{seen}");
+}
+
+#[test]
+fn a_live_session_with_no_known_template_resumes_as_before() {
+    let (built, script, ses) = with_prior_session();
+    let [missing, row] = live(Some(("claude", "conv-123")), None);
+    let (outcome, seen) = resume_of(
+        &built,
+        &script,
+        &ses,
+        None,
+        vec![missing, row, started_reply("eng-new")],
+    );
+    assert!(outcome.is_ok(), "{outcome:?}\n{seen}");
+    assert!(seen.contains(r#""resume":"conv-123""#), "{seen}");
+    assert!(!seen.contains(r#""template""#), "{seen}");
 }

@@ -58,6 +58,10 @@ project space. Security reports go to the channel in
   - The operator approves every deploy.
 - The batch pull request lands on `main` by rebase, so a merge commit in its
   range is the usual reason a green pull request cannot land.
+  The `integrate-linear` check backstops this: on a pull request from a
+  `graft/batch-*` or `integrate/*` head it fails, naming the merge commit
+  SHAs, when `git rev-list --merges origin/main..HEAD` is not empty. Rebase
+  onto `origin/main` rather than merging `main` in.
 - A change that does not go through an integration branch, such as a fork pull
   request, branches from `origin/main` and opens its pull request against
   `main`, under the same linear-history rule.
@@ -400,13 +404,17 @@ docs-only diff and fails whenever any half failed. **Required status checks on
 release dry run ([`docs/ci.md`](ci.md#release-dry-run)) is advisory too: it
 rehearses the tag-time build on release-file pull requests and nightly.
 
-**Landing: the merge queue.** Push a branch and open a pull request. The PR
-gets only the fast, path-scoped checks above, so do not expect, or re-run by
-hand, the full suite on it. Land with `land-pr`, which enqueues the PR
-(`gh pr merge --auto`) and follows the queue's `merge_group` runs. The full
-suite runs there, against the exact tree `main` will become. A failed queue run
-dequeues the PR: fix, push, re-run `land-pr`. Rebase only when the queue
-reports a conflict, never just because `main` moved.
+**Landing: graft, then the merge queue.** A worker lands on the graft line
+`rust-2` with `g land` (§2) and stops; it does not wait for or poll CI.
+Oversight cuts the landed changesets into one batch pull request to `main`
+(`graft-mirror pr-batch`). That PR gets only the fast, path-scoped checks
+above, so do not expect, or re-run by hand, the full suite on it. Oversight
+lands it with `land-pr`, which enqueues the PR (`gh pr merge --auto`) and
+follows the queue's `merge_group` runs. The full suite runs there, against the
+exact tree `main` will become. A failed queue run dequeues the PR; the fix goes
+back to a worker and rides the next batch. A fork pull request is enqueued the
+same way. Rebase only when the queue reports a conflict, never just because
+`main` moved.
 
 **Pull requests from forks.** A fork has no runner registered to it, so the
 workflows do not run on the fork's own Actions. A pull request from a fork

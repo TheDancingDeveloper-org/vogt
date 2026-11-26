@@ -115,6 +115,8 @@ struct Raw {
     #[serde(default, deserialize_with = "keep")]
     include_finished: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
+    with_sessions: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
     mode: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
     limit: Option<Value>,
@@ -126,6 +128,8 @@ struct Raw {
     comment_limit: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
     comment_order: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    include: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
     handoff: Option<Value>,
     #[serde(default, deserialize_with = "keep")]
@@ -345,6 +349,8 @@ struct ListParams {
     label: Option<String>,
     query: Option<String>,
     include_finished: bool,
+    /// Add `live_sessions` to every row (WI-4751). Off by default.
+    with_sessions: bool,
     mode: String,
     limit: i64,
     offset: i64,
@@ -362,6 +368,7 @@ impl Default for ListParams {
             label: None,
             query: None,
             include_finished: false,
+            with_sessions: false,
             mode: "summary".to_string(),
             limit: 50,
             offset: 0,
@@ -420,6 +427,7 @@ impl<'de> serde::Deserialize<'de> for ListParams {
             label: text_strict(&raw.label),
             query: str_of(&query).map(str::to_string),
             include_finished: flag(&raw.include_finished),
+            with_sessions: flag(&raw.with_sessions),
             mode: str_of(&raw.mode).unwrap_or("summary").to_string(),
             limit: raw.limit.as_ref().and_then(Value::as_i64).unwrap_or(50),
             offset: raw.offset.as_ref().and_then(Value::as_i64).unwrap_or(0),
@@ -430,9 +438,81 @@ impl<'de> serde::Deserialize<'de> for ListParams {
 /// `work.get` parameters.
 struct GetParams {
     reference: String,
-    comment_limit: i64,
+    /// None: the default for the shape (3 lean, 200 with `all`).
+    comment_limit: Option<i64>,
     newest: bool,
     summary: bool,
+    include: Include,
+}
+
+/// The sections of `work.get` beyond the item (WI-4726).
+#[derive(Clone, Copy, Default)]
+struct Include {
+    comments: bool,
+    sessions: bool,
+    branches: bool,
+    git: bool,
+    delivery: bool,
+    relations: bool,
+    /// `all`: the full pre-WI-4726 shape, uncapped and with every key.
+    all: bool,
+}
+
+impl Include {
+    /// What an absent `include` returns: the lean read.
+    const LEAN: Include = Include {
+        comments: true,
+        sessions: false,
+        branches: false,
+        git: false,
+        delivery: true,
+        relations: true,
+        all: false,
+    };
+
+    fn parse(value: Option<&Value>) -> Result<Self, VogtError> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(Self::LEAN);
+        };
+        let items: Vec<&str> = match value {
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            Value::String(text) => text.split(',').map(str::trim).collect(),
+            _ => {
+                return Err(VogtError::InvalidRequest(
+                    "include must be a list of section names".into(),
+                ))
+            }
+        };
+        let mut out = Self::default();
+        for item in items {
+            match item {
+                "comments" => out.comments = true,
+                "sessions" => out.sessions = true,
+                "branches" => out.branches = true,
+                "git" => out.git = true,
+                "delivery" => out.delivery = true,
+                "relations" => out.relations = true,
+                "all" => out.all = true,
+                other => {
+                    return Err(VogtError::InvalidRequest(format!(
+                        "include: unknown section '{other}' (comments, sessions, branches, git, delivery, relations, all)"
+                    )))
+                }
+            }
+        }
+        if out.all {
+            out = Self {
+                comments: true,
+                sessions: true,
+                branches: true,
+                git: true,
+                delivery: true,
+                relations: true,
+                all: true,
+            };
+        }
+        Ok(out)
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for GetParams {
@@ -447,13 +527,10 @@ impl<'de> serde::Deserialize<'de> for GetParams {
             .map(str::to_string);
         Ok(Self {
             reference: required_ref(reference).map_err(custom)?,
-            comment_limit: raw
-                .comment_limit
-                .as_ref()
-                .and_then(Value::as_i64)
-                .unwrap_or(200),
-            newest: str_of(&raw.comment_order) == Some("newest"),
+            comment_limit: raw.comment_limit.as_ref().and_then(Value::as_i64),
+            newest: str_of(&raw.comment_order) != Some("oldest"),
             summary: str_of(&raw.mode) == Some("summary"),
+            include: Include::parse(raw.include.as_ref()).map_err(custom)?,
         })
     }
 }
@@ -640,6 +717,8 @@ struct BoardParams {
     assignee: Option<String>,
     initiative: Option<String>,
     label: Option<String>,
+    /// Add `live_sessions` to every card (WI-4758). Off by default.
+    with_sessions: bool,
     /// A snapshot was sent (not `null`), whatever its type.
     has_snapshot: bool,
     snapshot: Option<String>,
@@ -686,6 +765,7 @@ impl<'de> serde::Deserialize<'de> for BoardParams {
             assignee: text_strict(&raw.assignee),
             initiative: text_strict(&raw.initiative),
             label: text_strict(&raw.label),
+            with_sessions: flag(&raw.with_sessions),
             has_snapshot: raw.snapshot.as_ref().is_some_and(|value| !value.is_null()),
             snapshot: text_strict(&raw.snapshot),
             fingerprint: crate::decisions::digest_of(&Value::Object(body)),
@@ -1697,6 +1777,7 @@ fn list_work<C: Clock, I: IdFactory>(
         label,
         query,
         include_finished,
+        with_sessions,
         mode,
         limit,
         offset,
@@ -1718,7 +1799,7 @@ fn list_work<C: Clock, I: IdFactory>(
         .transpose()?;
     if let Some(project_row) = project_row.as_ref() {
         if !upstream::is_linked(project_row) {
-            let mut result = work_page(mode, offset, Vec::new(), 0, Some("unlinked"));
+            let mut result = work_page(mode, offset, Vec::new(), 0, Some("unlinked"), None);
             result["detail"] = unlinked_detail(&view, project_row)?
                 .map(Value::String)
                 .unwrap_or(Value::Null);
@@ -1755,7 +1836,17 @@ fn list_work<C: Clock, I: IdFactory>(
     if upstream_rows.is_empty() {
         let page = view.list_work_items(&work_filter)?;
         let total = view.count_work_items(&work_filter)?;
-        return Ok(work_page(mode, offset, page, total, link_state));
+        let sessions = with_sessions
+            .then(|| live_sessions_by_item(ctx, &view, &page))
+            .transpose()?;
+        return Ok(work_page(
+            mode,
+            offset,
+            page,
+            total,
+            link_state,
+            sessions.as_ref(),
+        ));
     }
     // Merged paging: the declared page window cannot be pushed into SQL once
     // upstream rows join the list, so both halves are gathered and the one
@@ -1775,12 +1866,168 @@ fn list_work<C: Clock, I: IdFactory>(
     });
     let total = view.count_work_items(&work_filter)? + upstream_rows.len() as i64;
     let start = offset.max(0) as usize;
-    let page = merged
+    let page: Vec<WorkItem> = merged
         .into_iter()
         .skip(start)
         .take(limit.max(0) as usize)
         .collect();
-    Ok(work_page(mode, offset, page, total, link_state))
+    let sessions = with_sessions
+        .then(|| live_sessions_by_item(ctx, &view, &page))
+        .transpose()?;
+    Ok(work_page(
+        mode,
+        offset,
+        page,
+        total,
+        link_state,
+        sessions.as_ref(),
+    ))
+}
+
+/// Per work-item id, the `live_sessions` object of one `work.list` row.
+pub(crate) type LiveSessionsByItem = std::collections::HashMap<String, Value>;
+
+/// `live_sessions` {count, worst, ids} for every item of one page (WI-4751).
+///
+/// ONE `ReadView` read for the whole page
+/// (`unstopped_sessions_for_items`), joined in memory with one engine list.
+/// "Live" is `live_sessions_of`'s definition: the engine says the session is
+/// alive, or its activity is `hibernated`. An engine that cannot be asked
+/// (absent or erroring) makes `live_sessions` `null` ("unknown") for a row
+/// with recorded un-stopped sessions, never a count of 0 (WI-4753); a row with
+/// none recorded is a true 0 either way. The grouped read is one query per
+/// chunk of ids, not one per page. `worst` is the lowest `Attention::order_of` the
+/// session rail, the oversight table and `session.sweep` already sort by
+/// (`decisions::classify`, the same `stall_after` of 10 minutes).
+fn live_sessions_by_item<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    page: &[WorkItem],
+) -> Result<LiveSessionsByItem, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let item_ids: Vec<String> = page.iter().map(|item| item.id.clone()).collect();
+    live_sessions_for_ids(ctx, view, &item_ids)
+}
+
+/// `live_sessions_by_item` over bare item ids, for a response that gathers
+/// the ids of several cells or pages and asks once (`board.list`, `backlog`;
+/// WI-4758). Empty ids (upstream truth, no declared item) and repeats are
+/// dropped; the definition of "live", the attention ordering and the
+/// "unknown" semantics are the ones above, not a copy.
+pub(crate) fn live_sessions_for_ids<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    ids: &[String],
+) -> Result<LiveSessionsByItem, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    use crate::decisions::{classify, Attention};
+    let mut seen = std::collections::HashSet::new();
+    let item_ids: Vec<String> = ids
+        .iter()
+        .filter(|id| !id.is_empty() && seen.insert(id.as_str()))
+        .cloned()
+        .collect();
+    let recorded = view.unstopped_sessions_for_items(&item_ids)?;
+    // Only an item with a recorded session needs the engine to be asked.
+    // `None` = the engine could not be asked (absent, or it errored): a row
+    // with recorded sessions is then "unknown" (`null`), never a count of 0.
+    let engine_rows: Option<Vec<_>> = if recorded.is_empty() {
+        Some(Vec::new())
+    } else {
+        ctx.engine
+            .as_ref()
+            .and_then(|engine| engine.list_sessions_counted(false).ok())
+            .map(|(rows, _hidden)| rows)
+    };
+    let unknown_items: std::collections::HashSet<&str> = match engine_rows {
+        Some(_) => std::collections::HashSet::new(),
+        None => recorded
+            .iter()
+            .filter_map(|session| session.work_item_id.as_deref())
+            .collect(),
+    };
+    let engine_rows = engine_rows.unwrap_or_default();
+    let now = super::now_of(&ctx.clock);
+    let mut grouped: std::collections::HashMap<String, Vec<(u8, String, String)>> =
+        std::collections::HashMap::new();
+    for session in &recorded {
+        let Some(item_id) = session.work_item_id.clone() else {
+            continue;
+        };
+        let Some(live) = engine_rows
+            .iter()
+            .find(|row| row.id == session.engine_session_id)
+        else {
+            continue;
+        };
+        if !(live.alive || live.hibernated()) {
+            continue;
+        }
+        let verdict = classify(
+            Some(live.activity.as_str()),
+            Some(live.alive),
+            Some(live.activity == "waiting-for-input"),
+            live.approval
+                .as_ref()
+                .map(|approval| approval.question.as_str()),
+            live.blocked.as_ref().map(|blocked| blocked.reason.as_str()),
+            live.approval
+                .as_ref()
+                .map(|approval| approval.kind.as_str()),
+            live.last_output_at
+                .as_deref()
+                .and_then(|text| crate::core::from_iso(text).ok()),
+            now,
+            10 * 60,
+            live.done_at.as_deref(),
+        );
+        let name = verdict.attention.as_str().to_string();
+        grouped.entry(item_id).or_default().push((
+            Attention::order_of(&name),
+            name,
+            session.id.clone(),
+        ));
+    }
+    let mut out = LiveSessionsByItem::new();
+    for id in &item_ids {
+        if unknown_items.contains(id.as_str()) {
+            out.insert(id.clone(), Value::Null);
+            continue;
+        }
+        let rows = grouped.remove(id).unwrap_or_default();
+        let worst = rows
+            .iter()
+            .min_by_key(|(order, _, _)| *order)
+            .map(|(_, name, _)| Value::String(name.clone()))
+            .unwrap_or(Value::Null);
+        out.insert(
+            id.clone(),
+            json!({
+                "count": rows.len(),
+                "worst": worst,
+                "ids": rows.iter().map(|(_, _, id)| id.clone()).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    Ok(out)
+}
+
+/// Add `live_sessions` to one row. An item with no declared id (upstream
+/// truth) has no sessions: a true 0.
+pub(crate) fn attach_live_sessions(row: &mut Value, sessions: &LiveSessionsByItem, item_id: &str) {
+    if let Some(row) = row.as_object_mut() {
+        let live = sessions
+            .get(item_id)
+            .cloned()
+            .unwrap_or_else(|| json!({"count": 0, "worst": null, "ids": []}));
+        row.insert("live_sessions".to_string(), live);
+    }
 }
 
 fn work_page(
@@ -1789,17 +2036,22 @@ fn work_page(
     page: Vec<WorkItem>,
     total: i64,
     link_state: Option<&str>,
+    sessions: Option<&LiveSessionsByItem>,
 ) -> Value {
     let following = offset + page.len() as i64;
     let page_empty = page.is_empty();
     let items: Vec<Value> = page
         .iter()
         .map(|item| {
-            if mode == "full" {
+            let mut row = if mode == "full" {
                 serde_json::to_value(item).unwrap_or(Value::Null)
             } else {
                 summary_row(item)
+            };
+            if let Some(sessions) = sessions {
+                attach_live_sessions(&mut row, sessions, &item.id);
             }
+            row
         })
         .collect();
     // `WorkListResult`'s field order, every key present. A scoped list and a
@@ -1921,27 +2173,42 @@ fn strings(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One work item with its comments, sessions, branches and git story.
+/// Comments `work.get` returns when the caller names no `comment_limit` and
+/// does not ask for `all` (WI-4726).
+const LEAN_COMMENT_LIMIT: i64 = 3;
+/// The old default, kept for `include=all`.
+const FULL_COMMENT_LIMIT: i64 = 200;
+/// Stopped sessions `include=sessions` returns besides the live ones.
+const SESSIONS_NEWEST_STOPPED: usize = 3;
+
+/// One work item with the sections `include` names (WI-4726).
 ///
 /// A declared `WI-n` and an upstream subject key resolve the same way. Comments
 /// and sessions belong to a declared row; an upstream item has none of either
 /// until it is adopted. Branches and the git story are derived reads and come
-/// back for either.
-fn get_work<C: Clock, I: IdFactory>(
+/// back for either. The default is lean: the item, its newest comments, its
+/// relations and its delivery. `include=all` is the full shape.
+fn get_work<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: GetParams,
 ) -> Result<Value, VogtError> {
     let GetParams {
         reference,
-        comment_limit: limit,
+        comment_limit,
         newest,
         summary,
+        include,
     } = params;
+    let limit = comment_limit.unwrap_or(if include.all {
+        FULL_COMMENT_LIMIT
+    } else {
+        LEAN_COMMENT_LIMIT
+    });
     let reference = reference.as_str();
     let view = ctx.declared.read()?;
     let mut item = upstream::resolve_work_ref(ctx, &view, reference)?;
     let native = view.work_item_by_ref(reference)?.is_some();
-    let mut comments = if native && limit > 0 && !item.id.is_empty() {
+    let mut comments = if include.comments && native && limit > 0 && !item.id.is_empty() {
         view.comments_for(&item.id, limit, newest)?
     } else {
         Vec::new()
@@ -1950,26 +2217,96 @@ fn get_work<C: Clock, I: IdFactory>(
         item.body.clear();
         comments.clear();
     }
-    // Branches, then the git story, then the session join: the order Python's
-    // `get_work` reads the clock in, which the next timestamp depends on.
-    let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
-    let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
-    let delivery = delivery_of(ctx, &view, &item, native, &branches)?;
-    let sessions = sessions_for(ctx, &view, &item)?;
-    Ok(json!({
-        "item": item,
-        "comments": comments,
-        "sessions": sessions,
-        "branches": branches,
-        "git": git,
-        "delivery": delivery,
-        "walked": [],
-        "live_sessions": [],
+    if !include.relations {
+        item.relations.clear();
+    }
+    // Branches, then the git story, then the session join. Delivery reads the
+    // branches too, so they are derived whenever any of the three is asked for.
+    let branches = if include.branches || include.git || include.delivery {
+        crate::application::git_story::branch_views_for(ctx, &view, &item)?
+    } else {
+        Vec::new()
+    };
+    let mut git = if include.git {
+        crate::application::git_story::git_story_for(ctx, &item, &branches)?
+    } else {
+        None
+    };
+    if include.branches && !include.all {
+        // `git.branches` repeats the top-level `branches`.
+        if let Some(Value::Object(story)) = git.as_mut() {
+            story.remove("branches");
+        }
+    }
+    let delivery = if include.delivery {
+        Some(delivery_of(ctx, &view, &item, native, &branches)?)
+    } else {
+        None
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("item".into(), json!(item));
+    if include.comments || include.all {
+        out.insert("comments".into(), json!(comments));
+    }
+    if include.sessions {
+        let mut sessions = sessions_for(ctx, &view, &item)?;
+        if !include.all {
+            let omitted = cap_sessions(&mut sessions);
+            if omitted > 0 {
+                out.insert("sessions_omitted".into(), json!(omitted));
+            }
+        }
+        out.insert("sessions".into(), json!(sessions));
+    }
+    if include.branches {
+        out.insert("branches".into(), json!(branches));
+    }
+    if include.git {
+        out.insert("git".into(), json!(git));
+    }
+    if let Some(delivery) = delivery {
+        out.insert("delivery".into(), json!(delivery));
+    }
+    if include.all {
+        out.insert("walked".into(), json!([]));
+        out.insert("live_sessions".into(), json!(live_sessions_of(ctx, &item)));
         // Always present, null when no transition recorded a claim. Python's
         // WorkResult serializes the field even when it is None; omitting the
         // key fails a client that decodes the schema.
-        "claim_check": Value::Null,
-    }))
+        out.insert("claim_check".into(), Value::Null);
+    }
+    Ok(Value::Object(out))
+}
+
+/// Keep the live sessions and the newest few stopped ones; return how many
+/// were dropped. `rows` come from `sessions_for` (`running`, `started_at`).
+fn cap_sessions(rows: &mut Vec<Value>) -> usize {
+    let live = |row: &Value| row["stopped_at"].is_null();
+    let mut stopped: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !live(row))
+        .map(|(at, row)| {
+            (
+                at,
+                row["started_at"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    stopped.sort_by(|a, b| b.1.cmp(&a.1));
+    let keep: std::collections::HashSet<usize> = stopped
+        .iter()
+        .take(SESSIONS_NEWEST_STOPPED)
+        .map(|(at, _)| *at)
+        .collect();
+    let before = rows.len();
+    let mut at = 0;
+    rows.retain(|row| {
+        let kept = live(row) || keep.contains(&at);
+        at += 1;
+        kept
+    });
+    before - rows.len()
 }
 
 /// How many of an item's comments the delivery projection reads, newest
@@ -2137,6 +2474,44 @@ fn require_verification(
         )));
     }
     Ok(())
+}
+
+/// The sessions still bound to `item` and alive or hibernated, as the full
+/// session rows the web's `liveSessionsWarning` reads (WI-998, WI-4746).
+/// Python's `_warn_live_sessions` defines "live" the same way. A warning,
+/// never a refusal: an engine that cannot be asked, or a failed read, yields
+/// no rows rather than failing a write that already happened.
+fn live_sessions_of<C, I>(ctx: &AppContext<C, I>, item: &WorkItem) -> Vec<Value>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if item.id.is_empty() {
+        return Vec::new();
+    }
+    let params = super::sessions::ListSessionsParams {
+        project: None,
+        work_item: Some(item.reference.clone()),
+        include_stopped: false,
+        limit: 200,
+        offset: 0,
+        order: "started".to_string(),
+        mode: "full".to_string(),
+        states: None,
+        stall_after_minutes: 10,
+        include_hidden: false,
+        fields: None,
+        started_by_session: None,
+    };
+    let Ok(listed) = super::sessions::list_sessions(ctx, &params) else {
+        return Vec::new();
+    };
+    listed
+        .sessions
+        .into_iter()
+        .filter(|row| row.alive == Some(true) || row.activity.as_deref() == Some("hibernated"))
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .collect()
 }
 
 /// Sessions bound to a declared item. An upstream item has no declared id, so
@@ -2894,6 +3269,12 @@ where
             },
         )?;
     }
+    // Only a move into a finished state warns (WI-998); nothing is unbound.
+    let live = if TERMINAL_STATES.contains(&current.state.as_str()) {
+        live_sessions_of(ctx, &current)
+    } else {
+        Vec::new()
+    };
     Ok(json!({
         "item": current,
         "comments": [],
@@ -2901,7 +3282,7 @@ where
         "branches": [],
         "git": null,
         "walked": if walk { path } else { Vec::<String>::new() },
-        "live_sessions": [],
+        "live_sessions": live,
     }))
 }
 
@@ -3564,6 +3945,7 @@ fn list_board<C: Clock, I: IdFactory>(
         assignee,
         initiative,
         label,
+        with_sessions,
         has_snapshot,
         snapshot: snapshot_token,
         fingerprint,
@@ -3768,15 +4150,19 @@ fn list_board<C: Clock, I: IdFactory>(
         *lane_total = json!(lane_total.as_i64().unwrap_or(0) + count);
     }
     let limit = (page_size + 1).max(0) as usize;
-    let rendered: Vec<Value> = queries
+    let drawn: Vec<(
+        &crate::storage::interface::BoardCellQuery,
+        Vec<WorkItem>,
+        Value,
+    )> = queries
         .iter()
         .map(|query| {
             let key = (query.lane_key.clone(), query.state.clone());
             let declared = pages.get(&key).cloned().unwrap_or_default();
             let fetched = board_merge_cell(declared, &upstream_entries, query, limit);
-            let shown: Vec<&WorkItem> = fetched.iter().take(page_size.max(0) as usize).collect();
-            let next_cursor = match shown.last() {
-                Some(last) if fetched.len() > shown.len() => Value::String(board_token(&json!({
+            let keep = page_size.max(0) as usize;
+            let next_cursor = match fetched.get(..keep.min(fetched.len())).and_then(<[_]>::last) {
+                Some(last) if fetched.len() > keep => Value::String(board_token(&json!({
                     "kind": "cell",
                     "fingerprint": fingerprint,
                     "revision": revision,
@@ -3788,10 +4174,38 @@ fn list_board<C: Clock, I: IdFactory>(
                 }))),
                 _ => Value::Null,
             };
+            let shown: Vec<WorkItem> = fetched.into_iter().take(keep).collect();
+            (query, shown, next_cursor)
+        })
+        .collect();
+    // ONE grouped read for every card of the whole response, not one per cell.
+    let sessions = with_sessions
+        .then(|| {
+            let ids: Vec<String> = drawn
+                .iter()
+                .flat_map(|(_, shown, _)| shown.iter().map(|item| item.id.clone()))
+                .collect();
+            live_sessions_for_ids(ctx, &view, &ids)
+        })
+        .transpose()?;
+    let rendered: Vec<Value> = drawn
+        .iter()
+        .map(|(query, shown, next_cursor)| {
+            let key = (query.lane_key.clone(), query.state.clone());
+            let items: Vec<Value> = shown
+                .iter()
+                .map(|item| {
+                    let mut row = serde_json::to_value(item).unwrap_or(Value::Null);
+                    if let Some(sessions) = sessions.as_ref() {
+                        attach_live_sessions(&mut row, sessions, &item.id);
+                    }
+                    row
+                })
+                .collect();
             json!({
                 "lane_key": query.lane_key,
                 "state": query.state,
-                "items": shown,
+                "items": items,
                 "total": counts.get(&key).copied().unwrap_or(0),
                 "next_cursor": next_cursor,
             })
@@ -4080,7 +4494,7 @@ mod tests {
         // `WorkListResult`'s field order, with the nulls present. A global list
         // has no link state and an empty page has no next offset, and neither
         // is a reason to drop the key.
-        let page = work_page("summary", 0, Vec::new(), 0, None);
+        let page = work_page("summary", 0, Vec::new(), 0, None, None);
         let Value::Object(map) = &page else {
             panic!("a page is an object");
         };
@@ -4100,7 +4514,7 @@ mod tests {
         assert_eq!(page["link_state"], Value::Null);
         assert_eq!(page["detail"], Value::Null);
 
-        let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"));
+        let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"), None);
         let Value::Object(scoped_map) = &scoped else {
             panic!("a page is an object");
         };
@@ -4784,6 +5198,508 @@ mod tests {
         assert_eq!(
             answer["missing"].as_array().unwrap().len(),
             super::WORK_GET_MANY_LIMIT
+        );
+    }
+
+    /// Two engine sessions per row is enough to rank: an approval beats a
+    /// running one, and a hibernated one counts but ranks last.
+    const ENGINE_SESSIONS: &str = r#"[
+      {"id":"eng-run","name":"a","alive":true,"activity":"running","role":"worker"},
+      {"id":"eng-appr","name":"b","alive":true,"activity":"awaiting-approval","role":"worker","approval":{"question":"Proceed?","command_excerpt":"x","detected_at":"2026-10-31T06:00:00Z","kind":"permission","key":"k","options":[]}},
+      {"id":"eng-hib","name":"c","alive":false,"activity":"hibernated","role":"worker"},
+      {"id":"eng-hib2","name":"d","alive":false,"activity":"hibernated","role":"worker"},
+      {"id":"eng-ghost","name":"f","alive":true,"activity":"running","role":"worker"},
+      {"id":"eng-dead","name":"e","alive":false,"activity":"exited","role":"worker"}
+    ]"#;
+
+    fn opened_with_engine() -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-work-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = crate::adapters::engine::EngineClient::new(
+            "http://engine",
+            None,
+            Some(std::sync::Arc::new(move |_path, _, _body, _method| {
+                (200, ENGINE_SESSIONS.as_bytes().to_vec())
+            })),
+        );
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    /// Bind a recorded session (`engine` id) to the item `reference`.
+    fn bind_session(built: &Built, reference: &str, session_id: &str, engine: &str, stopped: bool) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("builds a step clock");
+        };
+        let view = ctx.declared.read().unwrap();
+        let item_id = crate::application::resolve::work_item(&view, reference)
+            .unwrap()
+            .id;
+        let actor_id = view.list_actors(1, 0).unwrap()[0].id.clone();
+        drop(view);
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_session(&crate::core::CodingSession {
+            id: session_id.to_string(),
+            engine_session_id: engine.to_string(),
+            project_id: "prj_alpha".to_string(),
+            work_item_id: Some(item_id),
+            actor_id,
+            cwd: "/tmp".to_string(),
+            template: None,
+            model: None,
+            effort: None,
+            reason: "test".to_string(),
+            purpose: None,
+            started_by_session: None,
+            started_by_kind: None,
+            started_at: moment(),
+            stopped_at: stopped.then(moment),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn live_fixture() -> Built {
+        let built = opened_with_engine();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        insert_project(&built, "alpha", false, WriteBack::Disabled);
+        for title in ["Mixed", "Dead", "Empty", "Asleep"] {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": title, "project": "alpha", "reason": "t"}),
+            )
+            .unwrap();
+        }
+        bind_session(&built, "WI-1", "ses_run", "eng-run", false);
+        bind_session(&built, "WI-1", "ses_appr", "eng-appr", false);
+        bind_session(&built, "WI-1", "ses_hib", "eng-hib", false);
+        // Vogt stopped one; the engine's process of the other has exited.
+        bind_session(&built, "WI-2", "ses_stopped", "eng-ghost", true);
+        bind_session(&built, "WI-2", "ses_dead", "eng-dead", false);
+        bind_session(&built, "WI-4", "ses_hib2", "eng-hib2", false);
+        built
+    }
+
+    fn row<'a>(page: &'a Value, reference: &str) -> &'a Value {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["ref"] == reference)
+            .unwrap_or_else(|| panic!("no {reference} in {page}"))
+    }
+
+    /// Three project-less items (the Board keeps them): WI-1 and WI-2 open,
+    /// WI-3 in progress. WI-1 has a recorded session, WI-3 none.
+    fn board_fixture(engine: Option<(u16, &'static str)>) -> Built {
+        let built = built_with(engine);
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        // Only the session record needs a project; the items have none.
+        insert_project(&built, "alpha", false, WriteBack::Disabled);
+        for title in ["One", "Two", "Three"] {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": title, "reason": "t"}),
+            )
+            .unwrap();
+        }
+        transition_work(
+            ctx,
+            json!({"ref": "WI-3", "to_state": "in_progress", "reason": "t"}),
+        )
+        .unwrap();
+        bind_session(&built, "WI-1", "ses_run", "eng-run", false);
+        built
+    }
+
+    fn board_two_cells(built: &Built, extra: Value) -> Value {
+        let mut params = json!({
+            "lane_mode": "none",
+            "cells": [
+                {"lane_key": "", "state": "open"},
+                {"lane_key": "", "state": "in_progress"},
+            ],
+            "page_size": 10,
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::application::services::work::board_list_op(built, params).unwrap()
+    }
+
+    fn card<'a>(board: &'a Value, reference: &str) -> &'a Value {
+        board["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|cell| cell["items"].as_array().unwrap())
+            .find(|item| item["ref"] == reference)
+            .unwrap_or_else(|| panic!("no {reference} in {board}"))
+    }
+
+    #[test]
+    fn board_with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for extra in [json!({}), json!({"with_sessions": false})] {
+            let board = board_two_cells(&built, extra);
+            for reference in ["WI-1", "WI-2", "WI-3"] {
+                assert!(card(&board, reference).get("live_sessions").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn board_with_sessions_adds_live_sessions_to_cards_of_every_cell_in_one_read() {
+        use crate::storage::sqlite::declared::READS;
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        board_two_cells(&built, json!({}));
+        let without = READS.with(|r| *r.borrow());
+        assert_eq!((without.grouped, without.per_item), (0, 0));
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        let board = board_two_cells(&built, json!({"with_sessions": true}));
+        let with = READS.with(|r| *r.borrow());
+        // Two cells, one grouped read for the whole response.
+        assert_eq!((with.grouped, with.per_item), (1, 0), "{board}");
+        assert_eq!(card(&board, "WI-1")["live_sessions"]["count"], 1, "{board}");
+        assert_eq!(
+            card(&board, "WI-1")["live_sessions"]["ids"],
+            json!(["ses_run"])
+        );
+        let none = json!({"count": 0, "worst": null, "ids": []});
+        assert_eq!(card(&board, "WI-2")["live_sessions"], none);
+        assert_eq!(card(&board, "WI-3")["live_sessions"], none);
+    }
+
+    #[test]
+    fn board_with_sessions_is_unknown_when_the_engine_cannot_be_asked() {
+        for engine in [None, Some((500, "boom"))] {
+            let built = board_fixture(engine);
+            let board = board_two_cells(&built, json!({"with_sessions": true}));
+            assert_eq!(
+                card(&board, "WI-1")["live_sessions"],
+                Value::Null,
+                "{board}"
+            );
+            assert_eq!(
+                card(&board, "WI-2")["live_sessions"],
+                json!({"count": 0, "worst": null, "ids": []}),
+                "{board}"
+            );
+        }
+    }
+
+    fn backlog_with(built: &Built, extra: Value) -> Value {
+        let mut params = json!({"include_prs": false});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::application::views::backlog_op(built, params).unwrap()
+    }
+
+    #[test]
+    fn backlog_with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for extra in [json!({}), json!({"with_sessions": false})] {
+            let page = backlog_with(&built, extra);
+            assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
+            for item in page["items"].as_array().unwrap() {
+                assert!(item.get("live_sessions").is_none(), "{item}");
+            }
+        }
+    }
+
+    #[test]
+    fn backlog_with_sessions_adds_live_sessions_in_one_read_in_both_modes() {
+        use crate::storage::sqlite::declared::READS;
+        let built = board_fixture(Some((200, ENGINE_SESSIONS)));
+        for mode in ["summary", "full"] {
+            READS.with(|r| *r.borrow_mut() = Default::default());
+            let page = backlog_with(&built, json!({"with_sessions": true, "mode": mode}));
+            let with = READS.with(|r| *r.borrow());
+            assert_eq!((with.grouped, with.per_item), (1, 0), "{page}");
+            assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
+            for item in page["items"].as_array().unwrap() {
+                let expected = if item["ref"] == "WI-1" {
+                    json!({"count": 1, "worst": "running", "ids": ["ses_run"]})
+                } else {
+                    json!({"count": 0, "worst": null, "ids": []})
+                };
+                assert_eq!(item["live_sessions"], expected, "{mode}: {item}");
+            }
+        }
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        backlog_with(&built, json!({}));
+        assert_eq!(READS.with(|r| r.borrow().grouped), 0);
+    }
+
+    #[test]
+    fn backlog_with_sessions_is_unknown_when_the_engine_cannot_be_asked() {
+        for engine in [None, Some((500, "boom"))] {
+            let built = board_fixture(engine);
+            let page = backlog_with(&built, json!({"with_sessions": true}));
+            let by_ref = |reference: &str| {
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["ref"] == reference)
+                    .unwrap_or_else(|| panic!("no {reference} in {page}"))
+                    .clone()
+            };
+            assert_eq!(by_ref("WI-1")["live_sessions"], Value::Null, "{page}");
+            assert_eq!(
+                by_ref("WI-2")["live_sessions"],
+                json!({"count": 0, "worst": null, "ids": []}),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_sessions_is_off_by_default_and_adds_no_key() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        for params in [json!({}), json!({"with_sessions": false})] {
+            let page = list_work(ctx, params).unwrap();
+            for item in page["items"].as_array().unwrap() {
+                assert!(item.get("live_sessions").is_none(), "{item}");
+            }
+        }
+        let page = list_work(ctx, json!({"with_sessions": true, "mode": "full"})).unwrap();
+        assert!(row(&page, "WI-1").get("live_sessions").is_some(), "{page}");
+    }
+
+    #[test]
+    fn with_sessions_counts_alive_and_hibernated_and_ranks_worst_by_attention() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+        // running + awaiting approval + hibernated: all three are live, and
+        // an approval outranks running and hibernated.
+        let mixed = &row(&page, "WI-1")["live_sessions"];
+        assert_eq!(mixed["count"], 3, "{page}");
+        assert_eq!(mixed["worst"], "approval", "{page}");
+        let mut ids: Vec<&str> = mixed["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["ses_appr", "ses_hib", "ses_run"]);
+        // A stopped record and an exited process are not live.
+        assert_eq!(
+            row(&page, "WI-2")["live_sessions"],
+            json!({"count": 0, "worst": null, "ids": []})
+        );
+        // No session at all.
+        assert_eq!(
+            row(&page, "WI-3")["live_sessions"],
+            json!({"count": 0, "worst": null, "ids": []})
+        );
+        // A hibernated session counts, and is the worst there is.
+        assert_eq!(
+            row(&page, "WI-4")["live_sessions"],
+            json!({"count": 1, "worst": "hibernated", "ids": ["ses_hib2"]})
+        );
+    }
+
+    #[test]
+    fn with_sessions_costs_one_grouped_read_for_the_whole_page() {
+        let built = live_fixture();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let reads = |f: &dyn Fn()| {
+            crate::storage::sqlite::declared::READS.with(|r| *r.borrow_mut() = Default::default());
+            f();
+            crate::storage::sqlite::declared::READS.with(|r| *r.borrow())
+        };
+        let without = reads(&|| {
+            list_work(ctx, json!({})).unwrap();
+        });
+        assert_eq!((without.grouped, without.per_item), (0, 0));
+        let with = reads(&|| {
+            let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+            assert_eq!(page["items"].as_array().unwrap().len(), 4);
+        });
+        assert_eq!((with.grouped, with.per_item), (1, 0));
+    }
+
+    /// Like `opened_with_engine`, with the engine answering `status`/`body`
+    /// (or absent when `engine` is None).
+    fn built_with(engine: Option<(u16, &'static str)>) -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-work-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = engine.map(|(status, body)| {
+            crate::adapters::engine::EngineClient::new(
+                "http://engine",
+                None,
+                Some(std::sync::Arc::new(move |_path, _, _body, _method| {
+                    (status, body.as_bytes().to_vec())
+                })),
+            )
+        });
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
+        let built = build_context(
+            config,
+            Some(principal.clone()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            engine,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal).unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    fn items_with_sessions(built: &Built) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("builds a step clock");
+        };
+        insert_project(built, "alpha", false, WriteBack::Disabled);
+        for title in ["Bound", "Unbound"] {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": title, "project": "alpha", "reason": "t"}),
+            )
+            .unwrap();
+        }
+        bind_session(built, "WI-1", "ses_run", "eng-run", false);
+    }
+
+    #[test]
+    fn with_sessions_is_unknown_when_the_engine_cannot_be_asked() {
+        let absent = built_with(None);
+        let erroring = built_with(Some((500, "boom")));
+        for built in [&absent, &erroring] {
+            items_with_sessions(built);
+            let Built::StepSequential(ctx) = built else {
+                unreachable!("builds a step clock");
+            };
+            let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+            // Recorded un-stopped session, engine unreachable: unknown, not 0.
+            assert_eq!(row(&page, "WI-1")["live_sessions"], Value::Null, "{page}");
+            // Nothing recorded: a true 0 whether or not the engine answers.
+            assert_eq!(
+                row(&page, "WI-2")["live_sessions"],
+                json!({"count": 0, "worst": null, "ids": []}),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_sessions_gives_counts_when_the_engine_answered() {
+        let built = built_with(Some((200, ENGINE_SESSIONS)));
+        items_with_sessions(&built);
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+        assert_eq!(row(&page, "WI-1")["live_sessions"]["count"], 1, "{page}");
+    }
+
+    #[test]
+    fn a_recorded_session_absent_from_the_engine_list_is_not_live_and_not_unknown() {
+        // The engine answered (with a list that lacks `eng-gone`): the row is
+        // a known 0, not null.
+        let built = built_with(Some((200, ENGINE_SESSIONS)));
+        items_with_sessions(&built);
+        bind_session(&built, "WI-2", "ses_gone", "eng-gone", false);
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        let page = list_work(ctx, json!({"with_sessions": true})).unwrap();
+        assert_eq!(
+            row(&page, "WI-2")["live_sessions"],
+            json!({"count": 0, "worst": null, "ids": []}),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn with_sessions_works_for_a_page_larger_than_the_chunk() {
+        use crate::storage::sqlite::declared::{READS, UNSTOPPED_SESSIONS_CHUNK};
+        let built = built_with(Some((200, ENGINE_SESSIONS)));
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("builds a step clock");
+        };
+        insert_project(&built, "alpha", false, WriteBack::Disabled);
+        let total = UNSTOPPED_SESSIONS_CHUNK * 2 + 1;
+        for n in 0..total {
+            create_work(
+                ctx,
+                json!({"kind": "feature", "title": format!("Item {n}"), "project": "alpha", "reason": "t"}),
+            )
+            .unwrap();
+        }
+        // A live session on the first and on the last item: different chunks.
+        bind_session(&built, "WI-1", "ses_first", "eng-run", false);
+        bind_session(
+            &built,
+            &format!("WI-{total}"),
+            "ses_last",
+            "eng-appr",
+            false,
+        );
+        READS.with(|r| *r.borrow_mut() = Default::default());
+        let page = list_work(ctx, json!({"with_sessions": true, "limit": total})).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), total);
+        assert_eq!(READS.with(|r| r.borrow().grouped), 3);
+        assert_eq!(row(&page, "WI-1")["live_sessions"]["count"], 1, "first");
+        assert_eq!(
+            row(&page, &format!("WI-{total}"))["live_sessions"]["ids"],
+            json!(["ses_last"])
         );
     }
 

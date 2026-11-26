@@ -16,14 +16,15 @@ use super::views::{
     Comment, CommentParamsKind, ContractExemptionView, CoverageEntry, CreateInitiativeParamsState,
     CreateWorkParamsEffort, CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef,
     DependencySummary, DepsResultStatus, DriftProposal, DriftResolveParamsResolution,
-    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
-    InitiativeTrackingIssue, ListInitiativesParamsMode, ListWorkParamsKindsItem,
-    ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource, Observation,
-    ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem, RecommendationView,
-    RelateWorkParamsKind, SessionSummary, SweepReportView, UnrelateWorkParamsKind,
-    UpdateInitiativeParamsState, UpdateWorkParamsEffort, UpdateWorkParamsPriority, VerdictFields,
-    VerificationFields, WorkItem, WorkItemBranchView, WorkItemGitStory, WorkItemRow,
-    WorkListResultItems, WorkListResultLinkState, WorkListResultMode, WriteResultMode,
+    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsIncludeItem, GetWorkParamsMode,
+    HandoffFields, Initiative, InitiativeTrackingIssue, ListInitiativesParamsMode,
+    ListWorkParamsKindsItem, ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource,
+    Observation, ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem,
+    RecommendationView, RelateWorkParamsKind, SessionSummary, SweepReportView,
+    UnrelateWorkParamsKind, UpdateInitiativeParamsState, UpdateWorkParamsEffort,
+    UpdateWorkParamsPriority, VerdictFields, VerificationFields, WorkItem, WorkItemBranchView,
+    WorkItemGitStory, WorkItemRow, WorkListResultItems, WorkListResultLinkState,
+    WorkListResultMode, WriteResultMode,
 };
 use super::{date_time, optional_date_time, optional_string};
 
@@ -313,9 +314,13 @@ pub struct ClaimCheck {
 pub struct GetWorkParams {
     /// Work item reference, e.g. WI-7. Alias: `id`.
     pub r#ref: String,
-    #[serde(default = "default_get_work_params_comment_limit")]
-    #[schemars(range(min = 0, max = 500))]
-    pub comment_limit: i64,
+    /// How many comments to return. Default 3 (the newest); with `include` containing `all`, 200.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_get_work_params_comment_limit")]
+    pub comment_limit: Option<i64>,
+    /// Sections to return besides the item: comments, sessions, branches, git, delivery, relations, or `all`. Default (lean, WI-4726): comments (newest 3), delivery, relations. `sessions` returns the live sessions plus the newest 3 others and `sessions_omitted` counts the rest; `git` leaves out its own `branches` when `branches` is also included. `all` returns the full shape (every comment up to `comment_limit`, every session, `branches` and `git.branches`, `walked`, `live_sessions`, `claim_check`); the web UI asks for it.
+    #[serde(default)]
+    pub include: Option<Vec<GetWorkParamsIncludeItem>>,
     /// `summary` omits the item body and comments; `full` (default) keeps them.
     #[serde(default = "default_get_work_params_mode")]
     pub mode: GetWorkParamsMode,
@@ -372,6 +377,9 @@ pub struct ListWorkParams {
     /// Include done and wont_do items.
     #[serde(default)]
     pub include_finished: bool,
+    /// Add `live_sessions` {count, worst, ids} to every row: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     /// `summary` (default) returns compact rows — ref, title, kind, state, priority, project — so a long page fits one tool result; `full` returns every field, bodies included.
     #[serde(default = "default_list_work_params_mode")]
     pub mode: ListWorkParamsMode,
@@ -385,7 +393,7 @@ pub struct ListWorkParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkListResult {
-    /// Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode.
+    /// Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode. With `with_sessions`, each row also carries `live_sessions`.
     pub items: WorkListResultItems,
     pub total: i64,
     #[serde(default = "default_work_list_result_mode")]
@@ -426,6 +434,9 @@ pub struct BoardListParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub label: Option<String>,
+    /// Add `live_sessions` {count, worst, ids} to every card: the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     #[serde(default = "default_board_list_params_lane_mode")]
     pub lane_mode: BoardListParamsLaneMode,
     #[schemars(extend("minItems" = 1))]
@@ -638,6 +649,9 @@ pub struct BacklogParams {
     /// Whether open pull requests rank in the backlog. On by default: a synced PR is worklike, and now that closure is observed a merged one self-heals out rather than lingering. Set false to see issues and markers only — a view choice, not a data one; the PRs stay queryable through `observations list`.
     #[serde(default = "default_backlog_params_include_prs")]
     pub include_prs: bool,
+    /// Add `live_sessions` {count, worst, ids} to every ranked row of declared work (an observed subject with no work item gets count 0): the item's coding sessions that are alive or hibernated, `worst` the one most in need of attention (approval, blocked, waiting, done, stalled, running, idle, hibernated). `live_sessions` is `null` (unknown) when the item has recorded un-stopped sessions and the engine could not be asked; count 0 means the engine answered. One grouped read per 500 ids. Default false: rows carry no `live_sessions` key. Upstream-only items report count 0.
+    #[serde(default)]
+    pub with_sessions: bool,
     /// `summary` (default) returns each ranked row without its full work item (`item` is null; ref, title, kind, state, priority and score remain); `full` includes it, bodies and all.
     #[serde(default = "default_backlog_params_mode")]
     pub mode: BacklogParamsMode,
@@ -1165,8 +1179,8 @@ fn default_create_work_params_priority() -> CreateWorkParamsPriority {
     CreateWorkParamsPriority::P2
 }
 
-fn default_get_work_params_comment_limit() -> i64 {
-    50
+fn optional_get_work_params_comment_limit(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "integer", "minimum": 0, "maximum": 500 })
 }
 
 fn default_get_work_params_mode() -> GetWorkParamsMode {

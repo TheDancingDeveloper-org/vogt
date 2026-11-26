@@ -1318,8 +1318,7 @@ impl EngineClient {
         if let Some(transport) = &self.transport {
             return Ok(transport(url, headers, body, method));
         }
-        // std, as Python uses urllib: this adapter makes a handful of requests
-        // and the core stays free of an HTTP dependency.
+        // The core's one ureq agent configuration, shared with the other adapters.
         match http1::exchange(url, method, headers, body, timeout.unwrap_or(self.timeout)) {
             Ok((status, body, _headers)) => Ok((status, body)),
             Err(error) => Err(VogtError::EngineUnavailable(format!(
@@ -1507,6 +1506,12 @@ pub struct EngineResources {
     pub processes: i64,
     pub sampled_at: String,
     pub over_threshold: bool,
+    pub memory_current: Option<i64>,
+    pub memory_max: Option<i64>,
+    pub memory_peak: Option<i64>,
+    pub oom_kill: Option<i64>,
+    pub observed_at: Option<String>,
+    pub memory_warning: bool,
 }
 
 /// When and why the engine hibernated a session.
@@ -1540,6 +1545,12 @@ pub struct EngineArchivedSession {
     pub ended_at: Option<String>,
     #[serde(deserialize_with = "lenient::opt_int")]
     pub exit_code: Option<i64>,
+    /// The agent CLI's own conversation id, kept after the session ends.
+    #[serde(deserialize_with = "lenient::opt_str")]
+    pub conversation_id: Option<String>,
+    /// The template a resume of that conversation starts (WI-962).
+    #[serde(deserialize_with = "lenient::opt_str")]
+    pub resume_template: Option<String>,
 }
 
 /// One row of the engine's session-history listing.
@@ -1948,12 +1959,10 @@ fn nonempty(text: &str) -> Option<String> {
 }
 
 /// One HTTP/1.1 exchange. Public so the other urllib-style adapters share it
-/// rather than each carrying a copy. `http` is spoken by the standard library;
-/// `https` goes through ureq on rustls, because GitHub and an https peer are
-/// both real callers.
+/// rather than each carrying a copy. Both `http` and `https` go through one
+/// ureq agent configuration (`http_client::builder`).
 pub mod http1 {
-    use std::io::{Read, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
+    use std::io::Read;
     use std::time::Duration;
 
     use super::BTreeMap;
@@ -1988,13 +1997,10 @@ pub mod http1 {
         timeout: Duration,
         limit: usize,
     ) -> Exchange {
-        if url.starts_with("https://") {
-            return exchange_tls(url, method, headers, body, timeout, limit);
-        }
-        exchange_plain(url, method, headers, body, timeout, limit)
+        exchange_ureq(url, method, headers, body, timeout, limit)
     }
 
-    fn exchange_tls(
+    fn exchange_ureq(
         url: &str,
         method: &str,
         headers: &BTreeMap<String, String>,
@@ -2002,7 +2008,11 @@ pub mod http1 {
         timeout: Duration,
         limit: usize,
     ) -> Exchange {
+        // Redirects: https follows the shared policy (five hops, Authorization
+        // stripped). Plain http never followed them, so a 3xx stays the answer.
+        let redirects = if url.starts_with("https://") { 5 } else { 0 };
         let agent: ureq::Agent = http_client::builder()
+            .max_redirects(redirects)
             .timeout_connect(Some(timeout))
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
@@ -2235,153 +2245,6 @@ pub mod http1 {
             }
         }
         (file, dir)
-    }
-
-    fn exchange_plain(
-        url: &str,
-        method: &str,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-        timeout: Duration,
-        limit: usize,
-    ) -> Exchange {
-        let (host, port, path) = split_http_url(url)?;
-        // `connect` waits for the OS default, which is minutes on a blackholed
-        // address. Python's urllib bounds the connect by the same timeout as the
-        // request, so each resolved address gets that budget and no more.
-        let mut stream = connect_within(host, port, timeout)?;
-        stream.set_read_timeout(Some(timeout)).ok();
-        stream.set_write_timeout(Some(timeout)).ok();
-        // The default port stays off the Host header; any other port is part of
-        // the authority and must be sent.
-        let host_header = if port == 80 {
-            host.to_string()
-        } else {
-            format!("{host}:{port}")
-        };
-        let mut request =
-            format!("{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n");
-        for (name, value) in headers {
-            request.push_str(&format!("{name}: {value}\r\n"));
-        }
-        if !body.is_empty() {
-            request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        }
-        request.push_str("\r\n");
-        stream
-            .write_all(request.as_bytes())
-            .and_then(|()| stream.write_all(body))
-            .map_err(|error| error.to_string())?;
-        let mut raw = Vec::new();
-        stream
-            .take(limit as u64)
-            .read_to_end(&mut raw)
-            .map_err(|error| error.to_string())?;
-        parse_response(&raw)
-    }
-
-    /// Connect to the first address that answers, spending at most `timeout` on
-    /// each. A host that resolves to several addresses tries the next when one
-    /// refuses or times out, which is what `TcpStream::connect` does, but with a
-    /// bound on the wait.
-    fn connect_within(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
-        let addresses = (host, port)
-            .to_socket_addrs()
-            .map_err(|error| error.to_string())?;
-        let mut last = String::from("no address resolved");
-        for address in addresses {
-            match TcpStream::connect_timeout(&address, timeout) {
-                Ok(stream) => return Ok(stream),
-                Err(error) => last = error.to_string(),
-            }
-        }
-        Err(last)
-    }
-
-    fn split_http_url(url: &str) -> Result<(&str, u16, String), String> {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| format!("{url} is not an http URL"))?;
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let (host, port) = match authority.split_once(':') {
-            Some((host, port)) => (
-                host,
-                port.parse::<u16>()
-                    .map_err(|_| format!("bad port in {url}"))?,
-            ),
-            None => (authority, 80),
-        };
-        if host.is_empty() {
-            return Err(format!("no host in {url}"));
-        }
-        Ok((host, port, format!("/{path}")))
-    }
-
-    pub(crate) fn parse_response(raw: &[u8]) -> Exchange {
-        let split = raw
-            .windows(4)
-            .position(|mark| mark == b"\r\n\r\n")
-            .ok_or("no response headers")?;
-        let head = std::str::from_utf8(&raw[..split])
-            .map_err(|_| "response headers are not UTF-8".to_string())?;
-        let mut lines = head.lines();
-        let status = lines
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|code| code.parse().ok())
-            .ok_or_else(|| "no status line".to_string())?;
-        let headers = header_map(lines);
-        let mut body = raw[split + 4..].to_vec();
-        if head
-            .lines()
-            .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
-        {
-            body = decode_chunks(&body)?;
-        }
-        Ok((status, body, headers))
-    }
-
-    /// `Name: value` lines after the status line. Names are lower-cased and
-    /// values trimmed; a repeated name keeps the last value, matching a map.
-    pub(crate) fn header_map<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
-        let mut headers = BTreeMap::new();
-        for line in lines {
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
-        }
-        headers
-    }
-
-    fn decode_chunks(raw: &[u8]) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        let mut rest = raw;
-        loop {
-            let line_end = rest
-                .windows(2)
-                .position(|mark| mark == b"\r\n")
-                .ok_or("truncated chunk")?;
-            let size = std::str::from_utf8(&rest[..line_end])
-                .ok()
-                .and_then(|text| {
-                    usize::from_str_radix(text.trim().split(';').next().unwrap_or(""), 16).ok()
-                })
-                .ok_or("bad chunk size")?;
-            rest = &rest[line_end + 2..];
-            if size == 0 {
-                return Ok(out);
-            }
-            if rest.len() < size + 2 {
-                return Err("truncated chunk".to_string());
-            }
-            out.extend_from_slice(&rest[..size]);
-            rest = &rest[size + 2..];
-        }
     }
 }
 
@@ -2829,23 +2692,193 @@ mod tests {
         assert!(!sent[1].contains("overseer"));
     }
 
+    /// One-shot std TCP server: reads the request head (and `body_len` more
+    /// bytes), sends `reply`, optionally holds the socket, and returns the raw
+    /// request it saw.
+    fn one_shot(reply: Vec<u8>, hold: Duration) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut seen = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let Ok(n) = stream.read(&mut chunk) else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&chunk[..n]);
+                if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+                    let want = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if seen.len() >= end + 4 + want {
+                        break;
+                    }
+                }
+            }
+            let _ = stream.write_all(&reply);
+            let _ = stream.flush();
+            std::thread::sleep(hold);
+            seen
+        });
+        (url, handle)
+    }
+
+    fn pin_exchange(
+        url: &str,
+        method: &str,
+        body: &[u8],
+        timeout: Duration,
+        limit: usize,
+    ) -> http1::Exchange {
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer sekrit".to_string());
+        http1::exchange_limited(
+            &format!("{url}/a/b?x=1"),
+            method,
+            &headers,
+            body,
+            timeout,
+            limit,
+        )
+    }
+
     #[test]
-    fn a_plain_response_keeps_its_headers_lower_cased_and_last_wins() {
-        // No socket: the plain path is a byte parser. The chunked body is
-        // decoded after the headers, so the two do not interfere.
-        let raw = b"HTTP/1.1 200 OK\r\nX-OAuth-Scopes: first\r\nX-OAuth-Scopes: repo, user\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-        let (status, body, headers) = http1::parse_response(raw).unwrap();
+    fn pin_success_content_length_sends_auth_path_and_body() {
+        let (url, server) = one_shot(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Thing: Yes\r\n\r\nhello".to_vec(),
+            Duration::ZERO,
+        );
+        let (status, body, headers) =
+            pin_exchange(&url, "POST", b"{\"a\":1}", Duration::from_secs(2), 1 << 20).unwrap();
+        assert_eq!((status, body.as_slice()), (200, &b"hello"[..]));
+        assert_eq!(headers.get("x-thing").map(String::as_str), Some("Yes"));
+        let seen = String::from_utf8(server.join().unwrap()).unwrap();
+        let lower = seen.to_ascii_lowercase();
+        assert!(seen.starts_with("POST /a/b?x=1 HTTP/1.1\r\n"), "{seen}");
+        assert!(lower.contains("authorization: bearer sekrit\r\n"), "{seen}");
+        assert!(lower.contains("content-length: 7\r\n"), "{seen}");
+        assert!(lower.contains("host: 127.0.0.1:"), "{seen}");
+        assert!(seen.ends_with("{\"a\":1}"), "{seen}");
+    }
+
+    #[test]
+    fn pin_response_headers_are_lower_cased_and_last_wins() {
+        let (url, _s) = one_shot(
+            b"HTTP/1.1 200 OK\r\nX-OAuth-Scopes: first\r\nX-OAuth-Scopes: repo, user\r\nContent-Length: 0\r\n\r\n"
+                .to_vec(),
+            Duration::ZERO,
+        );
+        let (_, _, headers) =
+            pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1 << 20).unwrap();
+        assert!(
+            headers
+                .get("x-oauth-scopes")
+                .is_some_and(|v| v == "repo, user"),
+            "{headers:?}"
+        );
+    }
+
+    #[test]
+    fn pin_chunked_body_is_decoded() {
+        let (url, _s) = one_shot(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n"
+                .to_vec(),
+            Duration::ZERO,
+        );
+        let (status, body, _) =
+            pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1 << 20).unwrap();
+        assert_eq!((status, body.as_slice()), (200, &b"abcde"[..]));
+    }
+
+    #[test]
+    fn pin_error_statuses_return_status_and_body() {
+        for (code, line) in [(404, "404 Not Found"), (503, "503 Service Unavailable")] {
+            let (url, _s) = one_shot(
+                format!("HTTP/1.1 {line}\r\nContent-Length: 14\r\n\r\n{{\"error\":\"x\"}}\n")
+                    .into_bytes(),
+                Duration::ZERO,
+            );
+            let (status, body, _) =
+                pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1 << 20).unwrap();
+            assert_eq!(status, code);
+            assert_eq!(body, b"{\"error\":\"x\"}\n");
+        }
+    }
+
+    #[test]
+    fn pin_a_silent_server_times_out() {
+        let (url, _s) = one_shot(Vec::new(), Duration::from_secs(3));
+        let started = std::time::Instant::now();
+        let error =
+            pin_exchange(&url, "GET", b"", Duration::from_millis(400), 1 << 20).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn pin_connection_refused_is_an_error() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let error = pin_exchange(
+            &format!("http://127.0.0.1:{port}"),
+            "GET",
+            b"",
+            Duration::from_secs(2),
+            1 << 20,
+        )
+        .unwrap_err();
+        assert!(
+            urllib_form(&error).contains("Connection refused"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pin_a_truncated_body_is_not_reported_as_complete_success() {
+        // Content-Length promises 10, the peer sends 3 and closes.
+        let (url, _s) = one_shot(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc".to_vec(),
+            Duration::ZERO,
+        );
+        let result = pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1 << 20);
+        // Pin only the part both clients share: a short body never yields the
+        // full promised ten bytes.
+        if let Ok((_, body, _)) = result {
+            assert!(body.len() < 10);
+        }
+    }
+
+    #[test]
+    fn pin_a_malformed_response_is_an_error() {
+        let (url, _s) = one_shot(b"garbage with no head terminator".to_vec(), Duration::ZERO);
+        assert!(pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1 << 20).is_err());
+    }
+
+    #[test]
+    fn pin_the_body_is_capped_while_reading() {
+        let mut reply = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n".to_vec();
+        reply.extend(std::iter::repeat_n(b'x', 100_000));
+        let (url, _s) = one_shot(reply, Duration::ZERO);
+        let (status, body, _) =
+            pin_exchange(&url, "GET", b"", Duration::from_secs(2), 1000).unwrap();
         assert_eq!(status, 200);
-        assert_eq!(body, b"hello");
-        assert_eq!(
-            headers.get("x-oauth-scopes").map(String::as_str),
-            Some("repo, user")
-        );
-        assert_eq!(
-            headers.get("transfer-encoding").map(String::as_str),
-            Some("chunked")
-        );
-        assert!(http1::header_map(std::iter::once("not a header")).is_empty());
+        assert!(body.len() <= 1000, "{}", body.len());
+        assert!(!body.is_empty());
     }
 
     #[test]

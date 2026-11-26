@@ -7,7 +7,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::errors::{record_validation, FieldError, Loc, ValidationReport, VogtError};
+use crate::errors::{FieldError, Loc, ValidationReport, VogtError};
 
 /// Apply an operation's parameter schema: fill defaults, reject anything the
 /// schema does not allow, and check types and bounds. A `Null` is an empty
@@ -1213,11 +1213,10 @@ fn invalid(operation: &str, problems: &[FieldError]) -> VogtError {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    record_validation(ValidationReport {
-        text: text.clone(),
+    VogtError::InvalidArguments(Box::new(ValidationReport {
+        text,
         errors: problems.to_vec(),
-    });
-    VogtError::InvalidRequest(text)
+    }))
 }
 
 /// A location step as JSON: a field stays a string, an index becomes a number.
@@ -1232,6 +1231,35 @@ fn loc_json(step: &crate::errors::Loc) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `prepare` runs more than once on the same parameters (the CLI, then a
+    /// service), so what it returns must pass through it unchanged. This holds
+    /// for the transforming steps: whitespace stripping, a datetime coerced to
+    /// its canonical form and the `session.wait_any` cursor.
+    #[test]
+    fn prepare_is_idempotent_for_its_transforming_steps() {
+        let cases = [
+            ("work.get", json!({"id": "  WI-7  "})),
+            ("session.wait_any", json!({"cursor": " NOW "})),
+            ("session.wait_any", json!({"cursor": " 12 "})),
+            (
+                "audit.list",
+                json!({"since": 1_700_000_000, "until": 1_800_000_000}),
+            ),
+            (
+                "work.list",
+                json!({"query": "  spaced  ", "states": " open, done "}),
+            ),
+        ];
+        for (operation, params) in cases {
+            let once = prepare(operation, params.clone());
+            let Ok(once) = once else {
+                panic!("{operation} {params}: {once:?}")
+            };
+            let twice = prepare(operation, once.clone()).unwrap();
+            assert_eq!(once, twice, "{operation} {params}");
+        }
+    }
 
     /// The text after the `invalid arguments` header and model line.
     fn refusal(operation: &str, params: Value) -> String {
@@ -1624,7 +1652,7 @@ mod tests {
                     // The structured half, which the 422 body is built from.
                     // `loc` mixes field names and list indexes, so it is
                     // compared as JSON rather than as text.
-                    if let Some(report) = crate::errors::take_validation(&error) {
+                    if let Some(report) = error.validation_report() {
                         let got = report
                             .errors
                             .iter()

@@ -59,9 +59,18 @@ pub const COMPACT_SCOPE: &str = "total";
 
 /// The limit the deployment runs Codex with when Vogt does not override it.
 pub fn default_limit() -> u64 {
-    std::env::var("ENGINE_CODEX_AUTO_COMPACT_TOKENS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
+    parse_limit(
+        std::env::var("ENGINE_CODEX_AUTO_COMPACT_TOKENS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// `ENGINE_CODEX_AUTO_COMPACT_TOKENS` as the operator set it: a positive
+/// integer wins; unset, blank, zero or junk falls back to
+/// [`DEFAULT_COMPACT_LIMIT`], the same rule mcp-bootstrap applies.
+fn parse_limit(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse().ok())
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_COMPACT_LIMIT)
 }
@@ -128,6 +137,17 @@ pub fn low_limit_warning(limit: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_operator_limit_wins_and_junk_falls_back_to_the_default() {
+        // WI-1575: ENGINE_CODEX_AUTO_COMPACT_TOKENS overrides the 200k default.
+        assert_eq!(parse_limit(None), DEFAULT_COMPACT_LIMIT);
+        assert_eq!(parse_limit(Some("128000")), 128_000);
+        assert_eq!(parse_limit(Some(" 96000 ")), 96_000);
+        for bad in ["", "0", "-5", "abc", "1.5"] {
+            assert_eq!(parse_limit(Some(bad)), DEFAULT_COMPACT_LIMIT, "{bad:?}");
+        }
+    }
 
     #[test]
     fn no_floor_leaves_the_limit_alone() {

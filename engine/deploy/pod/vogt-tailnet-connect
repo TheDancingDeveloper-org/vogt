@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# ssh ProxyCommand for tailnet hosts from a session pod (WI-4716).
+#
+#   vogt-tailnet-connect HOST PORT
+#
+# Probes the SOCKS5 proxy within 2s. If nothing answers it exits 255 with a
+# clear message, so the agent never hangs. Otherwise it relays stdin/stdout
+# through the proxy.
+#
+# The proxy is VOGT_TAILNET_SOCKS5 (host:port). Unset, it is the engine's
+# tailnet SOCKS5, vogt-dev-engine.vogt-dev.svc:1055 (WI-4721). A pod with its
+# own tailscale sidecar (ENGINE_POD_TAILNET=1) is given 127.0.0.1:1055 there.
+set -u
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: vogt-tailnet-connect HOST PORT" >&2
+    exit 255
+fi
+host="$1"
+port="$2"
+proxy="${VOGT_TAILNET_SOCKS5:-vogt-dev-engine.vogt-dev.svc:1055}"
+proxy_host="${proxy%:*}"
+proxy_port="${proxy##*:}"
+
+# shellcheck disable=SC2016  # $1 and $2 expand in the inner shell, on purpose
+if ! timeout 2 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$proxy_host" "$proxy_port" 2>/dev/null; then
+    echo "vogt-tailnet-connect: the tailnet proxy ${proxy} is not answering; the engine's tailnet SOCKS5 (or this pod's tailscale sidecar) is down or not started, so ${host}:${port} is unreachable from here." >&2
+    exit 255
+fi
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+relay="${VOGT_TAILNET_RELAY:-$here/../libexec/vogt-socks5-connect}"
+exec python3 -I "$relay" "$host" "$port" "$proxy_host" "$proxy_port"

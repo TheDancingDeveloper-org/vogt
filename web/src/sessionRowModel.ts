@@ -8,7 +8,7 @@
 // in one and "running" in the other is the same bug the shared breakpoint in
 // `narrow.ts` exists to prevent for widths.
 
-import type { ActivityState, SessionSummary } from "./api";
+import type { ActivityState, SessionResources, SessionSummary } from "./api";
 import { formatAgo } from "./viewAge";
 
 /** The activity-dot class for a session, folding a finished session's exit
@@ -17,6 +17,8 @@ import { formatAgo } from "./viewAge";
 export function activityClass(s: SessionSummary): string {
   // A requested stop exits non-zero (a kill) but is not a crash (WI-913).
   if (s.activity === "stopped") return "stopped";
+  // Asleep, not crashed: a stale code from the run before it slept is not shown.
+  if (s.activity === "hibernated") return "hibernated";
   if (s.exit_code !== null) {
     return s.exit_code === 0 ? "done" : "errored";
   }
@@ -27,6 +29,7 @@ export function activityClass(s: SessionSummary): string {
  *  reads as finished rather than as whatever it was doing when it stopped. */
 export function activityLabel(s: ActivityState, exit: number | null): string {
   if (s === "stopped") return "stopped";
+  if (s === "hibernated") return "hibernated";
   if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
   switch (s) {
     case "waiting-for-input":
@@ -60,11 +63,72 @@ export function formatBytes(bytes: number): string {
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
+/** The resource fields these helpers read; the sweep's copy omits `sampled_at`. */
+export type ResourceReading = Omit<SessionResources, "sampled_at"> & { sampled_at?: string };
+
+/** True when the process-tree figures (rss, cpu) are a real measurement. A
+ *  real sample always counts at least its root process, so `processes === 0`
+ *  is the engine's "not measured" marker (pod sessions, WI-4752) and a missing
+ *  or non-finite rss is no sample either. */
+export function hasProcessSample(r: ResourceReading | null | undefined): r is ResourceReading {
+  return !!r && r.processes > 0 && Number.isFinite(r.rss_bytes);
+}
+
+/** Sort key for "heaviest first": unsampled rows rank below every measured one. */
+export function rssSortKey(r: ResourceReading | null | undefined): number {
+  return hasProcessSample(r) ? r.rss_bytes : -1;
+}
+
+/** The server clears `memory_warning` past this age, so a reading older than
+ *  it is shown as stale rather than current. */
+export const MEMORY_STALE_MS = 30_000;
+
+export interface PodMemoryBadge {
+  /** "73%" of the limit, or the bare size when the limit is unknown. */
+  text: string;
+  /** At or over the engine's warning mark (`memory_warning`). */
+  warning: boolean;
+  /** Muted age hint when the reading is older than `MEMORY_STALE_MS`. */
+  age: string | null;
+  title: string;
+}
+
+function ageHint(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s old`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} min old`;
+  return `${Math.floor(min / 60)} h old`;
+}
+
+/** The pod memory badge for a session row; null when the session carries no
+ *  pod memory reading (host sessions, older engines). */
+export function podMemoryBadge(
+  r: ResourceReading | null | undefined,
+  now: number,
+): PodMemoryBadge | null {
+  if (!r || typeof r.memory_current !== "number" || !Number.isFinite(r.memory_current)) return null;
+  const max = typeof r.memory_max === "number" && r.memory_max > 0 ? r.memory_max : null;
+  const text = max
+    ? `${Math.round((r.memory_current / max) * 100)}%`
+    : formatBytes(r.memory_current);
+  let age: string | null = null;
+  if (r.observed_at) {
+    const at = Date.parse(r.observed_at);
+    if (!Number.isNaN(at) && now - at > MEMORY_STALE_MS) age = ageHint(now - at);
+  }
+  const title = max
+    ? `pod memory ${formatBytes(r.memory_current)} of ${formatBytes(max)}`
+    : `pod memory ${formatBytes(r.memory_current)}, no limit known`;
+  return { text, warning: r.memory_warning === true, age, title };
+}
+
 /** "1.2 GiB · 35% CPU", with a warning mark past the deployment's
- *  threshold; null before the engine has sampled the session. */
+ *  threshold; null before the engine has sampled the session or when the
+ *  sample is the "not measured" marker. */
 export function sessionResourceWord(s: SessionSummary): string | null {
   const r = s.resources;
-  if (!r || s.exit_code !== null || s.activity === "hibernated") return null;
+  if (!hasProcessSample(r) || s.exit_code !== null || s.activity === "hibernated") return null;
   const memory = `${r.over_threshold ? "⚠ " : ""}${formatBytes(r.rss_bytes)}`;
   return r.cpu_pct >= 1 ? `${memory} · ${Math.round(r.cpu_pct)}% CPU` : memory;
 }

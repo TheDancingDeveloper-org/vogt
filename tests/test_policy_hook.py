@@ -732,3 +732,110 @@ def test_install_policy_is_idempotent(tmp_path: Path) -> None:
     assert groups[0]["matcher"] == "Bash"
     assert groups[0]["hooks"][0]["command"].endswith("policy-hook.sh")
     assert installed["hooks"]["SessionStart"] == [{"hooks": []}]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gh issue comment 1 -b "spawn env"',
+        'gh issue close 5 -c "the env loop is done"',
+        'gh issue comment 1 -b "see /proc/1/environ for the rule"',
+    ],
+)
+def test_env_words_in_quoted_gh_text_are_asked_not_refused(
+    tmp_path: Path, command: str
+) -> None:
+    """WI-4411: quoted text that names `env` or a /proc path is a comment body,
+    not a dump. The engine is asked (gh is judged there), and an allow passes."""
+    broker = _Broker(200, b'{"decision":"allow"}')
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        allowed = run(tmp_path, payload, env)
+        assert allowed.returncode == 0, (command, allowed.stderr)
+        assert len(broker.requests) == 1, command
+    finally:
+        broker.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "$AGENT_AUTH_GRANTED"',
+        "echo $AGENT_AUTH_MODE",
+        'echo "$AGENT_AUTH_ONDEMAND" "$AGENT_AUTH_WRITABLE"',
+    ],
+)
+def test_breadcrumb_echo_is_not_asked_or_refused(tmp_path: Path, command: str) -> None:
+    """WI-4411: the four names-only breadcrumbs are echoed by the skills; the
+    hook must neither ask about them nor refuse them when the engine is down."""
+    broker = _Broker(500, b"")
+    try:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        result = run(
+            tmp_path,
+            payload,
+            {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"},
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        assert broker.requests == [], command
+    finally:
+        broker.close()
+
+
+_ENV_GUARD_REASON = (
+    "refusing: environment guard: printing the environment would print the "
+    "session's credentials; never print environment variables or tokens"
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env",
+        "printenv | grep X",
+        "cat /proc/1/environ",
+        "x=$(env)",
+        "git -c alias.x='!cat /proc/1/environ' x",
+        "git -c core.pager='cat /proc/self/environ' log",
+        "gh alias set --shell x 'cat /proc/1/environ'",
+    ],
+)
+def test_environment_dumps_are_asked_and_the_guard_reason_reaches_the_agent(
+    tmp_path: Path, command: str
+) -> None:
+    """WI-4411: a dump in command position is never allowed offline: the hook
+    asks the engine (one request) and the engine's environment-guard reason
+    comes back on stderr with exit 2. The decision itself is the engine's and is
+    covered by the env_dump unit tests."""
+    broker = _Broker(
+        200, json.dumps({"decision": "deny", "reason": _ENV_GUARD_REASON}).encode()
+    )
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        refused = run(tmp_path, payload, env)
+        assert refused.returncode == 2, (command, refused.stderr)
+        assert _ENV_GUARD_REASON in refused.stderr, command
+        assert len(broker.requests) == 1, command
+    finally:
+        broker.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["env", "printenv | grep X", "cat /proc/1/environ", "x=$(env)"],
+)
+def test_environment_dumps_are_refused_when_the_engine_is_unreachable(
+    tmp_path: Path, command: str
+) -> None:
+    """WI-4411: with the engine down a real dump fails closed (the outage
+    refusal, not the guard reason: only the engine can name that rule)."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    refused = run(tmp_path, payload, env)
+    assert refused.returncode == 2, (command, refused.stderr)
+    assert "vogt policy check unavailable" in refused.stderr, command

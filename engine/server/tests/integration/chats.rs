@@ -844,7 +844,13 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
             json!({"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "step one done"}),
         ],
     );
-    await_changes(&client, &base, &id, "ready", 1).await;
+    // The goal is active, so the ended turn is not the session at rest: no
+    // `ready` is published for it.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        changes_of(&client, &base, &id, "ready").await.is_empty(),
+        "task_complete under an active goal is not ready"
+    );
     std::fs::write(&go, "").unwrap();
 
     // Well past `nudge_after`, at its prompt: no nudge while the goal drives.
@@ -862,6 +868,7 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
             json!({"type": "thread_goal_updated", "goal": {"status": "complete", "objective": "ship it"}}),
         ],
     );
+    await_changes(&client, &base, &id, "ready", 1).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while std::fs::read_to_string(&log).unwrap_or_default().is_empty() {
         assert!(
@@ -870,4 +877,84 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// WI-1576: an `AUTOPILOT: DONE` final message under an active `/goal` is held
+/// with its ready, and the goal ending yields exactly one `done` (and one
+/// `ready`) with autopilot turned off.
+#[tokio::test]
+async fn a_done_marker_under_an_active_goal_is_one_done_after_the_goal_ends() {
+    let conversation = "5c1d0e2f-4a6b-4d1c-8e3d-1a7b6c5d4e39";
+    let (_tmp, cfg, rollout) = codex_rollout_sandbox(
+        conversation,
+        vogt_engine_server::autopilot::Policy {
+            nudge_after: Duration::from_secs(600),
+            max_nudges: 10,
+        },
+    );
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "codex-goal-done", "command": ["/bin/cat"], "autopilot": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "codex", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // Codex stamps `completed_at`; a turn that ended after the session began
+    // is live even when the first read already holds it.
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "thread_goal_updated", "goal": {"status": "active", "objective": "ship it"}}),
+            json!({"type": "task_started", "turn_id": "turn-1"}),
+            json!({
+                "type": "task_complete", "turn_id": "turn-1", "completed_at": now,
+                "last_agent_message": "Nothing unblocked is left.\n\nAUTOPILOT: DONE\n"
+            }),
+        ],
+    );
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(changes_of(&client, &base, &id, "done").await.is_empty());
+    assert!(changes_of(&client, &base, &id, "ready").await.is_empty());
+
+    append_rollout(
+        &rollout,
+        &[
+            json!({"type": "thread_goal_updated", "goal": {"status": "complete", "objective": "ship it"}}),
+        ],
+    );
+    await_changes(&client, &base, &id, "done", 1).await;
+    await_changes(&client, &base, &id, "ready", 1).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(changes_of(&client, &base, &id, "done").await.len(), 1);
+    assert_eq!(changes_of(&client, &base, &id, "ready").await.len(), 1);
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        detail["summary"].get("autopilot").is_none(),
+        "autopilot is off: {}",
+        detail["summary"]
+    );
 }

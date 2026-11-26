@@ -18,6 +18,7 @@
 
 pub mod codex_guidance;
 pub mod codex_policy;
+pub mod codex_snapshots;
 pub mod opencode_store;
 pub mod salvage;
 #[cfg(test)]
@@ -80,6 +81,22 @@ pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
         }
     }
     files
+}
+
+/// `$CODEX_HOME` (empty counts as unset), else `$HOME/.codex` (empty `$HOME`
+/// counts as unset). An empty value must not become `PathBuf("")`, which joins
+/// to cwd-relative paths.
+fn codex_home_from_env(
+    codex_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    codex_home
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|h| !h.is_empty())
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
 }
 
 /// A file's modification time in milliseconds since the epoch: the version a
@@ -215,6 +232,63 @@ pub fn delta_reply(status: u16, body: &serde_json::Value) -> DeltaReply {
     }
 }
 
+/// Where the pod's cgroup v2 files live; `VOGT_CGROUP_ROOT` overrides it.
+pub const DEFAULT_CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The pod's cgroup memory, as read from `memory.current`, `memory.max`,
+/// `memory.peak` and the `oom_kill` line of `memory.events` (WI-4749).
+/// Visibility only. A field is `None` when its file is missing or unreadable;
+/// `memory_max` is also `None` when the limit is `max` (unlimited).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgroupMemory {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_peak: Option<u64>,
+    /// Processes the kernel's OOM killer has killed in this cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kill: Option<u64>,
+}
+
+/// The cgroup root for this process: `VOGT_CGROUP_ROOT`, else
+/// [`DEFAULT_CGROUP_ROOT`].
+pub fn cgroup_root() -> PathBuf {
+    std::env::var_os("VOGT_CGROUP_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CGROUP_ROOT))
+}
+
+/// Read the cgroup memory files under `root`. `None` when none of the four
+/// could be read (not a cgroup v2 mount), so the heartbeat then omits it.
+pub fn read_cgroup_memory(root: &Path) -> Option<CgroupMemory> {
+    let number = |name: &str| -> Option<u64> {
+        std::fs::read_to_string(root.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let oom_kill = std::fs::read_to_string(root.join("memory.events"))
+        .ok()
+        .and_then(|events| {
+            events.lines().find_map(|line| {
+                let (key, value) = line.split_once(char::is_whitespace)?;
+                (key == "oom_kill").then(|| value.trim().parse().ok())?
+            })
+        });
+    let memory = CgroupMemory {
+        memory_current: number("memory.current"),
+        // `max` does not parse: unlimited reads as `None`.
+        memory_max: number("memory.max"),
+        memory_peak: number("memory.peak"),
+        oom_kill,
+    };
+    (memory != CgroupMemory::default()).then_some(memory)
+}
+
 /// Messages exchanged on the authenticated engine stream. Binary PTY data is
 /// represented as JSON byte arrays so this module remains usable by non-Rust
 /// engine clients without a second codec.
@@ -246,6 +320,10 @@ pub enum Frame {
     },
     Heartbeat {
         cursor: u64,
+        /// The pod's cgroup memory (WI-4749). Optional and additive: an old
+        /// agent omits it and an old engine ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<CgroupMemory>,
     },
     Exited {
         status: Option<i32>,
@@ -658,11 +736,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_BUFFER_BYTES),
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-            codex_home: std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
-                }),
+            codex_home: codex_home_from_env(
+                std::env::var_os("CODEX_HOME"),
+                std::env::var_os("HOME"),
+            ),
             workspace_root: std::env::var_os("VOGT_WORKSPACE_ROOT")
                 .filter(|root| !root.is_empty())
                 .map(PathBuf::from),
@@ -1006,6 +1083,24 @@ fn memory_files(root: &Path) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
+/// Whether the engine's reply to a bundle file POST is final for those bytes.
+/// A rate limit, a server fault and a 401 are not: a 401 can be a transient
+/// token miss (a registry race), and recording the marker would lose a
+/// refreshed credential until the file changed again. The file is retried at
+/// the next flush or at exit, never in a loop. The first 401 is logged once
+/// per process (status only, never a body or header) so a persistent one
+/// does not flood the log.
+fn bundle_reply_final(status: reqwest::StatusCode) -> bool {
+    static WARNED_401: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if status.as_u16() == 401 {
+        if !WARNED_401.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("session-agent: the engine answered 401 to a bundle write-back; it is retried at the next flush");
+        }
+        return false;
+    }
+    !(status.as_u16() == 429 || status.is_server_error())
+}
+
 /// Upload project memory when the deployment enabled it. Keyed by project,
 /// not by the pod's path or the leased account (WI-3371): the next session on
 /// the same project, on any account, reads it back.
@@ -1053,8 +1148,7 @@ async fn flush_memory(
             .send()
             .await
         {
-            let status = reply.status();
-            if !(status.as_u16() == 429 || status.is_server_error()) {
+            if bundle_reply_final(reply.status()) {
                 seen.insert(path, marker);
             }
         }
@@ -1131,8 +1225,7 @@ async fn flush_bundle(
                 .send()
                 .await
             {
-                let status = reply.status();
-                if !(status.as_u16() == 429 || status.is_server_error()) {
+                if bundle_reply_final(reply.status()) {
                     seen.insert(file.path, marker);
                 }
             }
@@ -1656,6 +1749,10 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
     argv.extend([
         "-c".to_string(),
         "features.daemon_auto_start=false".to_string(),
+        // WI-4051: Codex's shell snapshot writes the exported environment,
+        // this session's tokens included, to `$CODEX_HOME/shell_snapshots`.
+        "-c".to_string(),
+        "features.shell_snapshot=false".to_string(),
     ]);
     argv.extend(args.command_args.iter().cloned());
     if let Some(model) = args.model.map(str::trim).filter(|model| !model.is_empty()) {
@@ -2333,6 +2430,11 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
         cwd = ?config.cwd,
         "session-agent: starting the PTY"
     );
+    if config.cli == "codex" {
+        if let Some(home) = config.codex_home.as_deref() {
+            codex_snapshots::scrub_and_log(home, "boot");
+        }
+    }
     let (reader, writer, child, master) = spawn_pty(&config)?;
     tracing::info!("session-agent: PTY spawned");
     let writer = Arc::new(Mutex::new(writer));
@@ -2478,11 +2580,16 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                 tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
                                 // The CLI may have written after the flush above.
                                 let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+                                if config.cli == "codex" {
+                                    if let Some(home) = config.codex_home.as_deref() {
+                                        codex_snapshots::scrub_and_log(home, "exit");
+                                    }
+                                }
                                 send_frame(&mut sink, &Frame::Exited { status: Some(status.exit_code() as i32) }).await?;
                                 return Ok(());
                             }
                         }
-                        send_frame(&mut sink, &Frame::Heartbeat { cursor }).await?;
+                        send_frame(&mut sink, &Frame::Heartbeat { cursor, memory: read_cgroup_memory(&cgroup_root()) }).await?;
                     }
                 }
             }
@@ -2601,6 +2708,22 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_home_env_ignores_empty_values() {
+        use std::ffi::OsString;
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(codex_home_from_env(os(""), os("")), None);
+        assert_eq!(
+            codex_home_from_env(os(""), os("/h")),
+            Some(PathBuf::from("/h/.codex"))
+        );
+        assert_eq!(
+            codex_home_from_env(os("/c"), os("/h")),
+            Some(PathBuf::from("/c"))
+        );
+        assert_eq!(codex_home_from_env(None, None), None);
+    }
+
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     /// A child whose signals are all refused, as an AppArmor signal rule does.
@@ -2842,6 +2965,97 @@ mod tests {
             "run() did not end: {result:?}"
         );
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// WI-4749: the cgroup memory files, read from a fake root.
+    fn fake_cgroup(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn cgroup_memory_reads_the_four_files() {
+        let dir = fake_cgroup(&[
+            ("memory.current", "1048576\n"),
+            ("memory.max", "6442450944\n"),
+            ("memory.peak", "2097152\n"),
+            ("memory.events", "low 0\nhigh 0\nmax 3\noom 0\noom_kill 2\n"),
+        ]);
+        assert_eq!(
+            read_cgroup_memory(dir.path()),
+            Some(CgroupMemory {
+                memory_current: Some(1_048_576),
+                memory_max: Some(6_442_450_944),
+                memory_peak: Some(2_097_152),
+                oom_kill: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn cgroup_memory_max_means_unlimited() {
+        let dir = fake_cgroup(&[("memory.current", "10\n"), ("memory.max", "max\n")]);
+        let memory = read_cgroup_memory(dir.path()).unwrap();
+        assert_eq!(memory.memory_current, Some(10));
+        assert_eq!(memory.memory_max, None);
+    }
+
+    #[test]
+    fn cgroup_memory_tolerates_missing_files() {
+        let dir = fake_cgroup(&[("memory.current", "7\n")]);
+        let memory = read_cgroup_memory(dir.path()).unwrap();
+        assert_eq!(memory.memory_current, Some(7));
+        assert_eq!(memory.memory_peak, None);
+        assert_eq!(memory.oom_kill, None);
+        // No cgroup files at all: nothing to report.
+        assert_eq!(read_cgroup_memory(fake_cgroup(&[]).path()), None);
+        // A missing directory is the same.
+        assert_eq!(
+            read_cgroup_memory(Path::new("/nonexistent-cgroup-root")),
+            None
+        );
+    }
+
+    #[test]
+    fn cgroup_oom_kill_change_is_seen_on_the_next_read() {
+        let dir = fake_cgroup(&[("memory.events", "oom_kill 0\n")]);
+        assert_eq!(read_cgroup_memory(dir.path()).unwrap().oom_kill, Some(0));
+        std::fs::write(dir.path().join("memory.events"), "oom 1\noom_kill 1\n").unwrap();
+        assert_eq!(read_cgroup_memory(dir.path()).unwrap().oom_kill, Some(1));
+    }
+
+    #[test]
+    fn heartbeat_round_trips_with_and_without_memory() {
+        // An old agent's frame has no `memory`: it parses.
+        let old: Frame = serde_json::from_str(r#"{"type":"heartbeat","cursor":5}"#).unwrap();
+        assert_eq!(
+            old,
+            Frame::Heartbeat {
+                cursor: 5,
+                memory: None
+            }
+        );
+        // And a frame without memory serializes exactly as before.
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"type":"heartbeat","cursor":5}"#
+        );
+        let memory = CgroupMemory {
+            memory_current: Some(1),
+            oom_kill: Some(3),
+            ..Default::default()
+        };
+        let with = Frame::Heartbeat {
+            cursor: 5,
+            memory: Some(memory),
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert_eq!(serde_json::from_str::<Frame>(&text).unwrap(), with);
+        // An old engine sees an unknown field only if it denies them; ours does not.
+        assert!(text.contains("\"oom_kill\":3"));
     }
 
     /// WI-4418: a busy session keeps its heartbeat and bundle-flush clock. The
@@ -3149,6 +3363,108 @@ mod tests {
             }
         });
         (format!("http://{address}"), bodies)
+    }
+
+    /// A fake engine that answers each bundle POST with the next status in
+    /// `statuses` (the last repeats) and counts the requests.
+    async fn scripted_bundle_status(
+        statuses: Vec<u16>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = stream.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let at = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let status = statuses[at.min(statuses.len() - 1)];
+                let reply = "{\"ok\":true}";
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        (format!("http://{address}"), calls)
+    }
+
+    fn credentials_config(url: String, dir: &Path) -> Config {
+        let mut config = kill_config(url);
+        config.claude_config_dir = Some(dir.to_path_buf());
+        config.account = Some("acct".into());
+        config.conversation_id = None;
+        config.codex_home = None;
+        config
+    }
+
+    // WI-4709: a 401 (a transient token miss) must not mark the refreshed
+    // credential as seen; the next flush posts it again.
+    #[tokio::test]
+    async fn a_401_then_success_stores_the_credential_on_the_next_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"{\"fake\":\"cred\"}").unwrap();
+        let (url, calls) = scripted_bundle_status(vec![401, 200]).await;
+        let config = credentials_config(url, dir.path());
+        let tls = tls_config().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut offsets = std::collections::HashMap::new();
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(seen.is_empty(), "a 401 must not record the marker");
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(seen.len(), 1, "the 200 records the marker");
+        flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a stored credential is not re-sent"
+        );
+    }
+
+    // WI-4709: a persistent 401 is one POST per flush, never a loop, and
+    // never records the marker.
+    #[tokio::test]
+    async fn a_persistent_401_posts_once_per_flush_and_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"{\"fake\":\"cred\"}").unwrap();
+        let (url, calls) = scripted_bundle_status(vec![401]).await;
+        let config = credentials_config(url, dir.path());
+        let tls = tls_config().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut offsets = std::collections::HashMap::new();
+        for flush in 1..=3 {
+            flush_bundle(&config, &tls, &mut seen, &mut offsets).await;
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), flush);
+            assert!(seen.is_empty());
+        }
     }
 
     // WI-3868: a Codex pod has no Claude root or account; its own rollout must
@@ -3967,6 +4283,8 @@ mod tests {
                 r#"projects={"/work"={trust_level="trusted"}}"#,
                 "-c",
                 "features.daemon_auto_start=false",
+                "-c",
+                "features.shell_snapshot=false",
                 "-a",
                 "never",
                 "-s",

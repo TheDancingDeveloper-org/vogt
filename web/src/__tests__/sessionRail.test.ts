@@ -270,6 +270,14 @@ describe("pinned sessions that need you", () => {
   });
 });
 
+describe("railBadges hibernated (WI-4567)", () => {
+  it("shows hibernated, not errored, for a stale non-zero code", () => {
+    const labels = railBadges(session({ id: "h", activity: "hibernated", exit_code: 137 }), NOW).map((b) => b.label);
+    expect(labels).toContain("hibernated");
+    expect(labels).not.toContain("errored");
+  });
+});
+
 describe("railBadges", () => {
   it("shows a glyph and its words for each state", () => {
     const picker = session({

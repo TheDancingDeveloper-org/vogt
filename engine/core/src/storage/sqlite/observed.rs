@@ -20,9 +20,10 @@ use crate::storage::observed_types::{
 };
 use crate::storage::sqlite::connection::{ConnPool, Lease};
 use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
-use crate::storage::sqlite::query::{select_filtered, select_many, Filter, FromRow};
+use crate::storage::sqlite::query::{select_filtered, Filter, FromRow};
 
 const META_INSTANCE_ID: &str = "instance_id";
+#[cfg(test)]
 const META_CREATED_AT: &str = "created_at";
 /// Moves on every rebuild of `latest_observations`, as Python's
 /// `META_LATEST_GENERATION` does: a cache keyed on it sees a new generation
@@ -262,13 +263,6 @@ where
         .map_err(VogtError::from)
     }
 
-    fn is_initialized(&self) -> bool {
-        match self.instance_id() {
-            Ok(Some(id)) => !id.is_empty(),
-            _ => false,
-        }
-    }
-
     fn schema_version(&self) -> i64 {
         if !self.path.exists() {
             return 0;
@@ -290,6 +284,7 @@ where
             .unwrap_or(0)
     }
 
+    #[cfg(test)]
     fn bind_instance(&self, instance_id: &str) -> Result<(), VogtError> {
         // A plain insert, not an upsert: binding twice is a constraint
         // failure, the same one Python's second INSERT raises. The created_at
@@ -330,23 +325,6 @@ where
             }
             Ok(())
         })
-    }
-
-    fn instance_id(&self) -> Result<Option<String>, VogtError> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-        let conn = self.reader()?;
-        if !table_exists(&conn, "meta").map_err(VogtError::from)? {
-            return Ok(None);
-        }
-        conn.query_row(
-            "SELECT value FROM meta WHERE key = ?",
-            [META_INSTANCE_ID],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(sql_err)
     }
 
     fn has_evidence_tables(&self) -> Result<bool, VogtError> {
@@ -468,21 +446,6 @@ where
             }
             Ok(stats)
         })
-    }
-
-    fn list_sweeps(&self, collector: Option<&str>, limit: i64) -> Result<Vec<Sweep>, VogtError> {
-        // Python's `if collector` treats "" as absent.
-        let conn = self.reader()?;
-        match collector.filter(|name| !name.is_empty()) {
-            Some(name) => select_many::<Sweep>(
-                &conn,
-                "WHERE collector = ? ORDER BY started_at DESC, id DESC LIMIT ?",
-                params![name, limit],
-            ),
-            None => {
-                select_many::<Sweep>(&conn, "ORDER BY started_at DESC, id DESC LIMIT ?", [limit])
-            }
-        }
     }
 
     fn coverage(&self) -> Result<BTreeMap<String, Sweep>, VogtError> {

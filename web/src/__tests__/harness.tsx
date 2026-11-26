@@ -699,6 +699,21 @@ export function stopLiveStream(): void {
   cancelPendingWakeForTests();
 }
 
+/**
+ * How many times the board has re-read its data.
+ *
+ * A board read is a pair of `POST /board/list` calls when the in-progress
+ * column asks for live sessions: `with_sessions` is a whole-call parameter,
+ * so that column's cells go in a call of their own (WI-4757). A surface's
+ * re-read count is a count of logical reads, not round-trips, so this counts
+ * the primary call — the one that does not carry `with_sessions`.
+ */
+export function boardReloads(vogt: FakeVogt): number {
+  return vogt
+    .matching("GET /work")
+    .filter((call) => call.body?.with_sessions !== true).length;
+}
+
 // -- mounting a surface at a URL --------------------------------------------
 
 export interface Mounted {

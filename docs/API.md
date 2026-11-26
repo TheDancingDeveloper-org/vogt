@@ -149,17 +149,37 @@ Reading a terminal and typing into one are deliberately different grants.
 | `session.remove` (`session_remove`) | `work.write` | kill a session if it runs and have the engine forget it, as the GUI's Remove does |
 
 - **Either id works** on the core's operations ([Sessions](#sessions)).
-- **Any `work.write` holder can type into any session**, including one another
-  agent or a person is using. That matches the engine, where `work.write` maps
-  to the `sessions` capability and its `POST /api/sessions/{id}/input`.
-  Scopes are instance-wide, so there is no per-session grant.
+- **Any `work.write` holder can type into any session** through the core's
+  operations, including one another agent or a person is using
+  (`session.input`, `session.answer`, `session.start` and `session.stop` need
+  `work.write`). **At the engine, `project.write` carries the same grant:**
+  `server/src/auth.rs` maps both `work.write` and `project.write` to the
+  `sessions` capability (and files, git, agent tasks, history and the
+  assistant), so a `project.write`-only token cannot call the core's
+  `session.input` but can `POST /api/sessions/{id}/input` on the engine
+  directly. Scopes are instance-wide, so there is no per-session grant. `admin`
+  maps to everything; `read` alone and `writeback` give no `sessions`
+  capability.
 - **Every `session.input` is audited** (`audit.list`, operation
   `session.input`): the actor, the session (`ses_…` when linked, otherwise the
   engine UUID), the reason, the byte count and the key names. The text itself
-  is never stored, because it may be a password. A bearer that calls the
-  engine's `/input` route directly bypasses this. It leaves only the engine's
-  `vogt::audit` "mutating request" log line (token name, method, path, status),
-  so agents should use `session_input`.
+  is never stored, because it may be a password. `session.answer` writes its
+  own `session.answer` row (question, chosen option; no typed text).
+- **System-originated input is audited the same way (decided for WI-834).**
+  Two core paths type into a session's terminal without a caller: the CI
+  conclusion notice for sessions bound to the branch's work item
+  (`ci_watch`), and the context-rotation ask to an over-budget oversight
+  session (`context_rotation`). They are system actions, but they put text on
+  a PTY, so each writes a `session.input` row with the same shape (session,
+  actor = the core's own principal, byte count, no keys) plus `system: true`
+  and a `source` naming the path. No text or hand-off token is recorded.
+  An audit failure is logged and does not retype the text.
+- **Not audited by the core:** a bearer that calls the engine's `/input` route
+  directly (it leaves only the engine's `vogt::audit` "mutating request" log
+  line: token name, method, path, status, so agents should use
+  `session_input`), the engine's own writes to a PTY (a person's keystrokes
+  over the WebSocket, an agent task's initial prompt), and a refused write
+  (nothing was typed).
 - Reads go through the core's own engine credential, so a `read`-only token
   can read screens and logs through the core even though it holds no engine
   `sessions` capability.
