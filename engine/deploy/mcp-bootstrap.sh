@@ -192,20 +192,30 @@ install_vogt_opencode() {
 readonly READONLY_WRAPPER="${VOGT_READONLY_MCP_WRAPPER:-/usr/local/bin/vogt-readonly-mcp}"
 # name | wrapper argument | upstream binary | variables that enable it (all
 # required) and that Codex must pass through to the server (Codex starts stdio
-# servers with a minimal environment unless told which variables to forward).
+# servers with a minimal environment unless told which variables to forward),
+# optional variables to forward, and a variable that may instead be declared
+# `ondemand` in the agent-auth manifest. An ondemand variable is not exported
+# at launch; the wrapper resolves it at spawn through the engine's secret
+# broker (`vogt-agent-auth fetch`), so the registration must exist even when
+# the variable is unset here.
 readonly READONLY_SERVERS=(
     "github-ro|github|github-mcp-server|GITHUB_MCP_TOKEN|VOGT_GITHUB_MCP_TOOLSETS"
     "grafana-ro|grafana|mcp-grafana|GRAFANA_URL GRAFANA_SERVICE_ACCOUNT_TOKEN|"
     "forgejo-ro|gitea|gitea-mcp|GITEA_HOST GITEA_MCP_TOKEN|"
-    "k8s-ro|k8s|kubernetes-mcp-server|K8S_AGENT_READONLY_KUBECONFIG|"
+    "k8s-ro|k8s|kubernetes-mcp-server|K8S_AGENT_READONLY_KUBECONFIG|VOGT_ENGINE_BROKER_URL VOGT_ENGINE_URL VOGT_ENGINE_BROKER_TOKEN_FILE VOGT_SESSION_TOKEN_FILE VOGT_ENGINE_EXTRA_CA_FILE ENGINE_AGENT_AUTH_EXTRA_CA_FILE|K8S_AGENT_READONLY_KUBECONFIG"
 )
 
 readonly_wanted() {
-    local var
-    for var in $1; do
-        [[ -n "${!var:-}" ]] || return 1
+    local required="$1" ondemand="$2" var
+    local required_ok=1
+    for var in $required; do
+        [[ -n "${!var:-}" ]] && continue
+        required_ok=0
+        break
     done
-    return 0
+    [[ "$required_ok" == 1 ]] && return 0
+    [[ -n "$ondemand" && " ${AGENT_AUTH_ONDEMAND:-} " == *" $ondemand "* ]] && return 0
+    return 1
 }
 
 # Cadastre tools that only read. Codex pre-approves exactly these, per tool;
@@ -886,11 +896,11 @@ readonly_opencode() {
 }
 
 install_readonly_servers() {
-    local entry name arg bin required optional wanted
+    local entry name arg bin required optional ondemand wanted
     for entry in "${READONLY_SERVERS[@]}"; do
-        IFS='|' read -r name arg bin required optional <<<"$entry"
+        IFS='|' read -r name arg bin required optional ondemand <<<"$entry"
         wanted=no
-        if readonly_wanted "$required"; then
+        if readonly_wanted "$required" "$ondemand"; then
             if [[ -x "$READONLY_WRAPPER" ]] && command -v "$bin" >/dev/null 2>&1; then
                 wanted=yes
             else
