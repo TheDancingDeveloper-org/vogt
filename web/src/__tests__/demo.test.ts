@@ -16,6 +16,7 @@ const WRITES = new Set([
   "work.create", "work.transition", "work.comment", "work.update",
   "drift.resolve", "inbox.archive", "inbox.snooze", "inbox.restore",
   "suppress", "work.adopt", "session.start", "session.stop", "auth.logout",
+  "decision.answer", "decision.withdraw",
   "session.hibernate", "session.wake", "session.keep_awake", "session.set_role", "session.bind_work", "session.answer",
   "session.grant_decide",
 ]);
