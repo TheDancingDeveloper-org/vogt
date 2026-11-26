@@ -1324,16 +1324,56 @@ pub async fn create_session(
     Json(mut spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
     // Starting an overseer is nominating one (WI-1255): a worker that could
-    // start one would drive its terminal and borrow its standing.
-    if !spec.role.is_worker() {
-        require_role_authority(identity.as_deref(), "(new)", spec.role)?;
-    }
+    // start one would drive its terminal and borrow its standing. A session-
+    // authenticated caller (an agent) asking for oversight is a conflict
+    // (WI-4814): it cannot nominate one, and it must not read as a generic
+    // 403 that a retry could change.
+    require_oversight_start_authority(identity.as_deref(), spec.role)?;
     require_source_authority(identity.as_deref(), spec.source.as_ref())?;
     require_session_ref_authority(identity.as_deref(), spec.session_ref.as_deref())?;
     require_supervisor_authority(identity.as_deref(), &state.sessions, spec.supervisor)?;
     require_started_by_authority(identity.as_deref(), &mut spec)?;
-    let s = state.sessions.create_launched(spec).await?;
+    let person_started = identity.as_ref().is_some_and(|i| i.person);
+    let starter_name = identity.as_ref().map(|i| i.name.clone());
+    let s = state
+        .sessions
+        .create_launched(spec, person_started, starter_name)
+        .await?;
     Ok(Json(s.summary()))
+}
+
+/// The role gate for a new session (WI-4814): a person, the break-glass
+/// operator, or vogt-core may start an oversight session; a session-
+/// authenticated caller is refused with a conflict rather than `set_session_role`'s
+/// generic 403, so the two refusals stay distinct and testable.
+fn require_oversight_start_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    role: vogt_engine_contract::SessionRole,
+) -> Result<()> {
+    if role.is_worker() {
+        return Ok(());
+    }
+    match identity {
+        Some(identity) if identity.person || identity.break_glass || identity.stack_secret => {
+            Ok(())
+        }
+        Some(identity) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                event = "session.role",
+                outcome = "refused",
+                caller = %identity.name,
+                session = "(new)",
+                role = role.as_str(),
+                "oversight start refused for a session-authenticated caller"
+            );
+            Err(crate::error::ApiError::Conflict(format!(
+                "only a person can start an oversight session; {} is a session, and a session cannot nominate an overseer",
+                identity.name
+            )))
+        }
+        None => Err(crate::error::ApiError::Unauthorized),
+    }
 }
 
 #[derive(Debug, Deserialize)]
