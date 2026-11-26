@@ -157,6 +157,56 @@ fn validate_host_placement_role(
     Ok(())
 }
 
+/// Whether the lane switch that grants the estate-admin tier is truthy
+/// (`ENGINE_ESTATE_ADMIN_TIER=1`, WI-4814). Kept as a pure parser so tests
+/// need no process-global env mutation.
+fn estate_admin_tier_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
+    )
+}
+
+fn estate_admin_tier_enabled() -> bool {
+    estate_admin_tier_enabled_from(std::env::var("ENGINE_ESTATE_ADMIN_TIER").ok().as_deref())
+}
+
+/// The estate-admin tier a start carries, or `None` (WI-4814). A fresh API
+/// start is tiered exactly when a person started an oversight session on a
+/// tiered lane; a wake keeps its record's tier; an agent task never has one.
+fn estate_admin_tier(
+    spec: &SessionSpec,
+    creating: &Creating,
+    person_started: bool,
+    tier_lane_enabled: bool,
+) -> Option<String> {
+    match creating {
+        Creating::Wake(record) => record.tier.clone(),
+        Creating::Fresh(Origin::AgentTask) => None,
+        Creating::Fresh(Origin::Api) => {
+            (person_started && spec.role == SessionRole::Oversight && tier_lane_enabled)
+                .then(|| pty::ESTATE_ADMIN_TIER.to_string())
+        }
+    }
+}
+
+/// `spec.env` may not set the tier marker (WI-4814): the engine owns it, and
+/// sets it only on a tier spawn. Checked for every placement, so a host
+/// session and a pod session refuse alike.
+fn validate_reserved_tier_env(env: Option<&[(String, String)]>) -> Result<()> {
+    if env
+        .into_iter()
+        .flatten()
+        .any(|(name, _)| name == pty::AGENT_AUTH_TIER_ENV)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "env {:?} is reserved: the engine sets it only for an estate-admin tier session",
+            pty::AGENT_AUTH_TIER_ENV
+        )));
+    }
+    Ok(())
+}
+
 /// The deployment's default agent pod template: the first pod-backed template
 /// that runs an agent CLI (WI-4428). `None` when there is none.
 fn default_pod_template(
@@ -1050,6 +1100,7 @@ impl SessionRegistry {
         template: &crate::config::SessionTemplate,
         launch: crate::agent_stream::PodLaunch,
         long_lived: bool,
+        tier: Option<&str>,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
@@ -1090,6 +1141,7 @@ impl SessionRegistry {
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                 secret_broker: None,
                 agent_auth_manifest: None,
+                tier: None,
                 on_exit: Some(self.exit_hook()),
             },
             self.bus.clone(),
@@ -1128,6 +1180,7 @@ impl SessionRegistry {
                 spec.permission_mode.as_deref(),
                 self.cfg.codex_approval_policy.as_str(),
                 spec.command.as_deref().unwrap_or_default(),
+                tier,
             )
         });
         let pod = pod.map(|mut pod| {
@@ -1519,7 +1572,7 @@ impl SessionRegistry {
             None,
             None,
         );
-        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None, false, None);
         self.pod_create_waits.remove(&id);
         self.adopting.lock().remove(&id);
         match created {
@@ -1542,7 +1595,7 @@ impl SessionRegistry {
             &spec.command,
             spec.template.as_deref(),
         )?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), None);
+        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), None, false, None);
         if let Ok(session) = &created {
             self.pod_create_waits.remove(&session.id);
         }
@@ -1620,7 +1673,12 @@ impl SessionRegistry {
     /// and its writes were attributed to them. A plain shell keeps the pod's
     /// token, because the person at it is a person. A session vogt-core
     /// started arrives with its own token and is left alone.
-    pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+    pub async fn create_launched(
+        &self,
+        mut spec: SessionSpec,
+        person_started: bool,
+        starter_name: Option<String>,
+    ) -> Result<Arc<Session>> {
         self.check_parent_standing(&spec)?;
         // Before the host graft preparation below, which asks the same
         // placement question (WI-4428).
@@ -1647,7 +1705,13 @@ impl SessionRegistry {
         }
         self.check_provider_secret(id, &spec).await?;
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id));
+        let created = self.create_inner(
+            spec,
+            Creating::Fresh(Origin::Api),
+            Some(id),
+            person_started,
+            starter_name,
+        );
         if created.is_err() {
             self.revoke_host_graft(id).await;
         }
@@ -1955,7 +2019,13 @@ impl SessionRegistry {
         let id = Uuid::new_v4();
         self.check_provider_secret(id, &spec).await?;
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Fresh(Origin::AgentTask), Some(id));
+        let created = self.create_inner(
+            spec,
+            Creating::Fresh(Origin::AgentTask),
+            Some(id),
+            false,
+            None,
+        );
         self.pod_create_waits.remove(&id);
         if created.is_err() {
             self.revoke_host_graft(id).await;
@@ -1997,6 +2067,7 @@ impl SessionRegistry {
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
         spec.wake_on = crate::oversight_wake::normalize_wake_on(&spec.wake_on)?;
+        validate_reserved_tier_env(spec.env.as_deref())?;
         validate_requested_placement(spec.placement.as_deref(), self.cfg.pod_backends_enabled)?;
         validate_placement_template_requirement(
             spec.placement.as_deref(),
@@ -2279,6 +2350,7 @@ impl SessionRegistry {
             prompt_file,
             workspace,
             conversation,
+            tier,
         } = input;
         let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
         record.template = spec.template.clone();
@@ -2311,6 +2383,7 @@ impl SessionRegistry {
         record.source = spec.source.clone();
         record.budget = spec.budget.clone();
         record.role = spec.role;
+        record.tier = tier;
         record.work_item = spec.work_item.clone();
         record.supervisor = spec.supervisor;
         record.wake_on = spec.wake_on.clone();
@@ -2517,8 +2590,19 @@ impl SessionRegistry {
         mut spec: SessionSpec,
         creating: Creating,
         preassigned: Option<Uuid>,
+        person_started: bool,
+        starter_name: Option<String>,
     ) -> Result<Arc<Session>> {
         self.validate_and_expand_spec(&mut spec, &creating)?;
+        // The tier is computed once here and then stored on the record; a
+        // session this one starts never inherits it (its own start computes
+        // it afresh from its caller, who is a session and not a person).
+        let tier = estate_admin_tier(
+            &spec,
+            &creating,
+            person_started,
+            estate_admin_tier_enabled(),
+        );
         // What a hibernation record keeps: the command and environment as
         // the template and caller gave them, before the engine adds its own
         // launch arguments and variables (a wake adds those again).
@@ -3119,6 +3203,7 @@ impl SessionRegistry {
                 template,
                 pod_launch.unwrap_or_default(),
                 long_lived_pod(&spec, &creating),
+                tier.as_deref(),
             )
         } else {
             pty::spawn(
@@ -3133,6 +3218,7 @@ impl SessionRegistry {
                     activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                     secret_broker: self.secret_broker.grant(id),
                     agent_auth_manifest: self.secret_broker.live_manifest_text(),
+                    tier: tier.as_deref(),
                     on_exit: Some(self.exit_hook()),
                 },
                 self.bus.clone(),
@@ -3175,6 +3261,7 @@ impl SessionRegistry {
             &account,
             mcp_set,
             &workspace,
+            tier.as_deref(),
         );
 
         // The record is written before the session is listed, so there is no
@@ -3187,6 +3274,7 @@ impl SessionRegistry {
         // session is live again, and a shutdown drain may have left
         // `engine-shutdown` on its row (WI-4567).
         let waking = matches!(&creating, Creating::Wake(_));
+        let fresh_api_start = matches!(&creating, Creating::Fresh(Origin::Api));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
             Creating::Fresh(Origin::Api) => Some(self.fresh_record(
@@ -3204,6 +3292,7 @@ impl SessionRegistry {
                     prompt_file: prompt_file.as_ref(),
                     workspace: workspace.clone(),
                     conversation: conversation.clone(),
+                    tier: tier.clone(),
                 },
             )),
             Creating::Wake(record) => Some(self.woken_record(
@@ -3224,6 +3313,24 @@ impl SessionRegistry {
         }
         session.keep_reports_in(&self.cfg.state_dir, adopting);
         self.sessions.insert(session.id, Arc::clone(&session));
+        // A fresh tier start is the one grant: audited per spawn, with the
+        // person, the lane and the identity names granted, never a value
+        // (WI-4814). A wake keeps its recorded tier without a new grant.
+        if fresh_api_start && tier.is_some() {
+            self.bus.publish(ServerEvent::AgentAuthTierGranted {
+                session: id,
+                person: starter_name.unwrap_or_default(),
+                lane: self.cfg.lane.clone().unwrap_or_default(),
+                names: if pty::tier_identity_passthrough_enabled() {
+                    vec![
+                        "INFISICAL_CLIENT_ID".to_string(),
+                        "INFISICAL_CLIENT_SECRET".to_string(),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
         // A fresh Codex session given a brief must actually start its first
         // turn (WI-4068). Start the confirmation before the caller's request
         // returns, so a session that never submits surfaces as blocked rather
@@ -4145,7 +4252,7 @@ impl SessionRegistry {
             record.conversation_lost = Some(conversation.clone());
         }
         self.prepare_host_graft(id, &mut spec).await?;
-        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None, false, None);
         self.pod_create_waits.remove(&id);
         let session = match created {
             Ok(session) => session,
@@ -5744,6 +5851,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         posture_lost_on_resume: false,
         account: record.account.clone(),
         mcp_set: record.mcp_set.clone(),
+        tier: record.tier.clone(),
         stop: None,
         // The last reading, so a caller can judge the wake (WI-2037).
         economics: record
@@ -6071,6 +6179,10 @@ fn normalize_session_name(name: &str) -> Result<String> {
 
 /// Give a freshly spawned session the state the request, and for a wake the
 /// record, asked for. Returns the posture as the wire names it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the spawn's inputs; a params struct would churn every caller"
+)]
 fn apply_spawned_state(
     session: &Arc<Session>,
     spec: &SessionSpec,
@@ -6079,6 +6191,7 @@ fn apply_spawned_state(
     account: &Option<String>,
     mcp_set: crate::mcp_set::McpSet,
     workspace: &Option<vogt_engine_contract::Workspace>,
+    tier: Option<&str>,
 ) -> Option<String> {
     session.set_conversation(conversation.clone());
     // The posture as the wire names it, `None` for the default one.
@@ -6112,6 +6225,7 @@ fn apply_spawned_state(
     session.set_policy(spec.policy.clone());
     session.set_budget(spec.budget.clone());
     session.set_role(spec.role);
+    session.set_tier(tier.map(str::to_string));
     session.set_work_item(spec.work_item.clone());
     session.set_supervisor(spec.supervisor);
     session.set_wake_on(spec.wake_on.clone());
@@ -6144,6 +6258,7 @@ struct FreshRecordInputs<'a> {
     prompt_file: Option<&'a std::path::PathBuf>,
     workspace: Option<vogt_engine_contract::Workspace>,
     conversation: Option<vogt_engine_contract::AgentConversation>,
+    tier: Option<String>,
 }
 
 /// A session worktree cut during a start that has not spawned yet (WI-1298).
@@ -6235,11 +6350,109 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_claude_cli_model, normalize_requested_model, normalize_session_name, pod_carry_env,
-        pod_carry_recorded, validate_codex_placement, validate_placement_template_requirement,
-        validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
+        estate_admin_tier, estate_admin_tier_enabled_from, is_claude_cli_model,
+        normalize_requested_model, normalize_session_name, pod_carry_env, pod_carry_recorded,
+        validate_codex_placement, validate_placement_template_requirement,
+        validate_pod_placement_fields, validate_requested_placement, validate_reserved_tier_env,
+        validate_template_placement, SessionSpec,
     };
     use crate::config::SessionTemplate;
+
+    fn spec(role: vogt_engine_contract::SessionRole) -> SessionSpec {
+        SessionSpec {
+            name: "tier-spec".into(),
+            role,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_estate_admin_tier_switch_is_truthy_only_when_set() {
+        for (value, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some("TRUE"), true),
+        ] {
+            assert_eq!(
+                estate_admin_tier_enabled_from(value),
+                expected,
+                "ENGINE_ESTATE_ADMIN_TIER={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tier_is_granted_only_for_a_person_started_oversight_on_a_tiered_lane() {
+        let oversight = vogt_engine_contract::SessionRole::Oversight;
+        let worker = vogt_engine_contract::SessionRole::Worker;
+        for (role, person_started, lane_enabled, expected) in [
+            (
+                oversight,
+                true,
+                true,
+                Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            ),
+            (oversight, true, false, None),
+            (oversight, false, true, None),
+            (worker, true, true, None),
+            (worker, false, true, None),
+        ] {
+            let fresh = super::Creating::Fresh(super::Origin::Api);
+            assert_eq!(
+                estate_admin_tier(&spec(role), &fresh, person_started, lane_enabled),
+                expected,
+                "role={role:?} person={person_started} lane={lane_enabled}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tier_is_kept_on_wake_but_never_given_to_an_agent_task() {
+        let record = super::hibernation::Record {
+            tier: Some(super::pty::ESTATE_ADMIN_TIER.to_string()),
+            ..super::hibernation::Record::new(uuid::Uuid::new_v4(), "tiered".into(), "now".into())
+        };
+        let wake = super::Creating::Wake(Box::new(record));
+        assert_eq!(
+            estate_admin_tier(
+                &spec(vogt_engine_contract::SessionRole::Oversight),
+                &wake,
+                false,
+                false,
+            ),
+            Some(super::pty::ESTATE_ADMIN_TIER.to_string())
+        );
+
+        let task = super::Creating::Fresh(super::Origin::AgentTask);
+        assert_eq!(
+            estate_admin_tier(
+                &spec(vogt_engine_contract::SessionRole::Oversight),
+                &task,
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_caller_cannot_set_the_reserved_tier_marker() {
+        let refusal = validate_reserved_tier_env(Some(&[(
+            super::pty::AGENT_AUTH_TIER_ENV.to_string(),
+            "estate-admin".to_string(),
+        )]));
+        assert!(refusal.is_err(), "{refusal:?}");
+
+        let ordinary = validate_reserved_tier_env(Some(&[
+            ("VOGT_HTTP_TOKEN".to_string(), "v".to_string()),
+            ("HOME".to_string(), "/home/agent".to_string()),
+        ]));
+        assert!(ordinary.is_ok(), "{ordinary:?}");
+    }
 
     #[test]
     fn late_teardown_keeps_the_newer_pods_token() {
@@ -7155,6 +7368,7 @@ mod tests {
             posture_lost_on_resume: false,
             account: None,
             mcp_set: None,
+            tier: None,
             stop: None,
             economics: None,
             budget: None,

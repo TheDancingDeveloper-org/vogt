@@ -261,4 +261,34 @@ grep -q -- '-H @<(printf .Authorization: Bearer' "$script" \
 grep -q '^COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth$' \
     "$dockerfile_pod" || fail "Dockerfile.pod does not install vogt-agent-auth"
 
+# 8. WI-4814: tier-scoped identity passthrough keeps the machine identity
+#    only for a tier spawn; `1`/`true` keep the old full passthrough; the
+#    brokered default drops the identity.
+passthrough_case() {
+    local desc="$1" want_mode="$2" want_identity="$3"
+    local passthrough="${PASSTHROUGH_VALUE:-}" tier="${VOGT_AGENT_AUTH_TIER_VALUE:-}"
+    local out
+    out="$(env -u ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH -u VOGT_AGENT_AUTH_TIER \
+        ${passthrough:+ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH="$passthrough"} \
+        ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
+        INFISICAL_API_URL="$base/api" INFISICAL_CLIENT_ID=client-id \
+        INFISICAL_CLIENT_SECRET=client-secret ENGINE_INFISICAL_ENV=prod \
+        bash -c 'source "$1"; agent_auth_passthrough_decision; printf "%s|%s|%s" "$AGENT_AUTH_MODE" "${INFISICAL_CLIENT_ID-unset}" "${INFISICAL_API_URL-unset}"' _ "$script")" \
+        || fail "$desc: decision failed"
+    local mode="${out%%|*}" rest="${out#*|}"
+    local client="${rest%%|*}" api="${rest#*|}"
+    [[ "$mode" == "$want_mode" ]] || fail "$desc: mode=$mode want=$want_mode"
+    if [[ "$want_identity" == "kept" ]]; then
+        [[ "$client" == "client-id" && "$api" == "$base/api" ]] \
+            || fail "$desc kept the identity: $out"
+    else
+        [[ "$client" == "unset" && "$api" == "unset" ]] \
+            || fail "$desc dropped the identity: $out"
+    fi
+}
+PASSTHROUGH_VALUE=1 VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "full passthrough" identity kept
+PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE=estate_admin passthrough_case "tier spawn" identity kept
+PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "tier non-spawn" brokered dropped
+PASSTHROUGH_VALUE= VOGT_AGENT_AUTH_TIER_VALUE= passthrough_case "brokered default" brokered dropped
+
 echo "agent-auth: ok"
