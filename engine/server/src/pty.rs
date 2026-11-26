@@ -1982,15 +1982,65 @@ fn assemble_session(
     Ok(SpawnedSession { session })
 }
 
+/// Appends a session's output to its history log on a thread of its own, in
+/// order, so the PTY reader never waits on the disk.
+struct HistoryLogWriter {
+    tx: std::sync::mpsc::Sender<Bytes>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl HistoryLogWriter {
+    fn spawn(id: Uuid, mut file: File) -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<Bytes>();
+        let thread = std::thread::Builder::new()
+            .name(format!("pty-hist-{id}"))
+            .spawn(move || {
+                while let Ok(chunk) = rx.recv() {
+                    if let Err(e) = file.write_all(&chunk) {
+                        tracing::warn!(
+                            session = %id,
+                            error = %e,
+                            "failed to append session history log"
+                        );
+                        // Dropping `rx` makes the reader's next `append` fail,
+                        // which stops it sending.
+                        return;
+                    }
+                }
+                let _ = file.flush();
+            })
+            .map_err(|e| {
+                tracing::warn!(session = %id, error = %e, "could not start the history log writer");
+            })
+            .ok()?;
+        Some(Self { tx, thread })
+    }
+
+    /// Queue a chunk; false once the writer has stopped.
+    fn append(&self, chunk: Bytes) -> bool {
+        self.tx.send(chunk).is_ok()
+    }
+
+    /// Close the queue and wait for everything queued to reach the file.
+    fn finish(self) {
+        drop(self.tx);
+        let _ = self.thread.join();
+    }
+}
+
 fn spawn_reader_thread(
     session: Arc<Session>,
     mut reader: Box<dyn Read + Send>,
     tx: broadcast::Sender<OutputChunk>,
     bus: EventBus,
     history: Option<Arc<SessionHistory>>,
-    mut history_log: Option<File>,
+    history_log: Option<File>,
     runtime: tokio::runtime::Handle,
 ) -> Result<()> {
+    // The history log is appended on its own thread: a write into a saturated
+    // disk's page cache can block for seconds, and the reader must keep
+    // draining the PTY (and feeding the grid) meanwhile.
+    let mut history_log = history_log.and_then(|file| HistoryLogWriter::spawn(session.id, file));
     std::thread::Builder::new()
         .name(format!("pty-read-{}", session.id))
         .spawn(move || {
@@ -2034,13 +2084,8 @@ fn spawn_reader_thread(
                             );
                         }
 
-                        if let Some(log) = history_log.as_mut() {
-                            if let Err(e) = log.write_all(&data) {
-                                tracing::warn!(
-                                    session = %session.id,
-                                    error = %e,
-                                    "failed to append session history log"
-                                );
+                        if let Some(log) = history_log.as_ref() {
+                            if !log.append(data.clone()) {
                                 history_log = None;
                             }
                         }
@@ -2057,8 +2102,10 @@ fn spawn_reader_thread(
                     }
                 }
             }
-            if let Some(mut log) = history_log {
-                let _ = log.flush();
+            // Drain the log writer before declaring the reader done: the
+            // archive reads the file once `reader_done` is set.
+            if let Some(log) = history_log {
+                log.finish();
             }
             session.reader_done.store(true, Ordering::Release);
             try_spawn_archive(&session, history, &runtime);
@@ -2342,6 +2389,30 @@ async fn read_tail(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// `Session::last_change` on the blocking pool. It takes the terminal lock and
+/// hashes the whole screen, which must not run on an async worker: a worker
+/// parked behind the PTY reader's lock stalls every task scheduled on it,
+/// terminal input included.
+async fn last_change_off_worker(session: &Arc<Session>) -> Option<Instant> {
+    let session = Arc::clone(session);
+    tokio::task::spawn_blocking(move || session.last_change())
+        .await
+        .unwrap_or(None)
+}
+
+/// Settle pending output and classify, on the blocking pool (it renders the
+/// screen and takes the terminal and scrollback locks). A panicked task keeps
+/// the state the session already has.
+async fn classify_off_worker(session: &Arc<Session>) -> ActivityState {
+    let worker = Arc::clone(session);
+    tokio::task::spawn_blocking(move || {
+        let _ = worker.last_change();
+        compute_activity(&worker)
+    })
+    .await
+    .unwrap_or_else(|_| session.activity())
+}
+
 fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
     tokio::spawn(async move {
         loop {
@@ -2363,14 +2434,15 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
 
             // Measured from the last change to the screen, not the last
             // byte: an identical repaint is not work (WI-1090).
-            let reference = session.last_change().unwrap_or(session.spawned_at);
+            let reference = last_change_off_worker(&session)
+                .await
+                .unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
             let collapse_ms = crate::activity::collapse_after_ms(session.idle_after_ms);
             let wait_ms = if elapsed_ms >= collapse_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
-                    let _ = session.last_change();
-                    compute_activity(&session)
+                    classify_off_worker(&session).await
                 } else {
                     ActivityState::Idle
                 };
@@ -2403,8 +2475,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                     }
                     let new_state = if session.last_output.lock().is_some() {
                         // Settle pending output before classifying.
-                        let _ = session.last_change();
-                        compute_activity(&session)
+                        classify_off_worker(&session).await
                     } else {
                         ActivityState::Idle
                     };
@@ -2663,7 +2734,10 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // quiet window alone reads `idle` while the title says working. Only for
     // an agent whose title this engine reads, and never over a terminal state.
     let titled = matches!(session.agent().as_deref(), Some("codex"));
-    let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
+    // Only `titled_activity` reads it, and only for a titled agent. Rendering
+    // the whole grid for every chunk the reader takes, under the terminal
+    // lock, is wasted work (and lock hold time) for every other session.
+    let screen_busy = titled && crate::screen::screen_busy(&session.render_screen(0).0.lines);
     let title = session.title();
     let title = title
         .as_deref()

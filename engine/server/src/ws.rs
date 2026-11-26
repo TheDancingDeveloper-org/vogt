@@ -545,6 +545,28 @@ async fn send_snapshot(
     .is_ok()
 }
 
+/// Write a client's input to the PTY and stamp the input clocks, on the
+/// blocking pool. Both steps take blocking mutexes the PTY reader holds while
+/// it parses output (the writer lock, the terminal lock), and the PTY write
+/// itself blocks when the child is not reading. Waiting for those on an async
+/// worker stalls every task scheduled there, so under load one busy session
+/// made every terminal lag. Awaited one frame at a time, so input order holds.
+async fn deliver_input(session: &Arc<Session>, data: Vec<u8>, person: bool) -> std::io::Result<()> {
+    let session = Arc::clone(session);
+    tokio::task::spawn_blocking(move || {
+        session.write_input(&data)?;
+        if person {
+            session.note_person_input();
+            if has_typed_bytes(&data) {
+                session.note_addressed(false);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
 /// Inbound: client -> PTY stdin + control frames.
 async fn inbound_loop(
     mut stream: SplitStream<WebSocket>,
@@ -567,17 +589,15 @@ async fn inbound_loop(
                     let _ = refused_tx.send(refusal);
                     continue;
                 }
-                if writer_session.write_input(&data).is_err() {
-                    break;
-                }
                 // The socket already passed `may_type`. A person's
                 // keystroke moves the retention clock; an agent's
                 // (allowed while no permission dialog shows) does not.
-                if crate::person_gate::is_person(Some(&identity), None) {
-                    writer_session.note_person_input();
-                    if has_typed_bytes(&data) {
-                        writer_session.note_addressed(false);
-                    }
+                let person = crate::person_gate::is_person(Some(&identity), None);
+                if deliver_input(&writer_session, data.to_vec(), person)
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
             Message::Text(s) => {
@@ -606,14 +626,12 @@ async fn inbound_loop(
                             let _ = refused_tx.send(refusal);
                             continue;
                         }
-                        if writer_session.write_input(s.as_bytes()).is_err() {
+                        let person = crate::person_gate::is_person(Some(&identity), None);
+                        if deliver_input(&writer_session, s.as_bytes().to_vec(), person)
+                            .await
+                            .is_err()
+                        {
                             break;
-                        }
-                        if crate::person_gate::is_person(Some(&identity), None) {
-                            writer_session.note_person_input();
-                            if has_typed_bytes(s.as_bytes()) {
-                                writer_session.note_addressed(false);
-                            }
                         }
                     }
                 }
