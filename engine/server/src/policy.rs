@@ -311,17 +311,30 @@ fn is_main(branch: &str, mains: &[&str]) -> bool {
 }
 
 /// Each simple command on the line, and each simple command a quoted word
-/// carries (`bash -c "git push …"`), so a worker's push is judged inside a
-/// wrapper too.
+/// carries (`bash -c "git push …"`), recursively, so a worker's push is
+/// judged inside nested wrappers too (`bash -c "sh -c '…'"`). Nesting deeper
+/// than [`WORKER_NESTING_LIMIT`] is cut off; the deepest level is still
+/// judged as a plain command.
 fn worker_commands(command: &str) -> Vec<String> {
     let mut out = Vec::new();
+    collect_worker_commands(command, 0, &mut out);
+    out
+}
+
+const WORKER_NESTING_LIMIT: usize = 8;
+
+fn collect_worker_commands(command: &str, depth: usize, out: &mut Vec<String>) {
     for simple in split_commands(command) {
-        for word in command_words(&simple) {
-            out.extend(split_commands(&word));
+        if depth < WORKER_NESTING_LIMIT {
+            for word in command_words(&simple) {
+                // A word that is itself the whole simple command adds nothing.
+                if word != simple {
+                    collect_worker_commands(&word, depth + 1, out);
+                }
+            }
         }
         out.push(simple);
     }
-    out
 }
 
 /// The worker rule for one simple command (WI-1327): a `git push` must name
@@ -751,7 +764,10 @@ fn gh_pr(words: &[String]) -> Option<&str> {
         break;
     }
     if sub == Some("pr") {
-        return args.find(|a| !a.starts_with('-'));
+        // `gh pr new` is gh's built-in alias for `gh pr create` (WI-1327).
+        return args
+            .find(|a| !a.starts_with('-'))
+            .map(|verb| if verb == "new" { "create" } else { verb });
     }
     None
 }
@@ -5551,6 +5567,33 @@ mod tests {
             ..worker_on_1298()
         };
         assert!(!refused(&unstated, "gh pr create --title t", &cwd));
+    }
+
+    #[test]
+    fn a_worker_pr_refusal_covers_the_alias_wrappers_and_nested_shells() {
+        let cwd = cwd();
+        let closed = worker_on_1298();
+        let lines = [
+            "gh pr new --title t",
+            "gh -R o/r pr new -t x",
+            "env A=1 gh pr new -t x",
+            "command gh pr create -t x",
+            "exec gh pr create -t x",
+            "gh -R o/r pr create -t x",
+            "bash -c \"sh -c 'gh pr create -t x'\"",
+            "bash -c \"sh -c 'gh pr new -t x'\"",
+            "bash -c \"sh -c 'git push origin wi-1299-x'\"",
+        ];
+        let allowed: Vec<&str> = lines
+            .into_iter()
+            .filter(|line| !refused(&closed, line, &cwd))
+            .collect();
+        assert!(allowed.is_empty(), "not refused: {allowed:?}");
+        assert!(!refused(
+            &closed,
+            "bash -c \"sh -c 'git push origin wi-1298-x'\"",
+            &cwd
+        ));
     }
 
     #[test]
