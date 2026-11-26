@@ -5668,6 +5668,69 @@ mod tests {
     }
 
     #[test]
+    fn every_pr_wrapper_form_is_allowed_to_a_session_that_may_open_pull_requests() {
+        let cwd = cwd();
+        let lines = [
+            "gh pr create --title t",
+            "gh pr new --title t",
+            "gh -R o/r pr new -t x",
+            "env A=1 gh pr create -t x",
+            "command gh pr create -t x",
+            "exec gh pr create -t x",
+            "bash -c \"gh pr create -t x\"",
+            "sh -c 'gh pr create -t x'",
+            "bash -c \"sh -c 'gh pr create -t x'\"",
+            "echo x | xargs gh pr create",
+            "echo x | xargs -0 -I{} gh pr create -t {}",
+            "find . -exec gh pr create \\;",
+            "find . -name x -execdir gh pr create -t x +",
+            "eval \"gh pr create\"",
+            "eval gh pr create -t x",
+        ];
+        let sessions = [
+            (
+                "open_pr_allowed=Some(true)",
+                SessionPolicy {
+                    open_pr_allowed: Some(true),
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "open_pr_allowed=None",
+                SessionPolicy {
+                    open_pr_allowed: None,
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "oversight",
+                SessionPolicy {
+                    session_role: Some("oversight".into()),
+                    ..worker_on_1298()
+                },
+            ),
+            (
+                "role None",
+                SessionPolicy {
+                    session_role: None,
+                    ..worker_on_1298()
+                },
+            ),
+        ];
+        for (name, policy) in &sessions {
+            let wrongly_refused: Vec<&str> = lines
+                .iter()
+                .copied()
+                .filter(|line| refused(policy, line, &cwd))
+                .collect();
+            assert!(
+                wrongly_refused.is_empty(),
+                "{name}: refused {wrongly_refused:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_oversight_session_and_an_unclassified_one_are_not_workers() {
         let cwd = cwd();
         let oversight = SessionPolicy {
