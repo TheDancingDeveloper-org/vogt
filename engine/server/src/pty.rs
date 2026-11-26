@@ -1712,46 +1712,20 @@ fn identity_passthrough_mode() -> IdentityPassthrough {
     )
 }
 
+/// Whether this deployment opts every session into holding the full secrets-
+/// manager identity, reversing the default strip for the four identity vars.
+pub(crate) fn identity_passthrough_enabled() -> bool {
+    identity_passthrough_mode() == IdentityPassthrough::Full
+}
+
 /// Whether this deployment hands the tier identity to tier spawns only
 /// (`ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier`, WI-4814).
 pub(crate) fn tier_identity_passthrough_enabled() -> bool {
     identity_passthrough_mode() == IdentityPassthrough::Tier
 }
 
-type EnvPairs = Vec<(std::ffi::OsString, std::ffi::OsString)>;
-
-/// The Infisical identity a spawn is given, by passthrough mode (WI-4814):
-/// - the agent-auth helper always gets the broker identity, except a tier
-///   spawn under `tier` mode, which gets the tier identity instead;
-/// - `Full` additionally hands every spawn the full identity;
-/// - `Tier` hands the tier identity to a tier spawn only;
-/// - a non-tier spawn never receives the tier identity.
-fn spawn_identity_env(
-    mode: IdentityPassthrough,
-    helper: bool,
-    tier: bool,
-    broker: impl FnOnce() -> EnvPairs,
-    tier_identity: impl FnOnce() -> EnvPairs,
-    full: impl FnOnce() -> EnvPairs,
-) -> EnvPairs {
-    let mut out = EnvPairs::new();
-    if helper {
-        if mode == IdentityPassthrough::Tier && tier {
-            out.extend(tier_identity());
-            return out;
-        }
-        out.extend(broker());
-    }
-    match mode {
-        IdentityPassthrough::Full => out.extend(full()),
-        IdentityPassthrough::Tier if tier && !helper => out.extend(tier_identity()),
-        _ => {}
-    }
-    out
-}
-
 /// The Infisical identity variables re-granted to a session in identity-
-/// passthrough mode (`Full`), which [`sanitized_child_env`]
+/// passthrough mode [`identity_passthrough_enabled`], which [`sanitized_child_env`]
 /// would otherwise have stripped.
 pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
@@ -1886,24 +1860,39 @@ pub fn spawn(
     // tokens, then unsets them before it launches the user's shell. Re-grant
     // exactly those variables — and only to the helper command, never to a
     // caller command or a bare shell.
-    let mode = identity_passthrough_mode();
-    let has_tier = defaults.tier.is_some();
-    for (k, v) in spawn_identity_env(
-        mode,
-        spawning_agent_auth_helper,
-        has_tier,
-        || agent_auth_identity_env().into_iter().collect(),
-        tier_identity_env,
-        identity_env,
-    ) {
-        cmd.env(k, v);
-    }
     if spawning_agent_auth_helper {
+        match identity_passthrough_mode() {
+            IdentityPassthrough::Tier if defaults.tier.is_some() => {
+                for (k, v) in tier_identity_env() {
+                    cmd.env(k, v);
+                }
+            }
+            _ => {
+                for (k, v) in agent_auth_identity_env() {
+                    cmd.env(k, v);
+                }
+            }
+        }
         for (k, v) in agent_auth_config_env() {
             cmd.env(k, v);
         }
         if let Some(manifest) = defaults.agent_auth_manifest.as_ref() {
             cmd.env("ENGINE_AGENT_AUTH_SECRETS", manifest);
+        }
+    }
+    // An opted-in deployment (ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH) hands
+    // every session the full secrets-manager identity, reversing the default strip for
+    // exactly the four Infisical identity vars. The agent-auth helper already
+    // holds them (above); this also covers a bare shell or a caller command. The
+    // broad engine credentials (ENGINE_TOKEN, the scoped token set, assistant/STT
+    // keys, TAILSCALE_AUTH_KEY) stay stripped in both modes.
+    if identity_passthrough_enabled() {
+        for (k, v) in identity_env() {
+            cmd.env(k, v);
+        }
+    } else if tier_identity_passthrough_enabled() && defaults.tier.is_some() {
+        for (k, v) in tier_identity_env() {
+            cmd.env(k, v);
         }
     }
     // The tier marker travels with every tier spawn, whatever the identity
@@ -3573,53 +3562,6 @@ mod secret_env_tests {
                 "{value:?}"
             );
         }
-    }
-
-    fn pairs(tag: &str) -> super::EnvPairs {
-        vec![("INFISICAL_CLIENT_ID".into(), tag.into())]
-    }
-
-    fn grant(mode: super::IdentityPassthrough, helper: bool, tier: bool) -> Vec<String> {
-        super::spawn_identity_env(
-            mode,
-            helper,
-            tier,
-            || pairs("broker"),
-            || pairs("tier"),
-            || pairs("full"),
-        )
-        .into_iter()
-        .map(|(_, v)| v.to_string_lossy().into_owned())
-        .collect()
-    }
-
-    #[test]
-    fn tier_mode_gives_the_tier_identity_to_a_tier_spawn_only() {
-        use super::IdentityPassthrough::Tier;
-        // A tier shell and the tier's helper get the tier identity, never the
-        // broker or full one.
-        assert_eq!(grant(Tier, false, true), ["tier"]);
-        assert_eq!(grant(Tier, true, true), ["tier"]);
-        // A non-tier shell gets nothing; a non-tier helper only the broker
-        // identity (which agent-auth.sh then strips), never the tier one.
-        assert!(grant(Tier, false, false).is_empty());
-        assert_eq!(grant(Tier, true, false), ["broker"]);
-    }
-
-    #[test]
-    fn full_mode_gives_every_spawn_the_full_identity() {
-        use super::IdentityPassthrough::Full;
-        assert_eq!(grant(Full, false, false), ["full"]);
-        assert_eq!(grant(Full, false, true), ["full"]);
-        assert_eq!(grant(Full, true, false), ["broker", "full"]);
-        assert!(!grant(Full, true, true).contains(&"tier".to_string()));
-    }
-
-    #[test]
-    fn off_mode_gives_only_the_helper_the_broker_identity() {
-        use super::IdentityPassthrough::Off;
-        assert!(grant(Off, false, true).is_empty());
-        assert_eq!(grant(Off, true, true), ["broker"]);
     }
 
     #[test]
