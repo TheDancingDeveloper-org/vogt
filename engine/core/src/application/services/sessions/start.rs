@@ -309,6 +309,82 @@ fn worktree_branch(subject: &Subject, session_id: &str) -> String {
 }
 
 /// Python's `_worktree_base`: the project's integration branch, else `main`.
+/// The branch rules a worker's push and PR are held to (WI-1327), as
+/// Python's `_branch_rules`: sent only when the project states a landing
+/// rule and the session serves a work item, since `{n}` is its number.
+fn branch_rules(
+    policy: &crate::core::AgentPolicy,
+    role: &str,
+    work_item: Option<&str>,
+) -> Option<serde_json::Map<String, Value>> {
+    let landing = policy.landing.as_ref()?.as_object()?;
+    let number = work_item?.split_once('-')?.1;
+    if number.is_empty() {
+        return None;
+    }
+    let text = |key: &str| landing.get(key).and_then(Value::as_str);
+    let base = text("base_branch").unwrap_or_default().to_string();
+    let pattern = text("branch_pattern").unwrap_or("^wi-{n}-[a-z0-9-]+$");
+    let mut mains = vec![base];
+    for branch in &policy.main_branches {
+        if !mains.contains(branch) {
+            mains.push(branch.clone());
+        }
+    }
+    let mut rules = serde_json::Map::new();
+    rules.insert(
+        "branch_pattern".into(),
+        json!(pattern.replace("{n}", number)),
+    );
+    rules.insert(
+        "open_pr_allowed".into(),
+        json!(text("worker_lands_by") == Some("open_pr")),
+    );
+    rules.insert("session_role".into(), json!(role));
+    rules.insert("landing_mains".into(), json!(mains));
+    Some(rules)
+}
+
+/// The slice of a project's agent policy the engine can refuse on, as
+/// Python's `_enforced_policy`. With nothing to refuse the spec omits
+/// `policy`, so a start is byte-identical to one before enforcement.
+fn enforced_policy(
+    policy: &crate::core::AgentPolicy,
+    protected_checkouts: &[String],
+    role: &str,
+    work_item: Option<&str>,
+) -> Option<Value> {
+    let mut protected: Vec<String> = protected_checkouts
+        .iter()
+        .filter(|path| !path.is_empty())
+        .cloned()
+        .collect();
+    protected.sort();
+    protected.dedup();
+    let rules = branch_rules(policy, role, work_item);
+    if policy.forbidden_text.is_empty()
+        && !policy.merge_deploys_prod
+        && protected.is_empty()
+        && rules.is_none()
+    {
+        return None;
+    }
+    let mut enforced = serde_json::Map::new();
+    enforced.insert("forbidden_text".into(), json!(policy.forbidden_text));
+    enforced.insert(
+        "merge_deploys_prod".into(),
+        json!(policy.merge_deploys_prod),
+    );
+    if !policy.main_branches.is_empty() {
+        enforced.insert("main_branches".into(), json!(policy.main_branches));
+    }
+    if !protected.is_empty() {
+        enforced.insert("protected_checkouts".into(), json!(protected));
+    }
+    enforced.extend(rules.unwrap_or_default());
+    Some(Value::Object(enforced))
+}
+
 fn worktree_base(policy: &crate::core::AgentPolicy) -> String {
     let stated = policy.base_branch.trim();
     if stated.is_empty() {
@@ -550,6 +626,24 @@ where
         .unwrap_or_default();
     let budget = effective_budget(params, &policy);
     let worktree = params.worktree.unwrap_or(false);
+    // Only a session in a worktree is held to the checkouts, so a start in
+    // the checkout itself sends exactly what it sent before (WI-1326).
+    let protected = if worktree {
+        ctx.declared
+            .read()?
+            .list_projects(10_000, 0)?
+            .into_iter()
+            .map(|project| project.root_path)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let enforced = enforced_policy(
+        &policy,
+        &protected,
+        &params.role,
+        subject.work_item_ref.as_deref(),
+    );
     // A start by an oversight session makes it the supervisor, so the engine
     // can wake it when this session changes (WI-1521). A worker's or a
     // person's start names no supervisor.
@@ -572,6 +666,7 @@ where
     // the engine can hold the child to its parent's standing on its own.
     spec.started_by = admitted.started_by_session.clone();
     spec.budget = budget.as_ref().map(budget_wire);
+    spec.policy = enforced;
     if worktree {
         spec.worktree = Some(json!({
             "branch": worktree_branch(&subject, &session_id),
@@ -1403,4 +1498,71 @@ fn record_declared_branch(
     };
     txn.upsert_work_overlay(&overlay)?;
     Ok(branch)
+}
+
+#[cfg(test)]
+mod enforced_policy_tests {
+    use super::*;
+
+    fn landing(lands_by: &str) -> crate::core::AgentPolicy {
+        crate::core::AgentPolicy {
+            main_branches: vec!["main".into(), "integrate/vogt-next".into()],
+            landing: Some(json!({
+                "base_branch": "main",
+                "branch_pattern": "^wi-{n}-[a-z0-9-]+$",
+                "worker_lands_by": lands_by,
+                "merge_by": "oversight",
+                "merge_mode": "rebase",
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_worker_on_an_item_gets_the_branch_rules() {
+        let sent =
+            enforced_policy(&landing("push_branch"), &[], "worker", Some("WI-1298")).unwrap();
+        assert_eq!(sent["branch_pattern"], "^wi-1298-[a-z0-9-]+$");
+        assert_eq!(sent["open_pr_allowed"], false);
+        assert_eq!(sent["session_role"], "worker");
+        assert_eq!(
+            sent["landing_mains"],
+            json!(["main", "integrate/vogt-next"])
+        );
+        let open = enforced_policy(&landing("open_pr"), &[], "worker", Some("WI-1298")).unwrap();
+        assert_eq!(open["open_pr_allowed"], true);
+    }
+
+    #[test]
+    fn no_landing_or_no_item_sends_no_rules() {
+        assert_eq!(
+            enforced_policy(
+                &crate::core::AgentPolicy::default(),
+                &[],
+                "worker",
+                Some("WI-1")
+            ),
+            None
+        );
+        assert_eq!(
+            enforced_policy(&landing("push_branch"), &[], "worker", None),
+            None
+        );
+        let plain = crate::core::AgentPolicy {
+            forbidden_text: vec!["x".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            enforced_policy(&plain, &[], "worker", Some("WI-1")),
+            Some(json!({"forbidden_text": ["x"], "merge_deploys_prod": false}))
+        );
+    }
+
+    #[test]
+    fn protected_checkouts_are_sorted_and_deduplicated() {
+        let roots = vec!["/b".to_string(), String::new(), "/a".into(), "/b".into()];
+        let sent =
+            enforced_policy(&crate::core::AgentPolicy::default(), &roots, "worker", None).unwrap();
+        assert_eq!(sent["protected_checkouts"], json!(["/a", "/b"]));
+    }
 }
