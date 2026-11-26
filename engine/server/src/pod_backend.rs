@@ -6776,12 +6776,9 @@ mod creation_error_tests {
     use super::*;
 
     fn api(code: u16, message: &str) -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: message.into(),
-            reason: "Forbidden".into(),
-            code,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(message, "Forbidden").with_code(code),
+        ))
     }
 
     #[test]
@@ -6812,12 +6809,13 @@ mod creation_error_tests {
     }
 
     fn race() -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again".into(),
-            reason: "Conflict".into(),
-            code: 409,
-        })
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure(
+                "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again",
+                "Conflict",
+            )
+            .with_code(409),
+        ))
     }
 
     #[test]
@@ -6876,12 +6874,10 @@ mod creation_error_tests {
             || {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async {
-                    Err(kube::Error::Api(kube::core::ErrorResponse {
-                        status: "Failure".into(),
-                        message: "pods \"s\" already exists".into(),
-                        reason: "AlreadyExists".into(),
-                        code: 409,
-                    }))
+                    Err(kube::Error::Api(Box::new(
+                        kube::core::Status::failure("pods \"s\" already exists", "AlreadyExists")
+                            .with_code(409),
+                    )))
                 }
             },
         )
