@@ -326,6 +326,9 @@ const WORKER_NESTING_LIMIT: usize = 8;
 fn collect_worker_commands(command: &str, depth: usize, out: &mut Vec<String>) {
     for simple in split_commands(command) {
         if depth < WORKER_NESTING_LIMIT {
+            if let Some(payload) = worker_wrapped(&command_words(&simple)) {
+                collect_worker_commands(&payload, depth + 1, out);
+            }
             for word in command_words(&simple) {
                 // A word that is itself the whole simple command adds nothing.
                 if word != simple {
@@ -337,9 +340,39 @@ fn collect_worker_commands(command: &str, depth: usize, out: &mut Vec<String>) {
     }
 }
 
+/// The command a wrapper that runs another command carries: `xargs [opts]
+/// cmd …`, `find … -exec|-execdir cmd … ;|+` and `eval word …`, joined back
+/// into one line. `None` for any other command.
+fn worker_wrapped(words: &[String]) -> Option<String> {
+    match words.first().map(|w| base(w)) {
+        Some("xargs") => Some(xargs_command(words).join(" ")),
+        Some("eval") => Some(words[1..].join(" ")),
+        Some("find") => {
+            let payloads: Vec<String> = words
+                .split(|w| w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir")
+                .skip(1)
+                .map(|rest| {
+                    rest.iter()
+                        .take_while(|w| *w != ";" && *w != "\\;" && *w != "+")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect();
+            Some(payloads.join(" ; "))
+        }
+        _ => None,
+    }
+}
+
 /// The worker rule for one simple command (WI-1327): a `git push` must name
 /// only the worker's own branch, and a `gh pr create` is refused when the
 /// project does not let a worker open one. `None` when the command is allowed.
+///
+/// The PR-open rule matches command text, so it is best effort: it catches
+/// the common forms and honest mistakes (wrappers, nested shells, `xargs`,
+/// `find -exec`, `eval`), not a determined agent. Credential-level
+/// enforcement is WI-4831.
 fn worker_branch(
     policy: &SessionPolicy,
     pattern: &str,
@@ -5595,6 +5628,32 @@ mod tests {
             "gh --repo o/r pr -R o/r create -t x",
             "env A=1 gh pr -R o/r new -t x",
             "bash -c \"sh -c 'gh pr -R o/r create -t x'\"",
+        ];
+        let allowed: Vec<&str> = lines
+            .into_iter()
+            .filter(|line| !refused(&closed, line, &cwd))
+            .collect();
+        assert!(allowed.is_empty(), "not refused: {allowed:?}");
+        assert!(!refused(
+            &closed,
+            "bash -c \"sh -c 'git push origin wi-1298-x'\"",
+            &cwd
+        ));
+    }
+
+    #[test]
+    fn a_worker_pr_refusal_covers_xargs_find_exec_and_eval() {
+        let cwd = cwd();
+        let closed = worker_on_1298();
+        let lines = [
+            "echo x | xargs gh pr create",
+            "echo x | xargs -0 -I{} gh pr create -t {}",
+            "echo x | xargs -I {} gh pr new -t {}",
+            "find . -exec gh pr create \\;",
+            "find . -name x -execdir gh pr create -t x +",
+            "eval \"gh pr create\"",
+            "eval gh pr create -t x",
+            "echo x | xargs git push origin wi-1299-x",
         ];
         let allowed: Vec<&str> = lines
             .into_iter()

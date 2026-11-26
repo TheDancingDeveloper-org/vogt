@@ -1496,7 +1496,12 @@ What is refused, and only for an agent session that carries a policy:
   (`worker_lands_by`). An oversight session, and a session with no work
   item, is not judged by these. The role is read from the live session at
   each check, so `session.set_role` takes effect without a restart. A
-  pattern that does not compile refuses the push.
+  pattern that does not compile refuses the push. The `gh pr create` rule
+  matches command text, so it is best effort: it follows the common wrappers
+  (`env`, `command`, `exec`, nested `bash -c`, `xargs`, `find -exec` /
+  `-execdir`, `eval`) and catches honest mistakes, not a determined agent.
+  Enforcement that can't be bypassed is at the credential level: worker forge
+  credentials without pull-request write (WI-4831).
 
 Two more rules read the session's workspace (WI-1326). The engine copies
 the session's workspace block (above) into its policy before the child runs:
