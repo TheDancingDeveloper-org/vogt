@@ -215,7 +215,7 @@ async fn failed_log_tail(launcher: &dyn PodLauncher, auth: &AgentAuth, id: Uuid)
 
 fn pod_age(pod: &Pod) -> Option<Duration> {
     let created = pod.metadata.creation_timestamp.as_ref()?;
-    (k8s_openapi::chrono::Utc::now() - created.0).to_std().ok()
+    Duration::try_from(k8s_openapi::jiff::Timestamp::now().duration_since(created.0)).ok()
 }
 
 /// How often the reaper repeats its "keeping this pod" warning: once when it
@@ -352,7 +352,7 @@ pub async fn sweep_with(
                         .metadata
                         .creation_timestamp
                         .as_ref()
-                        .map_or(i64::MAX, |t| t.0.timestamp());
+                        .map_or(i64::MAX, |t| t.0.as_second());
                     if !salvaged(id, created, pod.metadata.uid.as_deref()) {
                         let due = tracker
                             .last_warned
@@ -741,9 +741,10 @@ mod tests {
 
         let (_auth, link) = live(id);
         let mut terminating = pod(id, phase("Failed"));
-        terminating.metadata.deletion_timestamp = Some(
-            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::chrono::Utc::now()),
-        );
+        terminating.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ));
         assert_eq!(
             judge(&terminating, Some(&link), &cfg(), None),
             Verdict::Keep
@@ -1001,7 +1002,8 @@ mod tests {
 
     fn aged(mut p: Pod, secs: i64) -> Pod {
         p.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-            k8s_openapi::chrono::Utc::now() - k8s_openapi::chrono::Duration::seconds(secs),
+            k8s_openapi::jiff::Timestamp::now()
+                - k8s_openapi::jiff::SignedDuration::from_secs(secs),
         ));
         p
     }
