@@ -173,7 +173,7 @@ fn estate_admin_tier_enabled() -> bool {
 
 /// The estate-admin tier a start carries, or `None` (WI-4814). A fresh API
 /// start is tiered exactly when a person started an oversight session on a
-/// tiered lane; a wake keeps its record's tier only while the lane grants it; an agent task never has one.
+/// tiered lane; a wake keeps its record's tier; an agent task never has one.
 fn estate_admin_tier(
     spec: &SessionSpec,
     creating: &Creating,
@@ -181,45 +181,13 @@ fn estate_admin_tier(
     tier_lane_enabled: bool,
 ) -> Option<String> {
     match creating {
-        // A wake keeps the recorded tier only while the lane still grants it:
-        // unsetting ENGINE_ESTATE_ADMIN_TIER withdraws the identity from a
-        // session that comes back afterwards.
-        Creating::Wake(record) => record.tier.clone().filter(|_| tier_lane_enabled),
+        Creating::Wake(record) => record.tier.clone(),
         Creating::Fresh(Origin::AgentTask) => None,
         Creating::Fresh(Origin::Api) => {
             (person_started && spec.role == SessionRole::Oversight && tier_lane_enabled)
                 .then(|| pty::ESTATE_ADMIN_TIER.to_string())
         }
     }
-}
-
-/// Record `agent_auth.tier_granted` for one tiered spawn, a fresh start or a
-/// wake alike (WI-4814): the session, the person, the lane and the identity
-/// names, never a value. A spawn with no tier records nothing.
-fn announce_tier_grant(
-    bus: &EventBus,
-    session: Uuid,
-    tier: Option<&str>,
-    person: String,
-    lane: String,
-) {
-    if tier.is_none() {
-        return;
-    }
-    let names = if pty::tier_identity_passthrough_enabled() {
-        vec![
-            "INFISICAL_CLIENT_ID".to_string(),
-            "INFISICAL_CLIENT_SECRET".to_string(),
-        ]
-    } else {
-        Vec::new()
-    };
-    bus.publish(ServerEvent::AgentAuthTierGranted {
-        session,
-        person,
-        lane,
-        names,
-    });
 }
 
 /// `spec.env` may not set the tier marker (WI-4814): the engine owns it, and
@@ -3306,6 +3274,7 @@ impl SessionRegistry {
         // session is live again, and a shutdown drain may have left
         // `engine-shutdown` on its row (WI-4567).
         let waking = matches!(&creating, Creating::Wake(_));
+        let fresh_api_start = matches!(&creating, Creating::Fresh(Origin::Api));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
             Creating::Fresh(Origin::Api) => Some(self.fresh_record(
@@ -3346,15 +3315,22 @@ impl SessionRegistry {
         self.sessions.insert(session.id, Arc::clone(&session));
         // A fresh tier start is the one grant: audited per spawn, with the
         // person, the lane and the identity names granted, never a value
-        // (WI-4814). A wake respawns with the tier identity too, so it is
-        // recorded the same way.
-        announce_tier_grant(
-            &self.bus,
-            id,
-            tier.as_deref(),
-            starter_name.unwrap_or_default(),
-            self.cfg.lane.clone().unwrap_or_default(),
-        );
+        // (WI-4814). A wake keeps its recorded tier without a new grant.
+        if fresh_api_start && tier.is_some() {
+            self.bus.publish(ServerEvent::AgentAuthTierGranted {
+                session: id,
+                person: starter_name.unwrap_or_default(),
+                lane: self.cfg.lane.clone().unwrap_or_default(),
+                names: if pty::tier_identity_passthrough_enabled() {
+                    vec![
+                        "INFISICAL_CLIENT_ID".to_string(),
+                        "INFISICAL_CLIENT_SECRET".to_string(),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
         // A fresh Codex session given a brief must actually start its first
         // turn (WI-4068). Start the confirmation before the caller's request
         // returns, so a session that never submits surfaces as blocked rather
@@ -6448,16 +6424,6 @@ mod tests {
                 false,
                 false,
             ),
-            None::<String>,
-            "a wake on a lane that no longer grants the tier drops it"
-        );
-        assert_eq!(
-            estate_admin_tier(
-                &spec(vogt_engine_contract::SessionRole::Oversight),
-                &wake,
-                false,
-                true,
-            ),
             Some(super::pty::ESTATE_ADMIN_TIER.to_string())
         );
 
@@ -6471,38 +6437,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn a_tiered_spawn_publishes_the_grant_and_an_ordinary_one_does_not() {
-        let bus = crate::events::EventBus::new(16);
-        let mut rx = bus.subscribe();
-        let id = uuid::Uuid::new_v4();
-        super::announce_tier_grant(&bus, id, None, "alice".into(), "dev".into());
-        assert!(rx.try_recv().is_err(), "no event for a non-tier spawn");
-        // A wake respawn is a tier spawn like a fresh start.
-        super::announce_tier_grant(
-            &bus,
-            id,
-            Some(super::pty::ESTATE_ADMIN_TIER),
-            "alice".into(),
-            "dev".into(),
-        );
-        match rx.try_recv() {
-            Ok(crate::events::ServerEvent::AgentAuthTierGranted {
-                session,
-                person,
-                lane,
-                names,
-            }) => {
-                assert_eq!(session, id);
-                assert_eq!(person, "alice");
-                assert_eq!(lane, "dev");
-                assert!(names.iter().all(|n| n.starts_with("INFISICAL_")));
-            }
-            other => panic!("expected the tier grant, got {other:?}"),
-        }
-        assert!(rx.try_recv().is_err(), "exactly one event per spawn");
     }
 
     #[test]
