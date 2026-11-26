@@ -374,7 +374,7 @@ fn gather(cwd: &Path, home: Option<&Path>) -> Option<String> {
         return None;
     }
     body.push_str(TOOL_DISCIPLINE);
-    body.push_str("\n");
+    body.push('\n');
     if !left_out.is_empty() {
         body.push_str("Left out for size; read them directly if needed:\n");
         for path in left_out {
