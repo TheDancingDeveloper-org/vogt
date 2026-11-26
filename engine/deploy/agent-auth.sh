@@ -924,6 +924,37 @@ load_manifest_secrets() {
     done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
 }
 
+# Decide AGENT_AUTH_MODE and whether the brokering machine identity survives
+# this launch, then drop it unless the launch keeps it (WI-4814).
+# `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=tier` scopes the passthrough to an
+# estate-admin tier spawn: the engine maps the tier identity into
+# INFISICAL_CLIENT_* and sets VOGT_AGENT_AUTH_TIER only for that spawn.
+# `1`/`true` keep the old full passthrough; anything else stays brokered and
+# the identity is unset.
+agent_auth_passthrough_decision() {
+    local identity_passthrough=0 tier_passthrough=0 tier_spawn=0
+    case "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" in
+        1|true|TRUE|yes|on)
+            identity_passthrough=1
+            ;;
+        tier|TIER)
+            tier_passthrough=1
+            ;;
+    esac
+    [[ -n "${VOGT_AGENT_AUTH_TIER:-}" ]] && tier_spawn=1
+    if [[ "$identity_passthrough" -eq 1 || ("$tier_passthrough" -eq 1 && "$tier_spawn" -eq 1) ]]; then
+        export AGENT_AUTH_MODE=identity
+    else
+        export AGENT_AUTH_MODE=brokered
+    fi
+    if [[ "$identity_passthrough" -eq 0 \
+        && ! ("$tier_passthrough" -eq 1 && "$tier_spawn" -eq 1) ]]; then
+        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
+            ENGINE_INFISICAL_ENV \
+            2>/dev/null || true
+    fi
+}
+
 load_agent_environment() {
     local access_token="" started
     if [[ -z "${INFISICAL_API_URL:-}" || -z "${INFISICAL_CLIENT_ID:-}" \
@@ -1015,17 +1046,11 @@ load_agent_environment() {
     # Identity-passthrough is an explicit per-deployment opt-in that keeps
     # the machine identity in the session (reverses the identity strip below).
     # Decided here, before the identity is unset, and reused for both.
-    local identity_passthrough=0
-    if [[ "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" =~ ^(1|true|TRUE|yes|on)$ ]]; then
-        identity_passthrough=1
-    fi
-    if [[ "$identity_passthrough" -eq 1 ]]; then
-        # The session holds the full secrets-manager identity; session tooling
-        # should use `infisical` directly, not the manifest broker.
-        export AGENT_AUTH_MODE=identity
-    else
-        export AGENT_AUTH_MODE=brokered
-    fi
+    # `tier` scopes the passthrough to an estate-admin tier spawn: the engine
+    # maps the tier identity into INFISICAL_CLIENT_* and sets the marker
+    # VOGT_AGENT_AUTH_TIER only for that spawn (WI-4814). `1`/`true` keep the
+    # old full passthrough.
+    agent_auth_passthrough_decision
     export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
     export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
     # Names a session may *store* through the broker, beside the names it
@@ -1048,15 +1073,6 @@ load_agent_environment() {
         ENGINE_AGENT_AUTH_PROBES ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH \
         ENGINE_AGENT_AUTH_VOGT_SECRET_NAME \
         2>/dev/null || true
-    # The machine identity is dropped by default: a normal session
-    # must not keep the credential that could read the rest of the vault. In
-    # identity-passthrough mode it is deliberately KEPT so the session can
-    # use `infisical` directly against any project.
-    if [[ "$identity_passthrough" -eq 0 ]]; then
-        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
-            ENGINE_INFISICAL_ENV \
-            2>/dev/null || true
-    fi
 }
 
 # The service-probe list is configuration, not a baked-in estate service map.

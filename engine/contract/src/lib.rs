@@ -444,6 +444,12 @@ pub struct SessionSummary {
     /// `SessionSpec::role`); absent for an ordinary worker.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The estate-admin tier this session was granted, when it was
+    /// (WI-4814): `estate_admin` for a person-started oversight session on a
+    /// lane that sets `ENGINE_ESTATE_ADMIN_TIER`. Never inherited by a
+    /// session it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     /// The work item the session serves (WI-998, see
     /// `SessionSpec::work_item`); absent when it is bound to none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1431,6 +1437,16 @@ pub enum ServerEvent {
     /// A hibernated session was started again under the same id.
     SessionWoken {
         id: Uuid,
+    },
+    /// An estate-admin tier was granted to a tier spawn (WI-4814): the
+    /// session, the person who started it, the lane, and the Infisical
+    /// identity names granted. Values are never included.
+    #[serde(rename = "agent_auth.tier_granted")]
+    AgentAuthTierGranted {
+        session: Uuid,
+        person: String,
+        lane: String,
+        names: Vec<String>,
     },
     /// A new resource sample for every live session, once per sampling
     /// interval (WI-916). Carries only the sessions it measured.
