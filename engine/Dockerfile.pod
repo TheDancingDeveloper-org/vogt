@@ -116,6 +116,19 @@ RUN apt-get update \
 ARG K8S_MCP_VERSION=v0.0.67
 ARG K8S_MCP_SHA256_AMD64=d791c22b5367813cc9e7c66e405d8ff7f7d51189b5bd619fdd84a99cf7a1c116
 ARG K8S_MCP_SHA256_ARM64=d9378039b68b5247796655ba8bbb210d5e94287e56bd532112d81950a19f0e50
+# kubectl, kustomize and yq for the k8s-* skills (WI-4807). kubectl is pinned
+# to the k3s cluster's minor (v1.36.5+k3s1); kustomize and yq are their
+# current releases. Each is downloaded from a versioned release, checked
+# against a sha256 recorded here (one per architecture) before install.
+ARG KUBECTL_VERSION=v1.36.5
+ARG KUBECTL_SHA256_AMD64=33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
+ARG KUBECTL_SHA256_ARM64=88fc1aca8fd0c1b44fe379f67c39bd6858bdfc50241dc55775f84d0f5b31da3a
+ARG KUSTOMIZE_VERSION=v5.8.3
+ARG KUSTOMIZE_SHA256_AMD64=cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61
+ARG KUSTOMIZE_SHA256_ARM64=9867b76482cfc6d25b546abc1d2b5a32bd137505aba640649b4b378f64f6d68f
+ARG YQ_VERSION=v4.54.3
+ARG YQ_SHA256_AMD64=09a25baa0e136b8633949e03117fc82cb9e50d10910f988ef17a1305539ebce4
+ARG YQ_SHA256_ARM64=980de87c439acb5172707560dd137e9fe4a1628af5aaf6f33b293f04c71d4e9d
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
         amd64) arch=amd64; sum="$K8S_MCP_SHA256_AMD64" ;; \
@@ -128,6 +141,30 @@ RUN set -eu; \
     install -m 755 /tmp/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server; \
     rm -f /tmp/kubernetes-mcp-server; \
     kubernetes-mcp-server --version
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) karch=x86_64; kubectl_sha="$KUBECTL_SHA256_AMD64"; kustomize_sha="$KUSTOMIZE_SHA256_AMD64"; yq_sha="$YQ_SHA256_AMD64" ;; \
+        arm64) karch=aarch64; kubectl_sha="$KUBECTL_SHA256_ARM64"; kustomize_sha="$KUSTOMIZE_SHA256_ARM64"; yq_sha="$YQ_SHA256_ARM64" ;; \
+        *) echo "no pinned k8s toolchain for $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl" -o /tmp/kubectl; \
+    echo "${kubectl_sha}  /tmp/kubectl" | sha256sum -c -; \
+    install -m 0755 /tmp/kubectl /usr/local/bin/kubectl; \
+    rm -f /tmp/kubectl; \
+    kubectl version --client=true --output=yaml >/dev/null; \
+    curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${karch}.tar.gz" -o /tmp/kustomize.tar.gz; \
+    echo "${kustomize_sha}  /tmp/kustomize.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/kustomize.tar.gz -C /tmp kustomize; \
+    install -m 0755 /tmp/kustomize /usr/local/bin/kustomize; \
+    rm -f /tmp/kustomize /tmp/kustomize.tar.gz; \
+    kustomize version >/dev/null; \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${karch}.tar.gz" -o /tmp/yq.tar.gz; \
+    echo "${yq_sha}  /tmp/yq.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/yq.tar.gz -C /tmp "./yq_linux_${karch}"; \
+    install -m 0755 "/tmp/yq_linux_${karch}" /usr/local/bin/yq; \
+    rm -f "/tmp/yq_linux_${karch}" /tmp/yq.tar.gz /tmp/yq.1 /tmp/install-man-page.sh; \
+    yq --version >/dev/null
 
 # Infisical CLI. The agent-auth helper (`engine/deploy/agent-auth.sh`) runs
 # `infisical` by name, and the engine calls that helper for on-demand provider

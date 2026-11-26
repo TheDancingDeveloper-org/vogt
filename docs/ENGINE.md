@@ -117,7 +117,8 @@ runtime stage starts `FROM` a
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
 — Node, Rust, Java/Gradle, the Android SDK; its `INSTALL_FLUTTER` build
-argument adds Flutter for a pod that builds the Android app. A third variant,
+argument adds Flutter for a pod that builds the Android app. The base also
+pins `kubectl`, `kustomize` and `yq` for the k8s-* skills. A third variant,
 `workbench`, is `full` plus the public session tools (Chrome and `chrome-ci`,
 Python 3.12, Terraform, sshpass, pingcli, actionlint, and the Tailscale
 client, which the image never joins). `build.yml` publishes the merged image
@@ -408,17 +409,22 @@ claude mcp add --scope project rust-analyzer -- vogt-rust-analyzer-mcp
 Set `VOGT_ENGINE_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
 it from a non-Rust directory.
 
-**GitHub, Grafana, Gitea/Forgejo — optional, read-only.** The image carries
-three third-party MCP servers at exact versions, each tarball checked against a
-sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
-`github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
+**GitHub, Grafana, Gitea/Forgejo, Kubernetes — optional, read-only.** The image carries
+four third-party MCP servers at exact versions, each binary checked against a
+sha256 recorded in its Dockerfile (a bump is an edit there):
+`github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0 in
+`engine/Dockerfile`, and `kubernetes-mcp-server` 0.0.67 in
+`engine/Dockerfile.pod`.
 `vogt-mcp-bootstrap` registers each one with Claude Code, Codex and opencode
 **only while the session holds its token**, and removes the
 registration when it does not (opencode excepted: it has no `mcp remove`, so
 its entry stays and the wrapper, finding no token, refuses to start), so a deployment turns one on by adding its token to the session's
 environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
-an `ondemand` line is not in the environment when the bootstrap runs, so it
-does not register anything) and off by removing it.
+an `ondemand` line is not in the environment when the bootstrap runs, so a
+GitHub, Grafana or Forgejo server is not registered that way) and off by
+removing it. `k8s-ro` is the exception: its wrapper resolves the kubeconfig at
+spawn, so the registration exists while the kubeconfig is either exported or
+listed in `AGENT_AUTH_ONDEMAND`.
 
 A host opencode session or plain shell whose `HOME` is not writable by the engine user (vogt-dev) is launched with per-session `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` under `<state_dir>/opencode-xdg/<id>/` (mode 0700; WI-4284, WI-4298), so the bootstrap registers opencode and a hand-started `opencode` works. If a data directory still cannot be created, the bootstrap warns once per directory and skips opencode.
 
@@ -427,6 +433,7 @@ A host opencode session or plain shell whose `HOME` is not writable by the engin
 | `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
 | `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
+| `k8s-ro` | `K8S_AGENT_READONLY_KUBECONFIG` — raw or base64, exported at launch or listed `ondemand`; the wrapper fetches an `ondemand` value through the secret broker and writes it to a 0600 file | `--read-only --toolsets core` (no `configuration_view`, so no service-account token is printed), plus a service account that cannot read Secrets |
 
 Note: `forgejo-ro` `get_file_contents` returns the file base64-encoded unless line ranges are requested; pass a line range to get plain text.
 
