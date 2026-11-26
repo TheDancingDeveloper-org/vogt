@@ -742,34 +742,38 @@ fn worker_ref(branch: &str, pattern: &str, policy: &SessionPolicy) -> Option<Str
 /// The `gh pr <verb>` verb, when this is a pull-request subcommand. Global
 /// flags in front of the subcommand are skipped, so `gh -R o/r pr merge` is
 /// still a merge.
-fn gh_pr(words: &[String]) -> Option<&str> {
-    let mut args = words.iter().map(String::as_str).skip(1);
-    let mut sub = None;
+/// gh flags (global, or persistent on `pr`) that take a value as the next
+/// word when not written `--flag=value`.
+const GH_VALUE_FLAGS: &[&str] = &["-R", "--repo", "--hostname"];
+
+/// The next positional word of a gh argv, skipping flags and the values of
+/// value-taking flags (`-R x`, `--repo x`; `--repo=x` is one word). A `--`
+/// makes the following word positional.
+fn gh_positional<'a, I: Iterator<Item = &'a str>>(args: &mut I) -> Option<&'a str> {
     while let Some(arg) = args.next() {
         if arg == "--" {
-            sub = args.next();
-            break;
+            return args.next();
         }
-        if arg.starts_with("--repo=") {
-            continue;
-        }
-        if arg == "-R" || arg == "--repo" {
+        if GH_VALUE_FLAGS.contains(&arg) {
             args.next();
             continue;
         }
         if arg.starts_with('-') {
             continue;
         }
-        sub = Some(arg);
-        break;
-    }
-    if sub == Some("pr") {
-        // `gh pr new` is gh's built-in alias for `gh pr create` (WI-1327).
-        return args
-            .find(|a| !a.starts_with('-'))
-            .map(|verb| if verb == "new" { "create" } else { verb });
+        return Some(arg);
     }
     None
+}
+
+/// The `gh pr` verb of a gh argv (`gh [flags] pr [flags] <verb>`), with
+/// `new`, gh's built-in alias, normalised to `create` (WI-1327).
+fn gh_pr(words: &[String]) -> Option<&str> {
+    let mut args = words.iter().map(String::as_str).skip(1);
+    if gh_positional(&mut args)? != "pr" {
+        return None;
+    }
+    gh_positional(&mut args).map(|verb| if verb == "new" { "create" } else { verb })
 }
 
 /// The path a `git commit` reads its message from, when it uses `-F`.
@@ -5583,6 +5587,14 @@ mod tests {
             "bash -c \"sh -c 'gh pr create -t x'\"",
             "bash -c \"sh -c 'gh pr new -t x'\"",
             "bash -c \"sh -c 'git push origin wi-1299-x'\"",
+            "gh pr -R o/r create -t x",
+            "gh pr --repo o/r create -t x",
+            "gh pr --repo=o/r new -t x",
+            "gh pr --repo o/r new -t x",
+            "gh --repo=o/r pr create -t x",
+            "gh --repo o/r pr -R o/r create -t x",
+            "env A=1 gh pr -R o/r new -t x",
+            "bash -c \"sh -c 'gh pr -R o/r create -t x'\"",
         ];
         let allowed: Vec<&str> = lines
             .into_iter()
