@@ -155,6 +155,16 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
                     continue;
                 }
                 for simple in worker_commands(&top) {
+                    // `pushd`/`popd`, and a `cd` inside a nested shell string
+                    // (`bash -c 'cd x && …'`, `eval`), move git somewhere this
+                    // check does not follow: no directory is known after it.
+                    if matches!(
+                        command_words(&simple).first().map(|w| base(w)),
+                        Some("cd" | "pushd" | "popd")
+                    ) {
+                        here = here.join("\0unresolved");
+                        continue;
+                    }
                     if let Some(reason) = worker_branch(policy, pattern, &simple, &here) {
                         return Some(reason);
                     }
@@ -426,12 +436,9 @@ fn worker_git(
             "refusing: a worker may not set this git configuration on the command line".to_string(),
         );
     }
-    if words
-        .iter()
-        .any(|w| w.starts_with("--git-dir") || w.starts_with("--work-tree"))
-    {
-        return Some("refusing: a worker may not point git at another git directory".to_string());
-    }
+    // `--git-dir` / `--work-tree` name the repository like `-C` does and are
+    // resolved by `git_dir`; a pair that disagrees, or that is mixed with
+    // `-C`, resolves to no directory, so a push that needs one is refused.
     let dir = git_dir(words, cwd);
     match git_subcommand(words).as_deref() {
         Some("push") => worker_push(words, pattern, policy, &dir),
@@ -882,6 +889,9 @@ fn file_matches(re: &Regex, file: &Path, cwd: &Path) -> bool {
 /// `-C`, `--git-dir` or `--work-tree`.
 fn git_dir(words: &[String], cwd: &Path) -> PathBuf {
     let mut dir = cwd.to_path_buf();
+    let (mut git_d, mut work_t): (Option<PathBuf>, Option<PathBuf>) = (None, None);
+    let mut dash_c = false;
+    let mut conflict = false;
     let mut args = words.iter().skip(1);
     while let Some(arg) = args.next() {
         // `-c key=value` and `--config-env name=var` take a value, which
@@ -897,16 +907,36 @@ fn git_dir(words: &[String], cwd: &Path) -> PathBuf {
                 path
             };
             dir = resolve_dir(path, cwd);
-        } else if let Some(path) = arg
-            .strip_prefix("--git-dir=")
-            .or_else(|| arg.strip_prefix("--work-tree="))
-        {
-            dir = resolve_dir(path, cwd);
+            dash_c = true;
+        } else if arg == "--git-dir" || arg == "--work-tree" {
+            let value = args.next().map(String::as_str).unwrap_or("");
+            let slot = if arg == "--git-dir" {
+                &mut git_d
+            } else {
+                &mut work_t
+            };
+            let resolved = resolve_dir(value, cwd);
+            conflict |= slot.as_ref().is_some_and(|prev| *prev != resolved);
+            *slot = Some(resolved);
+        } else if let Some(value) = arg.strip_prefix("--git-dir=") {
+            let resolved = resolve_dir(value, cwd);
+            conflict |= git_d.as_ref().is_some_and(|prev| *prev != resolved);
+            git_d = Some(resolved);
+        } else if let Some(value) = arg.strip_prefix("--work-tree=") {
+            let resolved = resolve_dir(value, cwd);
+            conflict |= work_t.as_ref().is_some_and(|prev| *prev != resolved);
+            work_t = Some(resolved);
         } else if !arg.starts_with('-') {
             break;
         }
     }
-    dir
+    match (git_d, work_t) {
+        (None, None) => dir,
+        // Both named, or one beside `-C`: they may not name different places.
+        (Some(a), Some(b)) if a == b && !conflict && !dash_c => a,
+        (Some(d), None) | (None, Some(d)) if !conflict && !dash_c => d,
+        _ => cwd.join("\0unresolved"),
+    }
 }
 
 /// An absolute directory stands on its own; a relative one is relative to the
@@ -3340,7 +3370,12 @@ fn git_args(words: &[String]) -> Vec<String> {
     let mut args = words.iter().skip(1);
     let mut out = Vec::new();
     while let Some(arg) = args.next() {
-        if arg == "-C" || arg == "-c" || arg == "--config-env" {
+        if arg == "-C"
+            || arg == "-c"
+            || arg == "--config-env"
+            || arg == "--git-dir"
+            || arg == "--work-tree"
+        {
             args.next();
             continue;
         }
@@ -5664,6 +5699,108 @@ mod tests {
         assert!(refused(&worker, "git push origin HEAD", &other));
     }
 
+    /// WI-4861: `--git-dir` / `--work-tree` name the effective directory like
+    /// `-C`; `pushd`/`popd` and a `cd` in a nested shell make it unresolvable.
+    #[test]
+    fn a_worker_push_follows_git_dir_and_refuses_hidden_directory_changes() {
+        let worker = worker_on_1298();
+        let own = repo("wi-1298-x");
+        let other = repo("wi-1299-x");
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().to_string();
+        let (own_n, other_n) = (name(&own), name(&other));
+        let parent = own.parent().unwrap().to_path_buf();
+        let cases = [
+            (format!("git --work-tree={own_n} push origin HEAD"), false),
+            (format!("git --work-tree {own_n} push origin HEAD"), false),
+            (format!("git --git-dir={own_n} push origin HEAD"), false),
+            (format!("git --git-dir {own_n} push origin HEAD"), false),
+            (
+                format!("git --git-dir={own_n} --work-tree={own_n} push origin HEAD"),
+                false,
+            ),
+            (format!("git --work-tree={other_n} push origin HEAD"), true),
+            (format!("git --git-dir {other_n} push origin HEAD"), true),
+            ("git --git-dir=no-such-4861 push origin HEAD".into(), true),
+            // Conflicting selectors, or one beside -C, are refused.
+            (
+                format!("git --git-dir={own_n} --work-tree={other_n} push origin HEAD"),
+                true,
+            ),
+            (
+                format!("git --git-dir={own_n} -C {own_n} push origin HEAD"),
+                true,
+            ),
+            (
+                format!("git -C {own_n} --work-tree={own_n} push origin HEAD"),
+                true,
+            ),
+            // An explicit refspec still needs no directory.
+            (
+                format!("git --git-dir={other_n} push origin wi-1298-x"),
+                false,
+            ),
+            (format!("git --git-dir={own_n} push origin wi-1299-x"), true),
+            // pushd/popd and a nested cd leave no known directory.
+            (
+                format!("cd {own_n} && pushd ../{other_n} && git push origin HEAD"),
+                true,
+            ),
+            (format!("pushd {own_n} && git push origin HEAD"), true),
+            (format!("cd {own_n} && popd && git push origin HEAD"), true),
+            (
+                format!("cd {own_n} && bash -c 'cd ../{other_n} && git push origin HEAD'"),
+                true,
+            ),
+            (
+                format!("cd {own_n} && sh -c \"cd ../{other_n} && git push origin HEAD\""),
+                true,
+            ),
+            (
+                format!("cd {own_n} && eval 'cd ../{other_n} && git push origin HEAD'"),
+                true,
+            ),
+            (
+                format!("cd {own_n} && eval cd ../{other_n} && git push origin HEAD"),
+                true,
+            ),
+            (
+                format!("cd {own_n} && pushd ../{other_n} && git push origin wi-1298-x"),
+                false,
+            ),
+            // Reviewer probes stay refused.
+            (
+                format!("cd {other_n} || cd {own_n} && git push origin HEAD"),
+                true,
+            ),
+            (format!("(cd {other_n} && git push origin HEAD)"), true),
+            (
+                format!("cd {own_n} && git -C ../{other_n} push origin HEAD"),
+                true,
+            ),
+            (format!("cd {own_n} && git push origin HEAD:main"), true),
+            (
+                format!("cd {own_n} && git push origin HEAD:refs/heads/main"),
+                true,
+            ),
+            (
+                format!("cd {own_n} && git push origin wi-1298-x wi-1299-x"),
+                true,
+            ),
+            (format!("cd {own_n} && git push --all origin"), true),
+            (format!("cd {own_n} && git push --tags origin"), true),
+            (format!("cd {other_n} & git push origin HEAD"), true),
+        ];
+        for (command, want) in cases {
+            assert_eq!(
+                refused(&worker, &command, &parent),
+                want,
+                "worker on WI-1298 in {}: {command} ({:?})",
+                parent.display(),
+                check(&worker, &command, &parent)
+            );
+        }
+    }
+
     #[test]
     fn a_worker_may_not_open_a_pull_request_when_the_project_lands_by_push() {
         let cwd = cwd();
@@ -6030,7 +6167,7 @@ mod tests {
             "GIT_CONFIG_SYSTEM=/tmp/s git push origin wi-1298-x",
             "GIT_DIR=/tmp/other/.git git push origin wi-1298-x",
             "export HOME=/tmp/h; git push origin wi-1298-x",
-            "git --git-dir=/tmp/other/.git push origin wi-1298-x",
+            "git --git-dir=/tmp/other/.git push origin HEAD",
         ] {
             assert!(refused(&worker, command, &dir), "should refuse: {command}");
         }
