@@ -2889,16 +2889,12 @@ pub async fn store(
         auth::record_auth_failure(&Method::POST, &path, &request_id, "missing broker token").await;
         return ApiError::Unauthorized.into_response();
     };
-    let session = match broker
-        .authenticate(presented)
-        .filter(|id| state.sessions.get(*id).is_ok())
-    {
-        Some(id) => id,
-        None => {
-            auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token")
-                .await;
-            return ApiError::Unauthorized.into_response();
-        }
+    // A host session presents its broker grant; a pod presents the stream
+    // credential its bootstrap handed it, the same pair `fetch` accepts
+    // (WI-3884, WI-4909).
+    let Some(session) = presenting_session(&state, presented).await else {
+        auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token").await;
+        return ApiError::Unauthorized.into_response();
     };
 
     if let Some(retry_after) = state.auth.check_mutation_rate_limit(

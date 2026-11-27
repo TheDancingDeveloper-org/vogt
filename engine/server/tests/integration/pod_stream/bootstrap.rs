@@ -243,6 +243,77 @@ async fn a_pod_stream_token_fetches_the_manifest_and_only_its_own_grant() {
     assert!(!logged.contains("value-of-POD_GRANT"), "{logged}");
 }
 
+/// WI-4909: `store` accepts the pod stream credential `fetch` accepts. It
+/// still requires the `writable` flag, and a token that names no live
+/// session (garbage, the engine's own bearer, or a stopped session's stream
+/// credential) is refused.
+#[tokio::test]
+async fn a_pod_stream_token_stores_only_writable_names_for_its_own_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness_cfg(false, None, |cfg| {
+        cfg.agent_auth_helper = fake_broker_helper(tmp.path());
+        cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+            "POD_WRITABLE acct pod-writable ondemand,writable\n\
+             POD_READONLY acct pod-readonly ondemand\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let id = h.start().await;
+    let token = h.session_token(id).await;
+    let other = h.start().await;
+    let other_token = h.session_token(other).await;
+
+    let plain = reqwest::Client::new();
+    let store = |token: &str, var: &str| {
+        plain
+            .post(format!("{}/api/agent-auth/store/{var}", h.base))
+            .bearer_auth(token.to_string())
+            .body("pod-produced-value")
+            .send()
+    };
+
+    // A writable name: stored, the value reaching the helper on stdin.
+    let got = store(&token, "POD_WRITABLE").await.unwrap();
+    let status = got.status();
+    let body = got.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body.trim(), "created");
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("store-stdin")).unwrap(),
+        "pod-produced-value"
+    );
+    std::fs::remove_file(tmp.path().join("store-stdin")).unwrap();
+
+    // Declared but not writable: refused with the flag to add.
+    let refused = store(&token, "POD_READONLY").await.unwrap();
+    assert_eq!(refused.status(), 403);
+    assert!(refused.text().await.unwrap().contains("writable"));
+    assert!(!tmp.path().join("store-stdin").exists());
+
+    // Not session credentials: refused before the manifest is consulted.
+    for bearer in [
+        "not-a-token".to_string(),
+        format!("{token}x"),
+        TEST_TOKEN.to_string(),
+    ] {
+        let refused = store(&bearer, "POD_WRITABLE").await.unwrap();
+        assert_eq!(refused.status(), 401, "bearer {bearer:?}");
+    }
+
+    // Another session's credential, once that session has ended and been
+    // forgotten, no longer stores anything.
+    kill_and_wait_exit(&h, other).await;
+    h.client
+        .delete(format!("{}/api/sessions/{other}", h.base))
+        .send()
+        .await
+        .unwrap();
+    let refused = store(&other_token, "POD_WRITABLE").await.unwrap();
+    assert_eq!(refused.status(), 401);
+    assert!(!tmp.path().join("store-stdin").exists());
+}
+
 /// WI-3883: a pod started from a template's own pod default (no explicit
 /// placement) carries the caller's extra environment to the agent through
 /// the bootstrap response's `agent_env`, never through the pod spec and
