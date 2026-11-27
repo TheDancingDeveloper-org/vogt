@@ -5718,7 +5718,7 @@ agent's only options are to hand the value back through a transcript (the
 exposure the whole brokered model exists to avoid) or to reach around the strip;
 with it there is a sanctioned path that keeps every property above. The
 manifest's flag field is a **comma-separated list** drawn from `optional`,
-`ondemand` and `writable` — `VAR PROJECT_ID SECRET_NAME ondemand,writable` —
+`ondemand`, `writable` and `tier` — `VAR PROJECT_ID SECRET_NAME ondemand,writable` —
 where `writable` is orthogonal to the read policy and means a session may store
 that entry. The common case is `ondemand,writable` (a secret a session will
 create or rotate, never exported at launch); `optional,writable` covers "create
@@ -5736,6 +5736,28 @@ is audited** on `vogt::audit` by session id, variable and secret name and
 byte length — never value. `writable` widens blast radius only to the entries an
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
+
+**The `tier` flag (WI-4815).** A fourth flag, `tier`, restricts a manifest line
+to an estate-admin tier session — the spawn the engine marks with
+`VOGT_AGENT_AUTH_TIER` (WI-4814: a person-started oversight session on a lane
+with `ENGINE_ESTATE_ADMIN_TIER`); there is no second signal. It is orthogonal to
+the read policy and to `writable`, and the allowed combinations are:
+
+- `tier` alone (required) — exported at launch for a tier spawn; for any other
+  launch the line is skipped before it is read.
+- `ondemand,tier` — fetchable through the broker by a tier session only.
+- `optional,tier` — as `tier`, and a missing value is tolerated.
+- `writable,tier` (with any policy above) — storable by a tier session only.
+
+For a non-tier session a `tier` name is never exported, never listed in
+`AGENT_AUTH_GRANTED`, `AGENT_AUTH_ONDEMAND` or `AGENT_AUTH_WRITABLE`, and the
+broker answers its `fetch` and `store` with **403**. Those lists name tier
+entries only to tier sessions. `WOODPECKER_ADMIN_TOKEN` flagged `tier` is also
+exported as `WOODPECKER_TOKEN` for a tier spawn; every other session keeps the
+read-only `WOODPECKER_TOKEN`. The broker audits every fetch or store of a
+`tier` name on `vogt::audit` — session id, variable, secret name, `bytes`,
+`outcome` (`allowed`, `denied`, `failed` or the store outcome) — denied
+requests included, and never the value.
 
 **Bundle write-back (WI-3160).** A pod's agent pushes its account bundle to
 `POST /api/agent-auth/store/{var}/bundle-file` with the same broker token. The
