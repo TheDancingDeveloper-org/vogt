@@ -337,6 +337,245 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SessionScreen" }
         "404": { $ref: "#/components/responses/NotFound" }
+  # Session-scoped files (WI-4867): the session's own cwd on a host, its
+  # agent's /work over the pod stream. Mirrors /api/files*. Reads need
+  # `sessions`; writes also need `filesystem-write`. A hibernated session, or
+  # a pod with no agent attached, is 409 with code `session_hibernated`.
+  /api/sessions/{id}/dir:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: List one directory in the session's tree.
+      operationId: listSessionDir
+      x-capability: sessions
+      parameters:
+        - name: path
+          in: query
+          required: false
+          description: Directory relative to the session's root; empty for the root.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Entries, directories first, dotfiles left out for pod sessions.
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`; the session is hibernated or its pod agent is not attached. Wake it first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/files:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: Read one text file in the session's tree.
+      operationId: readSessionFile
+      x-capability: sessions
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The file's contents and metadata.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`; wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [sessions]
+      summary: Write one text file in the session's tree.
+      description: Optimistic concurrency via `if_match` (the SHA-256 the client last read), as for `/api/files`.
+      operationId: writeSessionFile
+      x-capability: filesystem-write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: The file as written.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, lacks `filesystem-write`, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`, or the `if_match` hash does not match. Wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/files/download:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: Download one file from the session's tree.
+      operationId: downloadSessionFile
+      x-capability: sessions
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The raw file bytes, streamed.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`; wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/files/op:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Run one file operation (create, rename, delete, and similar) in the session's tree.
+      operationId: sessionFileOp
+      x-capability: filesystem-write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: The operation's result.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, lacks `filesystem-write`, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`; wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/files/upload:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    put:
+      tags: [sessions]
+      summary: Upload one file's bytes into the session's tree.
+      operationId: uploadSessionFile
+      x-capability: filesystem-write
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: create_parents
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+        - name: if_match
+          in: query
+          required: false
+          description: SHA-256 hex the client last read; omit for new files.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: The file as written.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, lacks `filesystem-write`, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`, or the `if_match` hash does not match. Wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/tree:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: List a directory tree in the session's tree.
+      operationId: sessionTree
+      x-capability: sessions
+      parameters:
+        - name: path
+          in: query
+          required: false
+          schema: { type: string }
+        - name: depth
+          in: query
+          required: false
+          description: 0 is the directory's children only; hard-capped at 3.
+          schema: { type: integer, minimum: 0, maximum: 3 }
+      responses:
+        "200":
+          description: The tree nodes.
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: The token is session-bound to another session, or the session's cwd is outside the workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Code `session_hibernated`; wake the session first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/sessions/{id}/replies:
     parameters:
       - $ref: "#/components/parameters/SessionId"
