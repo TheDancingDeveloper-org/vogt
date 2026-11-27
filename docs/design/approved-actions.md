@@ -1,6 +1,12 @@
 # Approved actions: engine-executed infrastructure steps (WI-2331)
 
-Status: **design only**. Nothing here is implemented. Where this note and
+Status: **design only**. Nothing here is implemented.
+
+> **Komodo retired (2026-11-27, WI-4894).** Komodo core and its peripheries
+> are gone. Every `komodo.*` action and stack reference below is historical;
+> the deploy path is the Argo mode (WI-4876, built in the vogt-estate repo).
+> Don't implement `komodo.deploy`.
+ Where this note and
 [`ENGINE.md`](../ENGINE.md) or [`API.md`](../API.md) disagree, those describe
 what exists. This note applies the [approved-grants](oversight-grants.md)
 pattern (WI-973) to *actions* instead of *credentials*: a person approves one
