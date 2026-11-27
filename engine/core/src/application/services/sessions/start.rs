@@ -472,7 +472,7 @@ where
     I: IdFactory,
 {
     let reason = writes::validate_reason(&params.reason)?;
-    if params.permission_mode == "bypass" && ctx.principal.kind == ActorKind::Agent {
+    if params.permission_mode == "bypass" && !answers_as_person(ctx)? {
         return Err(VogtError::BypassRefused(format!(
             "permission_mode=bypass can only be granted by a person, not by an agent ({}); \
              start the session from the GUI or the CLI, or use the default posture and report \

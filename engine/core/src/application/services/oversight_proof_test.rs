@@ -110,6 +110,26 @@ impl Estate {
         }
     }
 
+    /// The engine's own credential, which an estate whose stack secret was
+    /// first issued by hand binds to a person (WI-1000).
+    fn as_engine_bound_to_person(&self) -> Built {
+        build_context(
+            crate::config::VogtConfig {
+                data_dir: self.dir.clone(),
+                bootstrap_core_token_actor: "local:ada".to_string(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(person()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            None,
+            None,
+            Some(stand_in(&self.roles)),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
     fn as_(&self, principal: Principal) -> Built {
         build_context(
             crate::config::VogtConfig {
@@ -263,4 +283,55 @@ fn the_pods_shared_token_proves_nothing() {
 #[test]
 fn the_rule_still_accepts_a_session_vogt_started() {
     assert!(accepted_identities().contains(&"agent:session:".to_string()));
+}
+
+/// WI-1000: each gate that only a person may pass refuses the engine's own
+/// credential even when the stack secret is bound to a person, and still lets
+/// a real person through (the gate passes, so the call fails later or works).
+#[test]
+fn the_engine_credential_bound_to_a_person_fails_every_person_gate() {
+    let estate = Estate::new("engine-as-person");
+    let engine = estate.as_engine_bound_to_person();
+    let ada = estate.as_(person());
+
+    // session.set_role
+    let refused = make_oversight(&engine, WORKER).unwrap_err();
+    assert!(matches!(refused, VogtError::RoleRefused(_)), "{refused:?}");
+    make_oversight(&ada, WORKER).unwrap();
+
+    // session.start with permission_mode=bypass
+    let bypass = json!({"reason": WHY, "project": "none", "permission_mode": "bypass"});
+    let refused = run(&engine, "session.start", bypass.clone()).unwrap_err();
+    assert!(
+        matches!(refused, VogtError::BypassRefused(_)),
+        "{refused:?}"
+    );
+    let passed = run(&ada, "session.start", bypass).unwrap_err();
+    assert!(!matches!(passed, VogtError::BypassRefused(_)), "{passed:?}");
+
+    // decision.answer
+    let answer = json!({"id": "dec_none", "label": "x", "reason": WHY});
+    let refused = run(&engine, "decision.answer", answer.clone()).unwrap_err();
+    assert!(
+        matches!(refused, VogtError::PersonRequired(_)),
+        "{refused:?}"
+    );
+    let passed = run(&ada, "decision.answer", answer).unwrap_err();
+    assert!(
+        !matches!(passed, VogtError::PersonRequired(_)),
+        "{passed:?}"
+    );
+
+    // charter.set on the workspace scope
+    let charter = json!({"scope": "workspace", "body": "b", "reason": WHY});
+    let refused = run(&engine, "charter.set", charter.clone()).unwrap_err();
+    assert!(
+        matches!(refused, VogtError::PersonRequired(_)),
+        "{refused:?}"
+    );
+    let passed = run(&ada, "charter.set", charter);
+    assert!(
+        !matches!(passed, Err(VogtError::PersonRequired(_))),
+        "{passed:?}"
+    );
 }
