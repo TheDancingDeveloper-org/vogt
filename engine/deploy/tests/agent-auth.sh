@@ -291,4 +291,28 @@ PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE=estate_admin passthrough_case 
 PASSTHROUGH_VALUE=tier VOGT_AGENT_AUTH_TIER_VALUE='' passthrough_case "tier non-spawn" brokered dropped
 PASSTHROUGH_VALUE='' VOGT_AGENT_AUTH_TIER_VALUE='' passthrough_case "brokered default" brokered dropped
 
+# 9. WI-4815: a `tier` manifest line is exported (or named ondemand) only for
+#    an estate-admin tier spawn; WOODPECKER_ADMIN_TOKEN with `tier` becomes
+#    WOODPECKER_TOKEN for that spawn only.
+tier_case() {
+    local tier="$1"
+    env -u VOGT_AGENT_AUTH_TIER ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
+        WOODPECKER_TOKEN=read-only \
+        ENGINE_AGENT_AUTH_SECRETS=$'WOODPECKER_ADMIN_TOKEN p wp-admin tier\nOPS_KUBE p kube ondemand,tier\nPLAIN p plain\nTIER_W p tw ondemand,writable,tier\n' \
+        bash -c '
+            source "$1"
+            declare -gA PROJECT_OUTCOME=([p]=ok)
+            resolve_secret() { printf -v "$1" "%s" "v-$5"; }
+            load_manifest_secrets tok
+            printf "%s|%s|%s|%s|%s|%s" "${WOODPECKER_TOKEN-}" "${WOODPECKER_ADMIN_TOKEN-unset}" \
+                "$AGENT_AUTH_GRANTED_VARS" "$AGENT_AUTH_ONDEMAND_VARS" "$AGENT_AUTH_WRITABLE_VARS" "${PLAIN-}"
+        ' _ "$script"
+}
+out="$(tier_case estate_admin)" || fail "tier spawn load failed"
+[[ "$out" == "v-WOODPECKER_ADMIN_TOKEN|v-WOODPECKER_ADMIN_TOKEN|WOODPECKER_ADMIN_TOKEN WOODPECKER_TOKEN PLAIN|OPS_KUBE TIER_W|TIER_W|v-PLAIN" ]] \
+    || fail "tier spawn: $out"
+out="$(tier_case '')" || fail "worker load failed"
+[[ "$out" == "read-only|unset|PLAIN|||v-PLAIN" ]] || fail "worker got tier names or token: $out"
+case "$out" in *OPS_KUBE*|*TIER_W*|*WOODPECKER_ADMIN*) fail "worker breadcrumbs name a tier secret: $out" ;; esac
+
 echo "agent-auth: ok"

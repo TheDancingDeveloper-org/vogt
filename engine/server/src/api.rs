@@ -2484,6 +2484,7 @@ mod llm_provider_tests {
             secret_name: secret_name.into(),
             policy: ManifestPolicy::Optional,
             writable: false,
+            tier: false,
         }
     }
 

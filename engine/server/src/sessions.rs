@@ -2658,6 +2658,14 @@ impl SessionRegistry {
             Creating::Wake(record) => record.id,
             Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
         };
+        // The broker's tier gate reads this (WI-4815): the same decision that
+        // sets VOGT_AGENT_AUTH_TIER, so there is one signal. Always rewritten,
+        // so a wake that lost the tier does not keep it.
+        if tier.is_some() {
+            self.secret_broker.mark_tier(id);
+        } else {
+            self.secret_broker.revoke_tier(id);
+        }
         // An engine restart adopting a running pod: the process is the same
         // one, so its last OSC 7501 report still holds (WI-4499). Read before
         // the spawn takes the adoption entry.
