@@ -90,7 +90,7 @@ describe("FileTree", () => {
     await fireEvent.click(screen.getByLabelText("Actions for source"));
     expect(screen.getByRole("button", { name: "Open terminal" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Delete" })).toBeVisible();
-    await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0));
+    await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0, undefined, null));
   });
 
   it("opens a file in the editor on the first click, not the session page (WI-1412)", async () => {
@@ -306,7 +306,7 @@ describe("FileTree", () => {
       op: "delete",
       path: "docs/notes.txt",
       recursive: false,
-    }));
+    }, null));
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith("delete failed: disk is read-only"),
     );

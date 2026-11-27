@@ -1,9 +1,10 @@
-import { type Component, createSignal, Show } from "solid-js";
+import { type Component, createEffect, createSignal, on, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import FilePreview from "./FilePreview";
 import FileTree from "./FileTree";
 import SurfaceHeader from "./SurfaceHeader";
-import { openEditorTab } from "./tabs";
+import { openEditorTab, tabsStore } from "./tabs";
+import { wakeSession } from "./sessionHibernation";
 
 interface Props {
   promptPath: (
@@ -27,6 +28,17 @@ interface Props {
 const FilesPlace: Component<Props> = (props) => {
   const navigate = useNavigate();
   const [previewPath, setPreviewPath] = createSignal<string | null>(null);
+  // The selected session is the focused terminal tab; with none, the panel
+  // keeps the global view (WI-4868).
+  const sessionId = () => {
+    const tab = tabsStore.tabs.find((t) => t.id === tabsStore.active);
+    return tab?.kind === "terminal" ? tab.sessionId : null;
+  };
+  createEffect(on(sessionId, () => setPreviewPath(null), { defer: true }));
+  const wake = (id: string) => {
+    void wakeSession(id).catch((e: unknown) =>
+      props.onError(`wake failed: ${e instanceof Error ? e.message : String(e)}`));
+  };
 
   const edit = (path: string) => {
     openEditorTab(path);
@@ -56,6 +68,8 @@ const FilesPlace: Component<Props> = (props) => {
         <div class="files-place-tree">
           <FileTree
             alwaysExpanded
+            sessionId={sessionId}
+            onWake={wake}
             promptPath={props.promptPath}
             confirmAction={props.confirmAction}
             onCreatePresetHere={props.onCreatePresetHere}
@@ -82,7 +96,8 @@ const FilesPlace: Component<Props> = (props) => {
               >Back to files</button>
               <FilePreview
                 path={path()}
-                onEdit={edit}
+                sessionId={sessionId()}
+                onEdit={sessionId() ? undefined : edit}
                 onError={props.onError}
               />
             </div>

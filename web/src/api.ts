@@ -519,9 +519,26 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return tok ? { Authorization: `Bearer ${tok}`, ...extra } : extra;
 }
 
+/** The route prefix for workspace file calls: the session's own tree when a
+ *  session id is given (WI-4868), the engine's global `/api` view otherwise. */
+export function fileBase(sessionId?: string | null): string {
+  return sessionId ? `/api/sessions/${encodeURIComponent(sessionId)}` : "/api";
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public body: string) {
     super(`HTTP ${status}: ${body}`);
+  }
+}
+
+/** Whether `error` is the engine's `409 session_hibernated`: the session's
+ *  files cannot be read until it is woken. */
+export function isSessionHibernatedError(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  try {
+    return (JSON.parse(error.body) as { code?: unknown }).code === "session_hibernated";
+  } catch {
+    return false;
   }
 }
 
@@ -1013,23 +1030,30 @@ export const api = {
 
   listDir: (path = "", signal?: AbortSignal) =>
     req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`, undefined, signal, "list"),
-  tree: (path = "", depth = 1, signal?: AbortSignal) =>
+  tree: (path = "", depth = 1, signal?: AbortSignal, sessionId?: string | null) =>
     req<TreeNode[]>(
       "GET",
-      `/api/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
+      `${fileBase(sessionId)}/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
       undefined,
       signal,
       "list",
     ),
-  readFile: (path: string, signal?: AbortSignal) =>
-    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal, "long"),
+  readFile: (path: string, signal?: AbortSignal, sessionId?: string | null) =>
+    req<FileRead>(
+      "GET",
+      `${fileBase(sessionId)}/files?path=${encodeURIComponent(path)}`,
+      undefined,
+      signal,
+      "long",
+    ),
   writeFile: (
     path: string,
     content: string,
     create_parents = false,
     if_match?: string,
+    sessionId?: string | null,
   ) =>
-    req<WriteFileResponse>("PUT", "/api/files", {
+    req<WriteFileResponse>("PUT", `${fileBase(sessionId)}/files`, {
       path,
       content,
       create_parents,
@@ -1047,11 +1071,12 @@ export const api = {
     path: string,
     file: Blob,
     create_parents = false,
+    sessionId?: string | null,
   ): Promise<WriteFileResponse> => {
     const params = new URLSearchParams({ path });
     if (create_parents) params.set("create_parents", "true");
     const res = await runtimeTransport().request(
-      `${getBase()}/api/files/upload?${params.toString()}`,
+      `${getBase()}${fileBase(sessionId)}/files/upload?${params.toString()}`,
       {
         method: "PUT",
         headers: authHeaders({ "Content-Type": "application/octet-stream" }),
@@ -1065,10 +1090,10 @@ export const api = {
       ? (JSON.parse(text) as WriteFileResponse)
       : { ok: true, bytes: 0, hash: "", mtime: 0 };
   },
-  fileOp: (request: FileOpRequest) =>
-    req<FileOpResponse>("POST", "/api/files/op", request),
-  downloadFile: async (path: string): Promise<void> => {
-    const url = `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`;
+  fileOp: (request: FileOpRequest, sessionId?: string | null) =>
+    req<FileOpResponse>("POST", `${fileBase(sessionId)}/files/op`, request),
+  downloadFile: async (path: string, sessionId?: string | null): Promise<void> => {
+    const url = `${getBase()}${fileBase(sessionId)}/files/download?path=${encodeURIComponent(path)}`;
     const tok = getToken();
     const res = await runtimeTransport().request(url, {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
