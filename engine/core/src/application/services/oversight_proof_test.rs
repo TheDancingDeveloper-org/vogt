@@ -334,4 +334,33 @@ fn the_engine_credential_bound_to_a_person_fails_every_person_gate() {
         !matches!(passed, Err(VogtError::PersonRequired(_))),
         "{passed:?}"
     );
+
+    // session.start with role=oversight (the full MCP set shares the same guard)
+    for extra in [json!({"role": "oversight"})] {
+        let mut start = json!({"reason": WHY, "project": "none"});
+        start
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let refused = run(&engine, "session.start", start.clone()).unwrap_err();
+        assert!(
+            matches!(&refused, VogtError::InvalidRequest(m) if m.contains("can only be started by a person")),
+            "{refused:?}"
+        );
+        let passed = run(&ada, "session.start", start).unwrap_err();
+        assert!(
+            !matches!(&passed, VogtError::InvalidRequest(m) if m.contains("can only be started by a person")),
+            "{passed:?}"
+        );
+    }
+
+    // workspace.clean with force=true
+    let clean = json!({"path": "/srv/none", "mode": "remove", "force": true, "reason": WHY});
+    let refused = run(&engine, "workspace.clean", clean.clone()).unwrap_err();
+    assert!(matches!(refused, VogtError::CleanRefused(_)), "{refused:?}");
+    let passed = run(&ada, "workspace.clean", clean);
+    assert!(
+        !matches!(passed, Err(VogtError::CleanRefused(_))),
+        "{passed:?}"
+    );
 }
