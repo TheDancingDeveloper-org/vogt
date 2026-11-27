@@ -4,14 +4,17 @@ import {
   Show,
   createEffect,
   createMemo,
+  createContext,
   createResource,
   createSignal,
   createUniqueId,
   onCleanup,
+  useContext,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
   api,
+  isSessionHibernatedError,
   workspaceReadError,
   type FileSearchResult,
   type GitStatusEntry,
@@ -38,7 +41,15 @@ import {
 import { workspaceVersion } from "./workspaceVersion";
 import { onWake } from "./wakeCoordinator";
 
+/** The session whose own tree is shown (WI-4868); null is the global view. */
+const FileScope = createContext<() => string | null>(() => null);
+
 interface Props {
+  /** The selected session. Set, the tree is that session's own
+   *  (`/api/sessions/{id}/files*`); unset, the engine's global view. */
+  sessionId?: () => string | null;
+  /** Shown instead of the tree when the session is hibernated. */
+  onWake?: (sessionId: string) => void;
   /** Whether this mounted tree belongs to the currently visible surface. */
   active?: () => boolean;
   onOpen?: () => void;
@@ -139,6 +150,7 @@ function duplicatePath(path: string): string {
 }
 
 const TreeNodeView: Component<NodeProps> = (props) => {
+  const scope = useContext(FileScope);
   // Expansion lives in a module store keyed by path, so an expanded folder
   // survives a tab switch and a workspace remount instead of collapsing.
   const open = () => isExpanded(props.node.path);
@@ -155,7 +167,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     setLoading(true);
     setLoadError(null);
     try {
-      const tree = await api.tree(props.node.path, 0);
+      const tree = await api.tree(props.node.path, 0, undefined, scope());
       setKids((current) => reuseNodes(current, tree));
     } catch (cause) {
       // A failed expand must not become an unhandled rejection (the effect
@@ -311,7 +323,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           <button type="button" onClick={() => run(() => props.onRenameMove(props.node))}>Rename / move</button>
           <button type="button" onClick={() => run(() => props.onDuplicate(props.node))}>Duplicate</button>
           <Show when={!props.node.is_dir}>
-            <button type="button" onClick={() => run(() => void api.downloadFile(props.node.path))}>Download</button>
+            <button type="button" onClick={() => run(() => void api.downloadFile(props.node.path, scope()))}>Download</button>
           </Show>
           <button type="button" class="danger" onClick={() => run(() => props.onDelete(props.node))}>Delete</button>
           <button type="button" class="tree-actions-cancel" onClick={closeActions}>Cancel</button>
@@ -352,15 +364,20 @@ const TreeNodeView: Component<NodeProps> = (props) => {
   );
 };
 
+const SESSION_REFRESH_MS = 4000;
+
 const FileTree: Component<Props> = (props) => {
+  const sessionId = () => props.sessionId?.() ?? null;
   const isActive = () => props.active?.() ?? true;
   const [tree, { refetch }] = createResource(
-    () => (isActive() ? "active" : undefined),
-    () => api.tree("", 0),
+    () => (isActive() ? (sessionId() ?? "active") : undefined),
+    () => api.tree("", 0, undefined, sessionId()),
   );
   const [gitStatus, { refetch: refetchGitStatus }] = createResource(
     () => (isActive() ? "active" : undefined),
     async () => {
+      // Git markers describe the engine's workspace, not a session's tree.
+      if (sessionId()) return [];
       try {
         const status = await api.gitStatus("");
         return status.is_repo === false ? [] : status.entries;
@@ -371,6 +388,16 @@ const FileTree: Component<Props> = (props) => {
       }
     },
   );
+  const hibernated = () => sessionId() !== null && isSessionHibernatedError(tree.error);
+  // A file the pod writes appears without a reload: re-read the session's
+  // tree every few seconds while it is visible (WI-4868).
+  createEffect(() => {
+    if (!sessionId() || !isActive()) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshTree();
+    }, SESSION_REFRESH_MS);
+    onCleanup(() => window.clearInterval(timer));
+  });
   const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
   // A refetch returns new objects for the same paths. Reusing the previous
   // object for an unchanged path is what lets <For> keep that row mounted, so
@@ -485,7 +512,7 @@ const FileTree: Component<Props> = (props) => {
     const path = raw?.trim().replace(/^\/+/, "") ?? "";
     if (!path) return;
     try {
-      await api.writeFile(path, "", true);
+      await api.writeFile(path, "", true, undefined, sessionId());
       openFile(path);
       refreshFolder(parentFolder(path));
     } catch (e) {
@@ -503,7 +530,7 @@ const FileTree: Component<Props> = (props) => {
     const path = raw?.trim().replace(/^\/+/, "") ?? "";
     if (!path) return;
     try {
-      await api.fileOp({ op: "mkdir", path, parents: true });
+      await api.fileOp({ op: "mkdir", path, parents: true }, sessionId());
       refreshFolder(parentFolder(path));
     } catch (e) {
       reportError(`mkdir failed: ${(e as Error).message}`);
@@ -537,7 +564,7 @@ const FileTree: Component<Props> = (props) => {
         from: node.path,
         to: nextPath,
         create_parents: true,
-      });
+      }, sessionId());
       // Both ends move: the source folder loses the entry, the destination
       // folder gains it.
       refreshFolder(parentFolder(node.path));
@@ -565,7 +592,7 @@ const FileTree: Component<Props> = (props) => {
         from: node.path,
         to: nextPath,
         create_parents: true,
-      });
+      }, sessionId());
       refreshFolder(parentFolder(nextPath));
       if (!node.is_dir && result.path) {
         openFile(result.path);
@@ -589,7 +616,7 @@ const FileTree: Component<Props> = (props) => {
         op: "delete",
         path: node.path,
         recursive: node.is_dir,
-      });
+      }, sessionId());
       refreshFolder(parentFolder(node.path));
     } catch (e) {
       reportError(`delete failed: ${(e as Error).message}`);
@@ -610,7 +637,7 @@ const FileTree: Component<Props> = (props) => {
         // Stream the File straight through as the request body — no
         // in-browser base64 buffering, so a large upload doesn't blow up
         // client memory (or trip the server's body limit).
-        await api.uploadFile(dest, file, true);
+        await api.uploadFile(dest, file, true, sessionId());
       }
       refreshFolder(targetDir);
     } catch (e) {
@@ -624,6 +651,7 @@ const FileTree: Component<Props> = (props) => {
   const filesShown = () => props.alwaysExpanded === true || railSections.files;
 
   return (
+    <FileScope.Provider value={sessionId}>
     <div class={`file-tree${props.alwaysExpanded ? " file-tree--standalone" : ""}`}>
       <input
         ref={uploadInputRef}
@@ -697,7 +725,15 @@ const FileTree: Component<Props> = (props) => {
           hidden={!filesShown()}
         />
       </div>
-      <Show when={tree.error}>
+      <Show when={hibernated()}>
+        <div class="files-place-empty" role="status">
+          <p>Session is hibernated: wake to browse</p>
+          <Show when={props.onWake}>
+            <button type="button" onClick={() => props.onWake?.(sessionId()!)}>Wake</button>
+          </Show>
+        </div>
+      </Show>
+      <Show when={tree.error && !hibernated()}>
         <div style={{ padding: "8px 10px", color: "var(--danger)", "font-size": "12px" }}>
           {workspaceReadError(tree.error)}
         </div>
@@ -772,6 +808,7 @@ const FileTree: Component<Props> = (props) => {
         </Show>
       </div>
     </div>
+    </FileScope.Provider>
   );
 };
 
