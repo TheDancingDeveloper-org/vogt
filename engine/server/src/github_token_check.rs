@@ -506,6 +506,7 @@ mod tests {
             secret_name: "GH_TOKEN".into(),
             policy: ManifestPolicy::OnDemand,
             writable: false,
+            tier: false,
         }
     }
 

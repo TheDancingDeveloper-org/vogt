@@ -359,6 +359,7 @@ pub fn manifest_entries(providers: &[Provider]) -> Vec<ManifestSecret> {
             secret_name: p.secret_name.clone(),
             policy: ManifestPolicy::Optional,
             writable: false,
+            tier: false,
         })
         .collect()
 }
@@ -910,6 +911,7 @@ models = ["grok-4.7"]
             secret_name: "deploy-secret".into(),
             policy: ManifestPolicy::Required,
             writable: false,
+            tier: false,
         }];
         assert!(validate_against_manifest(&provider, &manifest)
             .unwrap_err()
