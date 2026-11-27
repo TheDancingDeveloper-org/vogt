@@ -1383,11 +1383,11 @@ async fn a_claude_session_is_not_watched_so_nothing_is_typed_into_it() {
 }
 
 /// WI-4814: a session-authenticated caller (an agent) cannot nominate an
-/// overseer. The refusal is a conflict, not the generic 403 a role change
-/// gives, so a retry cannot be read as permission it will get later. A person
-/// starting the same oversight session succeeds.
+/// overseer. The refusal is a 403, the same as a role change (WI-1255,
+/// WI-4926: it was briefly a 409). A person starting the same oversight
+/// session succeeds.
 #[tokio::test]
-async fn a_session_authenticated_oversight_start_is_a_conflict() {
+async fn a_session_authenticated_oversight_start_is_forbidden() {
     const SESSION: &str = "session-token-wi4814-1234567890";
     const PERSON: &str = "person-token-wi4814-1234567890";
     const STACK: &str = "stack-secret-for-wi4814-1234567890";
@@ -1411,7 +1411,7 @@ async fn a_session_authenticated_oversight_start_is_a_conflict() {
         .send()
         .await
         .unwrap();
-    assert_eq!(refused.status(), StatusCode::CONFLICT, "{refused:?}");
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{refused:?}");
 
     let created = client_for(PERSON)
         .post(format!("{base}/api/sessions"))
