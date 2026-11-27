@@ -574,23 +574,80 @@ resolve_secret() {
 
 # Write one secret value, reading the value from stdin (never argv — this is the
 # pluggable write half of the broker, mirroring `get_secret`; a different
-# secrets manager replaces exactly this function).
+# secrets manager replaces exactly this function). Prints `updated` or
+# `created` on success, nothing else.
+#
+# WI-4908: this used to run `infisical secrets set "NAME=@$tmp"`. The CLI has
+# no @file form: it stored the literal path "@/tmp/tmp.XXXX" and reported
+# success. The write now goes through the REST API, with the JSON body in a
+# 0600 file that curl reads (`--data-binary @file` is curl's own file syntax),
+# the bearer through a descriptor, and the value read back and compared by
+# length and sha256 before anything is reported. Neither the value nor its
+# hash is printed.
 write_secret() {
-    local access_token="$1" project_id="$2" secret_name="$3" value tmp rc=0
-    value="$(cat)"
-    # The value goes through a 0600 file (`NAME=@file`), not argv, so it is
-    # not readable in `ps`; the access token likewise rides in the
-    # environment for this one call (WI-3885).
-    umask 077
-    tmp="$(mktemp)"
-    printf '%s' "$value" >"$tmp"
-    INFISICAL_TOKEN="$access_token" infisical secrets set "$secret_name=@$tmp" \
-        --domain "${INFISICAL_API_URL:-}" \
-        --projectId "$project_id" \
-        --env "$INFISICAL_ENV" \
-        --silent || rc=$?
-    rm -f "$tmp"
-    return "$rc"
+    local access_token="$1" project_id="$2" secret_name="$3"
+    local base secs dir status outcome rc=0 want got
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 1
+    base="${INFISICAL_API_URL%/}"
+    base="${base%/api}"
+    dir="$(umask 077; mktemp -d)" || return 1
+    # The command substitution strips trailing newlines, as `set_one` and the
+    # store route always have; the stored value is exactly what is in this file.
+    (umask 077; printf '%s' "$(cat)" >"$dir/value") || { rm -rf "$dir"; return 1; }
+    (umask 077; jq -nc --rawfile v "$dir/value" \
+        --arg ws "$project_id" --arg env "$INFISICAL_ENV" \
+        '{workspaceId: $ws, environment: $env, secretPath: "/", type: "shared", secretValue: $v}' \
+        >"$dir/body.json") || { rm -rf "$dir"; return 1; }
+
+    _infisical_secret_call() {
+        local method="$1"
+        curl -sS --connect-timeout "$secs" --max-time "$secs" \
+            -o "$dir/response" -w '%{http_code}' -X "$method" \
+            -H @<(printf 'Authorization: Bearer %s\n' "$access_token") \
+            -H 'Content-Type: application/json' \
+            --data-binary "@$dir/body.json" \
+            "$base/api/v3/secrets/raw/$secret_name" 2>/dev/null || printf '000'
+    }
+
+    status="$(_infisical_secret_call PATCH)"
+    case "$status" in
+        2??) outcome=updated ;;
+        404)
+            status="$(_infisical_secret_call POST)"
+            case "$status" in 2??) outcome=created ;; *) rc=1 ;; esac
+            ;;
+        *) rc=1 ;;
+    esac
+
+    if [[ "$rc" == 0 ]]; then
+        # Read it back and compare. The value lands only in a 0600 file.
+        status="$(curl -sS --connect-timeout "$secs" --max-time "$secs" \
+            -o "$dir/readback.json" -w '%{http_code}' \
+            -H @<(printf 'Authorization: Bearer %s\n' "$access_token") \
+            --get "$base/api/v3/secrets/raw/$secret_name" \
+            --data-urlencode "workspaceId=$project_id" \
+            --data-urlencode "environment=$INFISICAL_ENV" \
+            --data-urlencode "secretPath=/" \
+            --data "type=shared&viewSecretValue=true&expandSecretReferences=false" \
+            2>/dev/null)" || status="000"
+        if [[ "$status" != 200 ]] \
+            || ! (umask 077; jq -je '.secret.secretValue | strings' \
+                <"$dir/readback.json" >"$dir/readback"); then
+            rc=1
+        else
+            want="$(wc -c <"$dir/value") $(sha256sum <"$dir/value" | cut -d' ' -f1)"
+            got="$(wc -c <"$dir/readback") $(sha256sum <"$dir/readback" | cut -d' ' -f1)"
+            [[ "$want" == "$got" ]] || rc=1
+        fi
+    fi
+    rm -rf "$dir"
+    unset -f _infisical_secret_call
+    [[ "$rc" == 0 ]] || return 1
+    printf '%s' "$outcome"
 }
 
 # True when a comma-separated flag list contains a given flag. The flag field
@@ -672,7 +729,7 @@ get_one() {
 # history and audit excerpts never see it — and stdout is only `created` or
 # `updated`, nothing else.
 set_one() {
-    local var="$1" entry project name flag access_token value existing
+    local var="$1" entry project name flag access_token value outcome
     entry="$(manifest_entry "$var")" || die \
         "$var is not a variable in ENGINE_AGENT_AUTH_SECRETS; nothing is stored that the deployment did not declare"
     read -r project name flag <<<"$entry"
@@ -681,14 +738,14 @@ set_one() {
     value="$(cat)"
     [[ -n "$value" ]] || die "no value on stdin to store for $var"
     require_identity
-    require_command infisical
+    require_command curl
+    require_command jq
     access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
-    # Create vs update is the one thing the caller cares to hear back; decide it
-    # by whether the secret already resolves, then upsert.
-    existing="$(get_secret "$access_token" "$project" "$name" 2>/dev/null || true)"
-    printf '%s' "$value" | write_secret "$access_token" "$project" "$name" >/dev/null \
-        || die "Infisical secret $name could not be stored"
-    if [[ -n "$existing" ]]; then printf 'updated'; else printf 'created'; fi
+    # write_secret upserts (PATCH, then POST when absent), reads the value back
+    # and compares it; only then does it name `updated` or `created` (WI-4908).
+    outcome="$(printf '%s' "$value" | write_secret "$access_token" "$project" "$name")" \
+        || die "Infisical secret $name could not be stored, or did not read back as written"
+    printf '%s' "$outcome"
 }
 
 # `store VAR`: the session's half of the write broker. Runs *inside* a
