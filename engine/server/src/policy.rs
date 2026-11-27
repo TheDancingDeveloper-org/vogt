@@ -141,9 +141,23 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
                         .to_string(),
                 );
             }
-            for simple in worker_commands(command) {
-                if let Some(reason) = worker_branch(policy, pattern, &simple, cwd) {
-                    return Some(reason);
+            // `cd <dir> && git push` runs git in <dir> (WI-4861): track the
+            // directory the commands run in, starting from the session's cwd.
+            let mut here = cwd.to_path_buf();
+            for top in split_commands(command) {
+                let words = command_words(&top);
+                if words.first().map(|w| base(w)) == Some("cd") {
+                    here = match words.get(1).filter(|_| words.len() == 2) {
+                        Some(dir) => resolve_dir(dir, &here),
+                        // `cd`, `cd -` or extra words: not a place we can name.
+                        None => here.join("\0unresolved"),
+                    };
+                    continue;
+                }
+                for simple in worker_commands(&top) {
+                    if let Some(reason) = worker_branch(policy, pattern, &simple, &here) {
+                        return Some(reason);
+                    }
                 }
             }
         }
@@ -898,6 +912,14 @@ fn git_dir(words: &[String], cwd: &Path) -> PathBuf {
 /// An absolute directory stands on its own; a relative one is relative to the
 /// session's cwd, not to whatever directory the previous flag named.
 fn resolve_dir(path: &str, cwd: &Path) -> PathBuf {
+    // A leading `$PWD` / `${PWD}` is the directory the command runs in.
+    let rest = path
+        .strip_prefix("${PWD}")
+        .or_else(|| path.strip_prefix("$PWD"))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    if let Some(rest) = rest {
+        return cwd.join(rest.trim_start_matches('/'));
+    }
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path
@@ -5585,6 +5607,60 @@ mod tests {
         assert!(!refused(&worker, "git push origin", &own));
         assert!(!refused(&worker, "git push origin HEAD", &own));
         assert!(refused(&worker, "git push origin", &other));
+        assert!(refused(&worker, "git push origin HEAD", &other));
+    }
+
+    /// WI-4861: the push rule judges a push in the directory the command runs
+    /// in (`cd X &&`, `git -C X`), not the session's cwd.
+    #[test]
+    fn a_worker_push_is_judged_in_the_commands_own_directory() {
+        let worker = worker_on_1298();
+        let own = repo("wi-1298-x");
+        let other = repo("wi-1299-x");
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().to_string();
+        let (own_n, other_n) = (name(&own), name(&other));
+        let parent = own.parent().unwrap().to_path_buf();
+        let abs = own.display().to_string();
+        let cases = [
+            (format!("cd {own_n} && git push origin HEAD"), false),
+            (format!("cd {own_n} && git push -u origin HEAD"), false),
+            (format!("cd {own_n} && git push origin"), false),
+            (format!("cd {other_n} && git push origin HEAD"), true),
+            (format!("cd {other_n} && git push origin"), true),
+            (format!("cd {abs} && git push origin HEAD"), false),
+            (format!("git -C {own_n} push origin HEAD"), false),
+            (format!("git -C {own_n} push"), false),
+            (format!("git -C {other_n} push origin HEAD"), true),
+            (format!("git -C {other_n} push"), true),
+            ("cd no-such-dir-4861 && git push origin HEAD".into(), true),
+            ("git -C no-such-dir-4861 push origin HEAD".into(), true),
+            ("git -C no-such-dir-4861 push".into(), true),
+            // Explicit refspecs, with -u, -C and a $PWD-prefixed directory.
+            (format!("git -C {abs} push -u origin wi-1298-x:wi-1298-x"), false),
+            (format!("git -C {abs} push --set-upstream origin wi-1298-x"), false),
+            (format!("git -C {abs} push -u origin wi-1299-x:wi-1298-x"), false),
+            (format!("git -C {abs} push -u origin wi-1298-x:main"), true),
+            (format!("git -C {abs} push -u origin +wi-1298-x:wi-1298-x"), true),
+            (format!("git -C {abs} push -u origin :wi-1298-x"), true),
+            (format!("git -C {abs} push --delete origin wi-1298-x"), true),
+            (format!("git -C {abs} push --mirror origin"), true),
+            (format!("git -C {abs} push -u origin wi-1299-x:wi-1299-x"), true),
+            (format!("cd {own_n} && git push -u origin wi-1298-x:wi-1298-x"), false),
+            (format!("cd {own_n} && git push -u origin wi-1298-x:main"), true),
+            ("git -C \"$PWD/awc\" push -u origin wi-1298-k8s-status-skill:wi-1298-k8s-status-skill".into(), false),
+            ("git -C \"$PWD/awc\" push -u origin wi-1299-k8s:wi-1299-k8s".into(), true),
+        ];
+        for (command, want) in cases {
+            assert_eq!(
+                refused(&worker, &command, &parent),
+                want,
+                "worker on WI-1298 in {}: {command} ({:?})",
+                parent.display(),
+                check(&worker, &command, &parent)
+            );
+        }
+        // A push in the session's own cwd is judged as before.
+        assert!(!refused(&worker, "git push origin HEAD", &own));
         assert!(refused(&worker, "git push origin HEAD", &other));
     }
 
