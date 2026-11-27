@@ -309,10 +309,33 @@ tier_case() {
         ' _ "$script"
 }
 out="$(tier_case estate_admin)" || fail "tier spawn load failed"
-[[ "$out" == "v-WOODPECKER_ADMIN_TOKEN|v-WOODPECKER_ADMIN_TOKEN|WOODPECKER_ADMIN_TOKEN WOODPECKER_TOKEN PLAIN|OPS_KUBE TIER_W|TIER_W|v-PLAIN" ]] \
+[[ "$out" == "v-WOODPECKER_ADMIN_TOKEN|v-WOODPECKER_ADMIN_TOKEN|WOODPECKER_ADMIN_TOKEN PLAIN WOODPECKER_TOKEN|OPS_KUBE TIER_W|TIER_W|v-PLAIN" ]] \
     || fail "tier spawn: $out"
 out="$(tier_case '')" || fail "worker load failed"
 [[ "$out" == "read-only|unset|PLAIN|||v-PLAIN" ]] || fail "worker got tier names or token: $out"
 case "$out" in *OPS_KUBE*|*TIER_W*|*WOODPECKER_ADMIN*) fail "worker breadcrumbs name a tier secret: $out" ;; esac
+
+# 9b. WI-4815: the tier's WOODPECKER_TOKEN alias must not depend on manifest
+#     line order. Both tokens are manifest lines (not env), in both orders.
+wp_order_case() {
+    local tier="$1" manifest="$2"
+    env -u VOGT_AGENT_AUTH_TIER -u WOODPECKER_TOKEN ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
+        ENGINE_AGENT_AUTH_SECRETS="$manifest" \
+        bash -c '
+            source "$1"
+            declare -gA PROJECT_OUTCOME=([p]=ok)
+            resolve_secret() { printf -v "$1" "%s" "v-$5"; }
+            load_manifest_secrets tok
+            printf "%s" "${WOODPECKER_TOKEN-}"
+        ' _ "$script"
+}
+wp_admin_first=$'WOODPECKER_ADMIN_TOKEN p wp-admin tier\nWOODPECKER_TOKEN p wp-ro\n'
+wp_ro_first=$'WOODPECKER_TOKEN p wp-ro\nWOODPECKER_ADMIN_TOKEN p wp-admin tier\n'
+for m in "$wp_admin_first" "$wp_ro_first"; do
+    out="$(wp_order_case estate_admin "$m")" || fail "tier order load failed"
+    [[ "$out" == "v-WOODPECKER_ADMIN_TOKEN" ]] || fail "tier spawn did not get the admin token: $out"
+    out="$(wp_order_case '' "$m")" || fail "worker order load failed"
+    [[ "$out" == "v-WOODPECKER_TOKEN" ]] || fail "worker did not get the read-only token: $out"
+done
 
 echo "agent-auth: ok"
