@@ -23,10 +23,16 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 cat >"$testdir/server.py" <<'PY'
-import json, sys
+import json, os, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
 
-log_path, port_path = sys.argv[1:]
+log_path, port_path, store_dir = sys.argv[1:]
+RAW = "/api/v3/secrets/raw/"
+
+
+def store_path(name):
+    return os.path.join(store_dir, name)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -46,11 +52,56 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def raw_secret(self, method, body):
+        # A fake Infisical secrets API (WI-4908). A secret is a file named
+        # after it. CORRUPT stores something else than it was sent, so the
+        # read-back check has a mismatch to catch.
+        name = urlparse(self.path).path[len(RAW):]
+        if self.headers.get("Authorization") != "Bearer access-token-value":
+            self.send(401, '{"message":"bad token"}')
+            return
+        exists = os.path.exists(store_path(name))
+        if method == "GET":
+            if not exists:
+                self.send(404, '{"message":"Secret not found"}')
+                return
+            with open(store_path(name), encoding="utf-8") as fh:
+                value = fh.read()
+            self.send(200, json.dumps({"secret": {"secretKey": name, "secretValue": value}}))
+            return
+        payload = json.loads(body)
+        if payload.get("workspaceId") != "proj" or payload.get("environment") != "prod":
+            self.send(400, '{"message":"bad scope"}')
+            return
+        if method == "PATCH" and not exists:
+            self.send(404, '{"message":"Secret not found"}')
+            return
+        if method == "POST" and exists:
+            self.send(400, '{"message":"Secret already exists"}')
+            return
+        value = payload["secretValue"]
+        if name == "CORRUPT":
+            value = "something-else"
+        with open(store_path(name), "w", encoding="utf-8") as fh:
+            fh.write(value)
+        self.send(200, json.dumps({"secret": {"secretKey": name}}))
+
+    def do_PATCH(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        self.record("<body>")
+        if self.path.startswith(RAW):
+            self.raw_secret("PATCH", body)
+        else:
+            self.send(404, "not found")
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
-        self.record(body)
-        if self.path == "/api/agent-auth/fetch/DEMO":
+        self.record("<body>" if self.path.startswith(RAW) else body)
+        if self.path.startswith(RAW):
+            self.raw_secret("POST", body)
+        elif self.path == "/api/agent-auth/fetch/DEMO":
             self.send(200, "demo-value")
         elif self.path == "/api/agent-auth/fetch/E401":
             self.send(401, '{"error":"unknown caller zeta"}')
@@ -89,7 +140,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.record("")
-        if self.path == "/api/agent-auth/grants":
+        if self.path.startswith(RAW):
+            self.raw_secret("GET", "")
+        elif self.path == "/api/agent-auth/grants":
             self.send(200, "[]")
         else:
             self.send(404, "not found")
@@ -101,7 +154,8 @@ with open(port_path, "w", encoding="utf-8") as fh:
 server.serve_forever()
 PY
 
-python3 "$testdir/server.py" "$testdir/requests.log" "$testdir/port" &
+mkdir -p "$testdir/store"
+python3 "$testdir/server.py" "$testdir/requests.log" "$testdir/port" "$testdir/store" &
 server_pid=$!
 for _ in $(seq 1 100); do
     [[ -s "$testdir/port" ]] && break
@@ -337,5 +391,70 @@ for m in "$wp_admin_first" "$wp_ro_first"; do
     out="$(wp_order_case '' "$m")" || fail "worker order load failed"
     [[ "$out" == "v-WOODPECKER_TOKEN" ]] || fail "worker did not get the read-only token: $out"
 done
+
+# 10. WI-4908: `set` stores the value itself, not the path of a temp file.
+#     The old helper ran `infisical secrets set "NAME=@$tmp"`; the shipped CLI
+#     has no @file form and stored "@/tmp/tmp.XXXX" while reporting success.
+#     This stub CLI does what the real one did: it stores the text after `=`
+#     verbatim. The helper must not depend on it, and must read back what it
+#     wrote before it says `updated` or `created`.
+clidir="$testdir/cli"
+mkdir -p "$clidir"
+cat >"$clidir/infisical" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$testdir/infisical-argv.log"
+[[ "\$1" == secrets ]] || exit 1
+case "\$2" in
+    set) kv="\$3"; printf '%s' "\${kv#*=}" >"$testdir/store/\${kv%%=*}"; echo updated ;;
+    get) cat "$testdir/store/\$3" 2>/dev/null || exit 1 ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$clidir/infisical"
+
+set_case() {
+    local var="$1" value="$2"
+    printf '%s' "$value" | env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
+        -u VOGT_ENGINE_BROKER_TOKEN_FILE -u VOGT_SESSION_TOKEN_FILE \
+        PATH="$clidir:$PATH" ENGINE_INFISICAL_ENV=prod \
+        INFISICAL_API_URL="$base/api" INFISICAL_CLIENT_ID=client-id \
+        INFISICAL_CLIENT_SECRET=client-secret-value \
+        ENGINE_AGENT_AUTH_SECRETS=$'NEW_TOKEN proj NEW_TOKEN ondemand,writable\nOLD_TOKEN proj OLD_TOKEN ondemand,writable\nCORRUPT proj CORRUPT ondemand,writable\n' \
+        bash "$script" set "$var"
+}
+
+stored_value='s3cr3t value with spaces'
+out="$(set_case NEW_TOKEN "$stored_value")" || fail "set of a new secret failed"
+[[ "$out" == "created" ]] || fail "set of a new secret printed '$out'"
+[[ "$(cat "$testdir/store/NEW_TOKEN")" == "$stored_value" ]] \
+    || fail "set stored the wrong value for a new secret (a temp-file path?)"
+
+printf 'old-value' >"$testdir/store/OLD_TOKEN"
+out="$(set_case OLD_TOKEN "$stored_value-2")" || fail "set of an existing secret failed"
+[[ "$out" == "updated" ]] || fail "set of an existing secret printed '$out'"
+[[ "$(cat "$testdir/store/OLD_TOKEN")" == "$stored_value-2" ]] \
+    || fail "set stored the wrong value for an existing secret (a temp-file path?)"
+
+# The value never reached any command's argv (the CLI stub logs its own).
+if grep -rqF "$stored_value" "$testdir/infisical-argv.log" "$testdir/jq-argv.log" \
+    "$testdir/requests.log" 2>/dev/null; then
+    fail "the stored value appeared in argv or the request log"
+fi
+
+# 10b. A read-back that does not match fails non-zero and reports nothing.
+if out="$(set_case CORRUPT "$stored_value" 2>"$testdir/corrupt.err")"; then
+    fail "set succeeded although the secret read back differently: '$out'"
+fi
+[[ -z "$out" ]] || fail "a failed set printed '$out'"
+grep -q 'did not read back as written' "$testdir/corrupt.err" \
+    || fail "mismatch message: $(cat "$testdir/corrupt.err")"
+if grep -qF "$stored_value" "$testdir/corrupt.err"; then
+    fail "the failure message printed the value"
+fi
+
+# 10c. No `NAME=@file` form survives in the helper's command lines.
+if grep -vE '^[[:space:]]*#' "$script" | grep -nE '=@\$' ; then
+    fail "agent-auth.sh still passes a value as NAME=@file"
+fi
 
 echo "agent-auth: ok"
