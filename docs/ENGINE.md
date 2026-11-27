@@ -586,7 +586,9 @@ therefore gives the estate's trusted servers `default_tools_approval_mode =
 only: `vogt`, `cadastre`, `github-ro`, `forgejo-ro` and `grafana-ro`
 (operator-approved 2026-10-15). This mirrors
 what the Claude driven-session policy lets a Claude session call without a
-person. `komodo` is deliberately not on the list, since its `deploy_stack` and
+person. (Komodo was retired 2026-11-27, WI-4894; the `komodo` entries in
+this document and in the guard lists are historical or defensive, and nothing
+in the engine contacts Komodo.) `komodo` is deliberately not on the list, since its `deploy_stack` and
 `write_stack_file` change running stacks, and neither is any other server:
 those keep the person gate. A table that already names a mode keeps it, and a
 server nobody registered is not created. A Vogt launch also passes
