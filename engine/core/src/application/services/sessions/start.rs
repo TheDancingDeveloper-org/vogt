@@ -1304,7 +1304,7 @@ where
     C: Clock,
     I: IdFactory,
 {
-    if ctx.principal.kind != ActorKind::Agent {
+    if answers_as_person(ctx)? {
         return Ok((None, Some("person".to_string())));
     }
     let Some(caller) = session_commit::caller_engine_session_id(ctx)? else {
@@ -1361,7 +1361,7 @@ where
     C: Clock,
     I: IdFactory,
 {
-    if ctx.principal.kind != ActorKind::Agent || started_by_kind == Some("oversight") {
+    if answers_as_person(ctx)? || started_by_kind == Some("oversight") {
         return Ok(());
     }
     let asked = if params.role == "oversight" {
