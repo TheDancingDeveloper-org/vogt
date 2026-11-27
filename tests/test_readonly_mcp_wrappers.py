@@ -1443,3 +1443,58 @@ def test_bootstrap_registers_k8s_ro_for_exported_and_ondemand(
     )
     assert again.returncode == 0, again.stderr
     assert config.read_text(encoding="utf-8") == first
+
+
+def test_k8s_ondemand_fetch_failure_is_a_clear_startup_error(tmp_path: Path) -> None:
+    """When the broker refuses the ondemand fetch, the wrapper exits 64 with a
+    message naming the variable, never starts the server, and leaves no file."""
+    bindir = shim_dir(tmp_path, "kubernetes-mcp-server")
+    proc, rec = run(
+        READONLY,
+        ["k8s"],
+        {
+            "AGENT_AUTH_ONDEMAND": "K8S_AGENT_READONLY_KUBECONFIG",
+            "VOGT_AGENT_AUTH": str(bindir / "vogt-agent-auth"),
+            "BROKER_OUT": str(tmp_path / "broker.json"),
+            "BROKER_VAR": "K8S_AGENT_READONLY_KUBECONFIG",
+            "BROKER_VALUE": "unused",
+            "BROKER_FAIL": "1",
+            "TMPDIR": str(tmp_path),
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 64
+    assert rec is None
+    assert "K8S_AGENT_READONLY_KUBECONFIG" in proc.stderr
+    assert "could not be fetched" in proc.stderr
+    assert proc.stdout == ""
+    assert not list(tmp_path.glob("vogt-k8s-mcp.*"))
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_bootstrap_does_not_register_k8s_ro_when_the_name_is_absent(
+    tmp_path: Path,
+) -> None:
+    import tomllib
+
+    _shims(tmp_path, ("codex", "kubernetes-mcp-server"))
+    wrapper = tmp_path / "readonly-mcp"
+    wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    # Another name is ondemand, but not the kubeconfig: still absent.
+    proc = _codex_bootstrap(
+        tmp_path,
+        {
+            "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+            "AGENT_AUTH_ONDEMAND": "SOME_OTHER_SECRET",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    config = tmp_path / "codex" / "config.toml"
+    text = config.read_text(encoding="utf-8") if config.exists() else ""
+    servers = tomllib.loads(text).get("mcp_servers", {}) if text.strip() else {}
+    assert "k8s-ro" not in servers
