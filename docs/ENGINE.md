@@ -5754,7 +5754,9 @@ For a non-tier session a `tier` name is never exported, never listed in
 broker answers its `fetch` and `store` with **403**. Those lists name tier
 entries only to tier sessions. `WOODPECKER_ADMIN_TOKEN` flagged `tier` is also
 exported as `WOODPECKER_TOKEN` for a tier spawn; every other session keeps the
-read-only `WOODPECKER_TOKEN`. The broker audits every fetch or store of a
+read-only `WOODPECKER_TOKEN`. The alias is applied after all manifest lines load,
+so it wins whatever their order. It applies only at launch: an
+`ondemand,tier` `WOODPECKER_ADMIN_TOKEN` gets no `WOODPECKER_TOKEN` alias. The broker audits every fetch or store of a
 `tier` name on `vogt::audit` — session id, variable, secret name, `bytes`,
 `outcome` (`allowed`, `denied`, `failed` or the store outcome) — denied
 requests included, and never the value.
