@@ -197,7 +197,7 @@ pub enum ManifestPolicy {
 
 /// One line of `ENGINE_AGENT_AUTH_SECRETS`:
 /// `VAR PROJECT_ID SECRET_NAME [flags]`, where `flags` is a comma-separated
-/// list drawn from {optional, ondemand, writable}. `writable` is orthogonal to
+/// list drawn from {optional, ondemand, writable, tier}. `writable` is orthogonal to
 /// the read policy: it says a session may *store* this entry through the broker
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestSecret {
@@ -209,6 +209,11 @@ pub struct ManifestSecret {
     /// Widens blast radius only to the declared entries and every write
     /// is audited.
     pub writable: bool,
+    /// Estate-admin tier only (WI-4815): the entry is exported at launch (or
+    /// fetchable ondemand, or storable if also `writable`) only for a tier
+    /// session; the broker answers 403 to any other session. Orthogonal to
+    /// the read policy and to `writable`.
+    pub tier: bool,
 }
 
 /// Parse the flag field of a manifest line: a comma-separated list drawn from
@@ -217,11 +222,12 @@ pub struct ManifestSecret {
 /// or a bare line) is simply the one- or zero-element case, so old manifests
 /// parse identically. An unknown flag is an error, never a silent "required"
 /// Two conflicting policy flags are an error too.
-fn parse_flags(field: &str, line: &str) -> Result<(ManifestPolicy, bool), String> {
+fn parse_flags(field: &str, line: &str) -> Result<(ManifestPolicy, bool, bool), String> {
     let mut policy: Option<ManifestPolicy> = None;
     let mut writable = false;
+    let mut tier = false;
     if field.is_empty() {
-        return Ok((ManifestPolicy::Required, false));
+        return Ok((ManifestPolicy::Required, false, false));
     }
     for flag in field.split(',') {
         let named = match flag {
@@ -232,9 +238,13 @@ fn parse_flags(field: &str, line: &str) -> Result<(ManifestPolicy, bool), String
                 writable = true;
                 continue;
             }
+            "tier" => {
+                tier = true;
+                continue;
+            }
             other => {
                 return Err(format!(
-                    "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag {other:?} (flags are a comma-separated list of optional, ondemand, writable): {line}"
+                    "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag {other:?} (flags are a comma-separated list of optional, ondemand, writable, tier): {line}"
                 ));
             }
         };
@@ -245,7 +255,7 @@ fn parse_flags(field: &str, line: &str) -> Result<(ManifestPolicy, bool), String
         }
         policy = Some(named);
     }
-    Ok((policy.unwrap_or(ManifestPolicy::Required), writable))
+    Ok((policy.unwrap_or(ManifestPolicy::Required), writable, tier))
 }
 
 /// Parse the manifest with the grammar `engine/deploy/agent-auth.sh` uses —
@@ -272,13 +282,14 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestSecret>, String> {
                 "ENGINE_AGENT_AUTH_SECRETS entry names {var:?}, which is not a valid environment variable name"
             ));
         }
-        let (policy, writable) = parse_flags(fields.next().unwrap_or(""), line)?;
+        let (policy, writable, tier) = parse_flags(fields.next().unwrap_or(""), line)?;
         entries.push(ManifestSecret {
             var: var.to_string(),
             project_id: project_id.to_string(),
             secret_name: secret_name.to_string(),
             policy,
             writable,
+            tier,
         });
     }
     Ok(entries)
@@ -296,6 +307,9 @@ impl ManifestSecret {
         }
         if self.writable {
             flags.push("writable");
+        }
+        if self.tier {
+            flags.push("tier");
         }
         let mut line = format!("{} {} {}", self.var, self.project_id, self.secret_name);
         if !flags.is_empty() {
@@ -536,6 +550,10 @@ pub struct SecretBroker {
     engine: String,
     /// Session id → the person-approved credential grants it holds (WI-973).
     session_grants: DashMap<Uuid, Vec<HeldGrant>>,
+    /// Sessions the engine spawned as estate-admin tier (WI-4815): the one
+    /// signal `tier` manifest entries are checked against. Set from the same
+    /// spawn decision that sets `VOGT_AGENT_AUTH_TIER`; cleared on revoke.
+    tier_sessions: DashMap<Uuid, ()>,
     bundle: DashMap<(String, String), Vec<u8>>,
     bundle_versions: DashMap<(String, String), u64>,
     account_dirs: HashMap<String, PathBuf>,
@@ -589,6 +607,7 @@ impl HeldGrant {
             secret_name: self.grant.secret_name.clone(),
             policy: ManifestPolicy::OnDemand,
             writable: false,
+            tier: false,
         }
     }
 }
@@ -678,6 +697,7 @@ impl SecretBroker {
             grant_projects: Vec::new(),
             engine: crate::pod_backend::DEFAULT_ENGINE_ID.into(),
             session_grants: DashMap::new(),
+            tier_sessions: DashMap::new(),
             bundle: DashMap::new(),
             bundle_versions: DashMap::new(),
             account_dirs: HashMap::new(),
@@ -1112,10 +1132,26 @@ impl SecretBroker {
         })
     }
 
+    /// Record that `session` was spawned as estate-admin tier (WI-4815).
+    pub fn mark_tier(&self, session: Uuid) {
+        self.tier_sessions.insert(session, ());
+    }
+
+    /// Clear the tier mark of `session` (a wake that no longer has the tier).
+    pub fn revoke_tier(&self, session: Uuid) {
+        self.tier_sessions.remove(&session);
+    }
+
+    /// Whether `session` is an estate-admin tier session.
+    pub fn is_tier(&self, session: Uuid) -> bool {
+        self.tier_sessions.contains_key(&session)
+    }
+
     /// Forget a session's token. A token a session was handed stays valid
     /// while its process runs: the exit hook, a hibernation and a remove all
     /// revoke it (WI-4046).
     pub fn revoke(&self, session: Uuid) {
+        self.tier_sessions.remove(&session);
         self.grants.remove(&session);
         self.vogt_tokens.remove(&session);
         self.session_grants.remove(&session);
@@ -2520,6 +2556,23 @@ pub async fn fetch(
         }
     };
 
+    // WI-4815: a `tier` entry goes only to an estate-admin tier session,
+    // whatever the policy flags say. Denied fetches are audited too.
+    if entry.tier && !broker.is_tier(session) {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %entry.var,
+            secret_name = %entry.secret_name,
+            tier = true,
+            bytes = 0u64,
+            outcome = "denied",
+            "tier secret fetch refused: not an estate-admin tier session"
+        );
+        return refusal(StatusCode::FORBIDDEN, TIER_REFUSAL);
+    }
+
     let fetched = match granted.as_ref() {
         Some(held) => broker.fetch_with(&entry, Some(&held.manifest_line())).await,
         None => broker.fetch(&entry).await,
@@ -2546,6 +2599,9 @@ pub async fn fetch(
                 project_id = %entry.project_id,
                 policy = ?entry.policy,
                 grant_id = %grant_id,
+                tier = entry.tier,
+                bytes = value.len(),
+                outcome = "allowed",
                 "secret brokered to session"
             );
             (
@@ -2566,6 +2622,9 @@ pub async fn fetch(
                 var = %entry.var,
                 secret_name = %entry.secret_name,
                 error = %failure,
+                tier = entry.tier,
+                bytes = 0u64,
+                outcome = "failed",
                 "secret broker fetch failed"
             );
             ApiError::BadGateway(failure.to_string()).into_response()
@@ -2900,6 +2959,20 @@ pub async fn store(
         }
         Some(entry) => entry,
     };
+    if entry.tier && !broker.is_tier(session) {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %entry.var,
+            secret_name = %entry.secret_name,
+            tier = true,
+            bytes = 0u64,
+            outcome = "denied",
+            "tier secret store refused: not an estate-admin tier session"
+        );
+        return refusal(StatusCode::FORBIDDEN, TIER_REFUSAL);
+    }
 
     // Read with a drain margin above the cap, then reject by length. A merely
     // over-cap body (up to `STORE_DRAIN_BYTES`) is fully read — so the client
@@ -2953,6 +3026,7 @@ pub async fn store(
                 project_id = %entry.project_id,
                 policy = ?entry.policy,
                 bytes = bytes.len(),
+                tier = entry.tier,
                 outcome = %outcome.as_str(),
                 "secret stored from session"
             );
@@ -2974,6 +3048,9 @@ pub async fn store(
                 var = %entry.var,
                 secret_name = %entry.secret_name,
                 error = %failure,
+                tier = entry.tier,
+                bytes = bytes.len(),
+                outcome = "failed",
                 "secret broker store failed"
             );
             ApiError::BadGateway(failure.to_string()).into_response()
@@ -3139,6 +3216,10 @@ async fn refuse_if_stale(
     )
 }
 
+/// The 403 body for a tier entry asked for by a non-tier session. It names
+/// the flag, not the secret's location.
+const TIER_REFUSAL: &str = "this name is flagged `tier` in the manifest and is available only to estate-admin tier sessions";
+
 fn refusal(status: StatusCode, reason: &str) -> Response {
     (status, Json(json!({ "error": reason }))).into_response()
 }
@@ -3280,6 +3361,35 @@ mod tests {
         // Not declared at all.
         assert!(broker.permitted_write("D").is_none());
         assert!(broker.permitted_write("b").is_none(), "names are exact");
+    }
+
+    #[test]
+    fn tier_is_a_flag_orthogonal_to_policy_and_writable() {
+        let parsed = parse_manifest(
+            "A p s ondemand,tier\n\
+             B p s tier\n\
+             C p s optional,writable,tier\n\
+             D p s ondemand\n",
+        )
+        .unwrap();
+        assert!(parsed[0].tier && parsed[0].policy == ManifestPolicy::OnDemand);
+        assert!(parsed[1].tier && parsed[1].policy == ManifestPolicy::Required);
+        assert!(parsed[2].tier && parsed[2].writable);
+        assert!(!parsed[3].tier);
+        // The flag round-trips through the line the helper reads.
+        assert_eq!(parsed[0].line(), "A p s ondemand,tier");
+        assert_eq!(parsed[2].line(), "C p s optional,writable,tier");
+    }
+
+    #[test]
+    fn the_tier_mark_is_per_session_and_cleared_on_revoke() {
+        let broker = broker_with("A p s ondemand,tier\n", "127.0.0.1:1");
+        let (tier, other) = (Uuid::new_v4(), Uuid::new_v4());
+        broker.mark_tier(tier);
+        assert!(broker.is_tier(tier));
+        assert!(!broker.is_tier(other));
+        broker.revoke(tier);
+        assert!(!broker.is_tier(tier));
     }
 
     #[test]

@@ -19,7 +19,7 @@
 #   ENGINE_AGENT_AUTH_SECRETS      the secrets to load, one per line:
 #                                    VAR PROJECT_ID SECRET_NAME [flags]
 #                                  where flags is a comma-separated list drawn
-#                                  from {optional, ondemand, writable}. Each is
+#                                  from {optional, ondemand, writable, tier}. Each is
 #                                  fetched and exported as VAR; a missing
 #                                  required secret fails, naming the secret.
 #                                  `ondemand` declares VAR for sessions but
@@ -29,6 +29,12 @@
 #                                  `writable` lets a session *store* VAR through
 #                                  the broker (`store`/`set`, below), audited by
 #                                  name; it is orthogonal to the read policy.
+#                                  `tier` (WI-4815) restricts the line to an
+#                                  estate-admin tier spawn (the engine sets
+#                                  VOGT_AGENT_AUTH_TIER): any other launch skips
+#                                  it, names it in no breadcrumb and exports
+#                                  nothing; the broker answers 403 to any other
+#                                  session. Combines with ondemand/writable.
 #   ENGINE_AGENT_AUTH_SECRETS_FILE  (engine-side, WI-3491) a manifest file the
 #                                  engine re-reads at every launch; it hands
 #                                  this helper the composed manifest as
@@ -613,9 +619,9 @@ validate_flags() {
                 fi
                 seen_policy="$flag"
                 ;;
-            writable) ;;
+            writable | tier) ;;
             *)
-                die "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag '$flag' (flags are a comma-separated list of optional, ondemand, writable): $line"
+                die "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag '$flag' (flags are a comma-separated list of optional, ondemand, writable, tier): $line"
                 ;;
         esac
     done
@@ -869,6 +875,12 @@ load_manifest_secrets() {
         [[ -n "${project:-}" && -n "${name:-}" ]] || die \
             "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [flags]'): $line"
         validate_flags "${flag:-}" "$line"
+        # A `tier` line exists only for an estate-admin tier spawn (WI-4815):
+        # for any other launch it is skipped before it is read, exported or
+        # named in AGENT_AUTH_GRANTED/ONDEMAND/WRITABLE.
+        if flags_contain "${flag:-}" tier && [[ -z "${VOGT_AGENT_AUTH_TIER:-}" ]]; then
+            continue
+        fi
         # `writable` is orthogonal to the read policy: record it for the
         # breadcrumb whether the entry is launched or ondemand.
         if flags_contain "${flag:-}" writable; then
@@ -911,6 +923,13 @@ load_manifest_secrets() {
         printf -v "$var" '%s' "$value"
         export "${var?}"
         [[ -n "$value" ]] && grant_var "$var"
+        # The tier's full Woodpecker token replaces the read-only one for this
+        # spawn only; workers never reach this line (WI-4815).
+        if [[ "$var" == WOODPECKER_ADMIN_TOKEN && -n "$value" ]] \
+            && flags_contain "${flag:-}" tier; then
+            export WOODPECKER_TOKEN="$value"
+            grant_var WOODPECKER_TOKEN
+        fi
         if [[ "$var" == "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]]; then
             # The name matched a manifest entry, which is what the post-load
             # check below verifies; the alias is still worth only a non-empty
