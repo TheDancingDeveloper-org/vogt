@@ -19,6 +19,7 @@
 pub mod codex_guidance;
 pub mod codex_policy;
 pub mod codex_snapshots;
+pub mod file_ops;
 pub mod opencode_store;
 pub mod salvage;
 #[cfg(test)]
@@ -363,6 +364,18 @@ pub enum Frame {
     /// conversation transcript could not be stored.
     Flushed {
         ok: bool,
+    },
+    /// Engine to agent: run one file operation under the work root
+    /// (`VOGT_WORK_DIR`, WI-4866). The agent answers with a `FileResult`
+    /// carrying the same `id`; ops may be answered out of order.
+    FileOp {
+        id: u64,
+        op: file_ops::FileOp,
+    },
+    /// Agent to engine: the answer to the `FileOp` with this `id`.
+    FileResult {
+        id: u64,
+        result: file_ops::FileOpResult,
     },
 }
 
@@ -2562,6 +2575,15 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                             files: ack.files,
                                             reason: ack.reason,
                                         }).await?;
+                                    },
+                                    Frame::FileOp { id, op } => {
+                                        let result = tokio::task::spawn_blocking(move || file_ops::handle_in_work_root(&op))
+                                            .await
+                                            .unwrap_or_else(|e| file_ops::FileOpResult::Error {
+                                                code: file_ops::FileErrorCode::Io,
+                                                message: format!("file op task failed: {e}"),
+                                            });
+                                        send_frame(&mut sink, &Frame::FileResult { id, result }).await?;
                                     },
                                     _ => {},
                                 }
