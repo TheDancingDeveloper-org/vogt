@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub mod chat;
 pub mod salvage;
 pub mod source;
+pub mod workspace_path;
 pub use chat::*;
 
 /// What a session's terminal is doing.
