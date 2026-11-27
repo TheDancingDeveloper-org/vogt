@@ -1325,9 +1325,8 @@ pub async fn create_session(
 ) -> Result<Json<SessionSummary>> {
     // Starting an overseer is nominating one (WI-1255): a worker that could
     // start one would drive its terminal and borrow its standing. A session-
-    // authenticated caller (an agent) asking for oversight is a conflict
-    // (WI-4814): it cannot nominate one, and it must not read as a generic
-    // 403 that a retry could change.
+    // authenticated caller (an agent) asking for oversight is refused with a
+    // 403, as `set_session_role` refuses it (WI-1255, WI-4926).
     require_oversight_start_authority(identity.as_deref(), spec.role)?;
     require_source_authority(identity.as_deref(), spec.source.as_ref())?;
     require_session_ref_authority(identity.as_deref(), spec.session_ref.as_deref())?;
@@ -1344,8 +1343,8 @@ pub async fn create_session(
 
 /// The role gate for a new session (WI-4814): a person, the break-glass
 /// operator, or vogt-core may start an oversight session; a session-
-/// authenticated caller is refused with a conflict rather than `set_session_role`'s
-/// generic 403, so the two refusals stay distinct and testable.
+/// authenticated caller is refused with a 403, the same refusal and wording
+/// as `require_role_authority` (WI-1255; WI-4926 restored it from a 409).
 fn require_oversight_start_authority(
     identity: Option<&crate::auth::AuthorizedIdentity>,
     role: vogt_engine_contract::SessionRole,
@@ -1367,8 +1366,9 @@ fn require_oversight_start_authority(
                 role = role.as_str(),
                 "oversight start refused for a session-authenticated caller"
             );
-            Err(crate::error::ApiError::Conflict(format!(
-                "only a person can start an oversight session; {} is a session, and a session cannot nominate an overseer",
+            Err(crate::error::ApiError::Forbidden(format!(
+                "only a person nominates an oversight session, or changes a session's \
+                 role ({} is an agent); ask a person to do it from the GUI",
                 identity.name
             )))
         }
