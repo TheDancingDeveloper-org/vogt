@@ -111,6 +111,11 @@ RUN apt-get update \
     && test "$(command -v timeout)" = /usr/bin/timeout \
     && shellcheck --version
 
+# System-wide git credential helper (WI-4860): workers only write a 0600
+# ~/.git-credentials and never change git config. No credentials in the image.
+RUN git config --system credential.helper store \
+    && test "$(git config --system --get credential.helper)" = store
+
 # Kubernetes MCP server (containers/kubernetes-mcp-server), read-only cluster
 # access for agents (docs/ENGINE.md §4). Pinned to one release and verified
 # against a sha256 recorded here, one per architecture; bump all three together.
