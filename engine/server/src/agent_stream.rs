@@ -22,7 +22,10 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch, Notify};
 use uuid::Uuid;
 use vogt_engine_contract::source::SourceDescriptor;
-use vogt_session_agent::{CgroupMemory, Frame};
+use vogt_session_agent::{
+    file_ops::{FileOp, FileOpResult},
+    CgroupMemory, Frame,
+};
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
 /// Frames the engine may queue for one attached agent. Control frames are
@@ -206,6 +209,21 @@ pub struct PodLink {
     /// The session's output log. Set by [`Self::keep_log`] before the reader
     /// takes output; each durable offset is checkpointed beside it.
     log: parking_lot::Mutex<Option<std::path::PathBuf>>,
+    /// File ops sent to the agent and not yet answered, by frame id
+    /// (WI-4867). The stream loop hands each `FileResult` to its waiter.
+    file_waiters: parking_lot::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<FileOpResult>>>,
+    next_file_id: AtomicU64,
+}
+
+/// Why a proxied file op got no answer from the pod agent (WI-4867).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOpFailure {
+    /// No agent is attached to this session's stream.
+    NotAttached,
+    /// The agent did not answer within the per-request limit.
+    TimedOut,
+    /// The command queue was full or the stream dropped mid-request.
+    Unavailable(String),
 }
 
 /// A pod's cgroup memory and when the engine received it (RFC 3339).
@@ -262,6 +280,16 @@ impl PodLink {
             reader_stopped: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
             log: parking_lot::Mutex::new(None),
+            file_waiters: parking_lot::Mutex::new(HashMap::new()),
+            next_file_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Hand a `FileResult` to the request waiting on its id. An answer nobody
+    /// waits for (it timed out) is dropped.
+    fn deliver_file_result(&self, id: u64, result: FileOpResult) {
+        if let Some(tx) = self.file_waiters.lock().remove(&id) {
+            let _ = tx.send(result);
         }
     }
 
@@ -1057,6 +1085,8 @@ impl AgentAuth {
             let link = Arc::clone(link);
             links.remove(&id);
             link.note_disconnected();
+            // Fail in-flight file ops now rather than at their timeout.
+            link.file_waiters.lock().clear();
         }
     }
 
@@ -1160,6 +1190,43 @@ impl AgentAuth {
                 "the pod agent did not answer the salvage request in time".into(),
             )
         })
+    }
+
+    /// Send one file op to the session's agent and wait for its answer, up to
+    /// `limit` (WI-4867). The reply is matched by frame id, so concurrent ops
+    /// on one session may be answered in any order.
+    pub async fn request_file_op(
+        &self,
+        id: Uuid,
+        op: FileOp,
+        limit: Duration,
+    ) -> Result<FileOpResult, FileOpFailure> {
+        let link = self.pod(id).ok_or(FileOpFailure::NotAttached)?;
+        if !link.is_connected() {
+            return Err(FileOpFailure::NotAttached);
+        }
+        let frame_id = link.next_file_id.fetch_add(1, Ordering::AcqRel);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        link.file_waiters.lock().insert(frame_id, tx);
+        if let Err(e) = self.send(id, Frame::FileOp { id: frame_id, op }) {
+            link.file_waiters.lock().remove(&frame_id);
+            return Err(match e.kind() {
+                std::io::ErrorKind::NotConnected | std::io::ErrorKind::BrokenPipe => {
+                    FileOpFailure::NotAttached
+                }
+                _ => FileOpFailure::Unavailable(e.to_string()),
+            });
+        }
+        match tokio::time::timeout(limit, rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err(FileOpFailure::Unavailable(
+                "the pod agent's stream closed before it answered".into(),
+            )),
+            Err(_) => {
+                link.file_waiters.lock().remove(&frame_id);
+                Err(FileOpFailure::TimedOut)
+            }
+        }
     }
 
     /// Forget the stream, unless a newer registration has replaced `link`.
@@ -1952,6 +2019,10 @@ where
                                 });
                             link.salvages.fetch_add(1, Ordering::AcqRel);
                             link.salvage_notify.notify_waiters();
+                        }
+                        Frame::FileResult { id, result } => {
+                            link.note_heartbeat();
+                            link.deliver_file_result(id, result);
                         }
                         Frame::Heartbeat { memory, .. } => {
                             link.note_heartbeat();
