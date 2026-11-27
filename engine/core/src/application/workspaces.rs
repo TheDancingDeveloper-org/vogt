@@ -22,7 +22,7 @@ use crate::application::models::workspace::{
 use crate::application::services::sessions::{answers_as_person, engine_of};
 use crate::application::writes::{audited_action, validate_reason};
 use crate::core::Project;
-use crate::core::{py_repr, Clock, IdFactory};
+use crate::core::{py_repr, ActorKind, Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
@@ -208,9 +208,16 @@ where
     if params.force && !answers_as_person(ctx)? {
         // A forced removal throws away a worktree whose branch has not
         // landed, so it is a person's call, as a grant decision is.
+        let who = if ctx.principal.kind == ActorKind::Agent {
+            format!("an agent ({})", ctx.principal.identity_ref)
+        } else {
+            format!(
+                "the engine's own credential ({})",
+                ctx.principal.identity_ref
+            )
+        };
         return Err(VogtError::CleanRefused(format!(
-            "only a person forces a workspace removal, not {}; ask a person to do it",
-            ctx.principal.identity_ref
+            "only a person forces a workspace removal, not {who}; ask a person to do it"
         )));
     }
     if params.id.is_none() == params.path.is_none() {
