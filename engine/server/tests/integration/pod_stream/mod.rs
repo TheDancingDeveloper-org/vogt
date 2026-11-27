@@ -1258,5 +1258,6 @@ fn fake_launcher(listed: Vec<k8s_openapi::api::core::v1::Pod>) -> Arc<FakeLaunch
     FakeLauncher::new(tx, listed, false)
 }
 mod bootstrap;
+mod files;
 mod session;
 mod stream;
