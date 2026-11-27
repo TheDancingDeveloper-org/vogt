@@ -30,7 +30,7 @@ use crate::{
     history::SessionHistory,
     history_api, observability,
     push::PushManager,
-    secret_broker,
+    secret_broker, session_files,
     sessions::SessionRegistry,
     vogt_core::{self, VogtCore},
     ws,
@@ -419,6 +419,25 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/sweep", get(api::sweep_sessions))
         .route("/api/sessions/{id}/screen", get(api::get_session_screen))
+        // Session-scoped Files (WI-4867): the session's own cwd on a host,
+        // its agent's `/work` over the pod stream.
+        .route(
+            "/api/sessions/{id}/files",
+            get(session_files::read_file)
+                .put(session_files::write_file)
+                .layer(DefaultBodyLimit::max(JSON_WRITE_BODY_LIMIT)),
+        )
+        .route(
+            "/api/sessions/{id}/files/upload",
+            put(session_files::upload_file),
+        )
+        .route("/api/sessions/{id}/files/op", post(session_files::operate))
+        .route(
+            "/api/sessions/{id}/files/download",
+            get(session_files::download_file),
+        )
+        .route("/api/sessions/{id}/dir", get(session_files::list_dir))
+        .route("/api/sessions/{id}/tree", get(session_files::tree))
         .route("/api/sessions/{id}/replies", get(api::get_session_replies))
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/sessions/{id}/input", post(api::session_input))
