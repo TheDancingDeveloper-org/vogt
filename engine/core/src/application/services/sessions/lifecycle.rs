@@ -184,7 +184,7 @@ where
     // The role is a person's nomination. An agent that could nominate itself
     // would hand itself an overseer's standing, and a worker demoting its
     // overseer is no better. Refused by who is asking, like `bypass`.
-    if ctx.principal.kind == ActorKind::Agent {
+    if !answers_as_person(ctx)? {
         return Err(VogtError::RoleRefused(format!(
             "only a person nominates an oversight session, or makes one a worker              again ({} is an agent); ask a person to set the role from the GUI,              or start the session with role=oversight",
             ctx.principal.identity_ref
