@@ -19,10 +19,10 @@ use crate::application::models::workspace::{
     WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceListParams, WorkspaceListResult,
     WorkspaceRow,
 };
-use crate::application::services::sessions::engine_of;
+use crate::application::services::sessions::{answers_as_person, engine_of};
 use crate::application::writes::{audited_action, validate_reason};
 use crate::core::Project;
-use crate::core::{py_repr, ActorKind, Clock, IdFactory};
+use crate::core::{py_repr, Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
@@ -205,11 +205,11 @@ where
     I: IdFactory + 'static,
 {
     let reason = validate_reason(&params.reason)?;
-    if params.force && ctx.principal.kind == ActorKind::Agent {
+    if params.force && !answers_as_person(ctx)? {
         // A forced removal throws away a worktree whose branch has not
         // landed, so it is a person's call, as a grant decision is.
         return Err(VogtError::CleanRefused(format!(
-            "only a person forces a workspace removal, not an agent ({}); ask a person to do it",
+            "only a person forces a workspace removal, not {}; ask a person to do it",
             ctx.principal.identity_ref
         )));
     }
