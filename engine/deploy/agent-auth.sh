@@ -866,7 +866,7 @@ github_stale() {
 # unavailable. `printf -v` assigns first, so the emptiness guard below is real.
 load_manifest_secrets() {
     local access_token="$1"
-    local line var project name flag value
+    local line var project name flag value tier_wp_token=""
     [[ -n "${ENGINE_AGENT_AUTH_SECRETS:-}" ]] || return 0
     while IFS= read -r line; do
         line="${line%%#*}"
@@ -923,12 +923,12 @@ load_manifest_secrets() {
         printf -v "$var" '%s' "$value"
         export "${var?}"
         [[ -n "$value" ]] && grant_var "$var"
-        # The tier's full Woodpecker token replaces the read-only one for this
-        # spawn only; workers never reach this line (WI-4815).
+        # Remember a tier spawn's full Woodpecker token; it is aliased after
+        # the loop so manifest line order cannot let a read-only
+        # WOODPECKER_TOKEN line overwrite it (WI-4815).
         if [[ "$var" == WOODPECKER_ADMIN_TOKEN && -n "$value" ]] \
             && flags_contain "${flag:-}" tier; then
-            export WOODPECKER_TOKEN="$value"
-            grant_var WOODPECKER_TOKEN
+            tier_wp_token="$value"
         fi
         if [[ "$var" == "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]]; then
             # The name matched a manifest entry, which is what the post-load
@@ -941,6 +941,14 @@ load_manifest_secrets() {
             fi
         fi
     done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
+    # The tier's full Woodpecker token replaces the read-only one for this
+    # spawn only; workers never set it (WI-4815). Applied after the loop so it
+    # wins whatever the order of the manifest lines.
+    if [[ -n "$tier_wp_token" ]]; then
+        printf -v WOODPECKER_TOKEN '%s' "$tier_wp_token"
+        export WOODPECKER_TOKEN
+        grant_var WOODPECKER_TOKEN
+    fi
 }
 
 # Decide AGENT_AUTH_MODE and whether the brokering machine identity survives
