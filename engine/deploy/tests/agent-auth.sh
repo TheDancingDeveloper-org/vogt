@@ -299,14 +299,14 @@ tier_case() {
     env -u VOGT_AGENT_AUTH_TIER ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
         WOODPECKER_TOKEN=read-only \
         ENGINE_AGENT_AUTH_SECRETS=$'WOODPECKER_ADMIN_TOKEN p wp-admin tier\nOPS_KUBE p kube ondemand,tier\nPLAIN p plain\nTIER_W p tw ondemand,writable,tier\n' \
-        bash -c '
-            source "$1"
+        bash -c "
+            source \"\$1\"
             declare -gA PROJECT_OUTCOME=([p]=ok)
-            resolve_secret() { printf -v "$1" "%s" "v-$5"; }
+            resolve_secret() { printf -v \"\$1\" \"%s\" \"v-\$5\"; }
             load_manifest_secrets tok
-            printf "%s|%s|%s|%s|%s|%s" "${WOODPECKER_TOKEN-}" "${WOODPECKER_ADMIN_TOKEN-unset}" \
-                "$AGENT_AUTH_GRANTED_VARS" "$AGENT_AUTH_ONDEMAND_VARS" "$AGENT_AUTH_WRITABLE_VARS" "${PLAIN-}"
-        ' _ "$script"
+            printf \"%s|%s|%s|%s|%s|%s\" \"\${WOODPECKER_TOKEN-}\" \"\${WOODPECKER_ADMIN_TOKEN-unset}\" \
+                \"\$AGENT_AUTH_GRANTED_VARS\" \"\$AGENT_AUTH_ONDEMAND_VARS\" \"\$AGENT_AUTH_WRITABLE_VARS\" \"\${PLAIN-}\"
+        " _ "$script"
 }
 out="$(tier_case estate_admin)" || fail "tier spawn load failed"
 [[ "$out" == "v-WOODPECKER_ADMIN_TOKEN|v-WOODPECKER_ADMIN_TOKEN|WOODPECKER_ADMIN_TOKEN PLAIN WOODPECKER_TOKEN|OPS_KUBE TIER_W|TIER_W|v-PLAIN" ]] \
@@ -321,13 +321,13 @@ wp_order_case() {
     local tier="$1" manifest="$2"
     env -u VOGT_AGENT_AUTH_TIER -u WOODPECKER_TOKEN ${tier:+VOGT_AGENT_AUTH_TIER="$tier"} \
         ENGINE_AGENT_AUTH_SECRETS="$manifest" \
-        bash -c '
-            source "$1"
+        bash -c "
+            source \"\$1\"
             declare -gA PROJECT_OUTCOME=([p]=ok)
-            resolve_secret() { printf -v "$1" "%s" "v-$5"; }
+            resolve_secret() { printf -v \"\$1\" \"%s\" \"v-\$5\"; }
             load_manifest_secrets tok
-            printf "%s" "${WOODPECKER_TOKEN-}"
-        ' _ "$script"
+            printf \"%s\" \"\${WOODPECKER_TOKEN-}\"
+        " _ "$script"
 }
 wp_admin_first=$'WOODPECKER_ADMIN_TOKEN p wp-admin tier\nWOODPECKER_TOKEN p wp-ro\n'
 wp_ro_first=$'WOODPECKER_TOKEN p wp-ro\nWOODPECKER_ADMIN_TOKEN p wp-admin tier\n'
