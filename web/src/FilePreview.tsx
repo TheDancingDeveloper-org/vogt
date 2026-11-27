@@ -4,6 +4,8 @@ import { previewKind } from "./filePreview";
 
 interface Props {
   path: string;
+  /** Read from this session's own tree (WI-4868); unset, the global view. */
+  sessionId?: string | null;
   /** Leave the preview for the editor. */
   onEdit?: (path: string) => void;
   onError?: (message: string) => void;
@@ -45,7 +47,7 @@ const FilePreview: Component<Props> = (props) => {
     setMediaUrl(null);
     let cancelled = false;
     onCleanup(() => { cancelled = true; });
-    void api.readFile(path).then((file) => {
+    void api.readFile(path, undefined, props.sessionId ?? null).then((file) => {
       if (cancelled) return;
       const text = file.content;
       if (renderHtml && text !== null) {

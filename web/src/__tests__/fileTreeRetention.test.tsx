@@ -84,7 +84,7 @@ describe("FileTree state retention", () => {
         op: "delete",
         path: "src/nested.tsx",
         recursive: false,
-      }),
+      }, null),
     );
 
     // The affected parent refetched; the root did not.
