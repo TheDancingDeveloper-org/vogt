@@ -2407,3 +2407,77 @@ async fn the_check_route_is_rate_limited_with_the_fetch_budget_and_audited_witho
     assert!(text.contains("var=GH_TOKEN") && text.contains("session_id="));
     assert!(!text.contains("value-of-GH_TOKEN"), "never the value");
 }
+
+/// WI-4815: a `tier` manifest entry is served only to an estate-admin tier
+/// session; any other session gets 403, for a fetch and for a store.
+#[tokio::test]
+async fn secret_broker_refuses_a_tier_entry_to_a_non_tier_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(
+        &tmp,
+        "OPS_KUBECONFIG proj ops-kube ondemand,tier\nPLAIN proj plain ondemand\nTIER_W proj tier-w ondemand,writable,tier\n",
+    );
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let worker: uuid::Uuid = create_session_id(&client, &base, "tier-worker")
+        .await
+        .parse()
+        .unwrap();
+    let admin: uuid::Uuid = create_session_id(&client, &base, "tier-admin")
+        .await
+        .parse()
+        .unwrap();
+    let broker = state.sessions.secret_broker();
+    broker.mark_tier(admin);
+    let (tw, ta) = (broker.issue(worker), broker.issue(admin));
+    let plain = reqwest::Client::new();
+    let fetch = |var: &str| format!("{base}/api/agent-auth/fetch/{var}");
+    let store = |var: &str| format!("{base}/api/agent-auth/store/{var}");
+
+    let r = plain
+        .post(fetch("OPS_KUBECONFIG"))
+        .bearer_auth(&tw)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("tier"), "{body}");
+    assert!(!body.contains("value-of-OPS_KUBECONFIG"), "{body}");
+
+    let r = plain
+        .post(fetch("OPS_KUBECONFIG"))
+        .bearer_auth(&ta)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "value-of-OPS_KUBECONFIG");
+
+    // Untiered names are unaffected for the worker.
+    let r = plain
+        .post(fetch("PLAIN"))
+        .bearer_auth(&tw)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // A store of a writable tier name is refused to the worker, before the
+    // body is read.
+    let r = plain
+        .post(store("TIER_W"))
+        .bearer_auth(&tw)
+        .body("new-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // The tier mark goes with the session's token.
+    broker.revoke(admin);
+    assert!(!broker.is_tier(admin));
+}
