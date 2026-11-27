@@ -3621,6 +3621,53 @@ contains `$HOME`, or contains `state_dir`.
   match on name and relative path, case-insensitive, `max` defaults to 100 and
   is capped at 500. Ordered by name-prefix match first, then shorter paths.
 
+#### Session Files: design note (WI-4870, decision 2026-11-27)
+
+The Files panel and a pod session see different filesystems today. The
+`/api/files*` routes above serve `workspace_root` on the engine's own volume,
+while a pod session's cwd is its `session-work` emptyDir at `/work`, which the
+engine cannot read. Nothing syncs the two except the one-way salvage archive
+written at hibernation. WI-4863 fixes this for session-scoped Files.
+
+**Decision (operator, 2026-11-27).** Session Files go through the session
+agent over the pod stream: the engine sends `FileOp` frames and the agent
+answers `FileResult` frames, resolved under the agent's own `/work` with the
+same `workspace_path` rules. The alternative, a shared RWX volume or subPath
+mounted by the engine and the pods, was rejected for four reasons:
+
+- **Pod isolation.** The engine would mount every session's tree, so one path
+  bug becomes a cross-session leak. Isolation would rest on subPath mounts in
+  the pod spec alone.
+- **Size bounds.** `/work` stays a size-limited emptyDir (`bounded_work_dir`).
+  RWX storage removes that bound, and cargo build I/O would go over the network.
+- **Any node.** The stream already reaches a pod on any node. RWX works only
+  where an RWX StorageClass exists; WI-4863's investigation did not find one
+  on vogt-dev.
+- **No infrastructure change.** It reuses the existing Flush/Salvage
+  request-and-reply frame pattern. No storage class, mount or operator storage
+  decision is needed.
+
+**Auth model.** A session-scoped file route requires the session's own
+capability: the token must carry `sessions` for that session id, so it can
+reach only its own tree (WI-1020). Writes also require `FilesystemWrite`, as
+`PUT /api/files`, `/api/files/upload` and `/api/files/op` do today. Reads of
+workspace files require `sessions`, as the File APIs above state. There is no
+`FilesystemRead` capability in the token enum today; the design names
+`FilesystemRead` only in `shared-language-servers.md`, which is not built.
+A session route must not widen access beyond the session's own tree, and
+cross-session requests are refused.
+
+**Hibernated sessions.** A hibernated pod has no live agent, so a session
+route answers `409` with `session_hibernated` and the session can be woken
+(WI-4867). A read-only view of the latest salvage archive is a possible later
+addition, tracked with WI-4722. It is not part of v1.
+
+**Global `/api/files*` routes.** They stay as they are for host sessions and
+for the engine's own workspace, and the Files panel keeps using them for that
+purpose now. Once the session routes land, they are deprecated for session
+Files and kept only as the engine-workspace (host) surface. They are not
+removed in the same change.
+
 ### Git APIs
 
 These routes address engine-workspace repositories, not pod clones. Pod boot
