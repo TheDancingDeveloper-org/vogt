@@ -130,7 +130,7 @@ fn answer<C: Clock + 'static, I: IdFactory + 'static>(
     params: &Value,
 ) -> Result<Value, VogtError> {
     let reason = validate_reason(&required(params, "decision.answer", "reason")?)?;
-    if ctx.principal.kind == crate::core::ActorKind::Agent {
+    if !crate::application::services::sessions::answers_as_person(ctx)? {
         return Err(VogtError::PersonRequired(format!(
             "only a person answers a decision, not an agent ({}); leave it for the Inbox",
             ctx.principal.identity_ref

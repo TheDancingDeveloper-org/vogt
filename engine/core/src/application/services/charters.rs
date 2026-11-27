@@ -140,7 +140,7 @@ use std::sync::Arc;
 use crate::application::context::write_of;
 use crate::application::services::now_of;
 use crate::application::writes::{audited_write, validate_reason, WriteOutcome};
-use crate::core::{ActorKind, Charter, CharterScopeKind};
+use crate::core::{Charter, CharterScopeKind};
 
 const CHARTER_SET_EVENT: &str = "charter.set";
 
@@ -157,7 +157,7 @@ fn set<C: Clock + 'static, I: IdFactory + 'static>(
     let scope = text(params, "scope");
     let reference = text_opt(params, "ref");
     let expected = params.get("expected_version").and_then(Value::as_i64);
-    if scope == "workspace" && ctx.principal.kind == ActorKind::Agent {
+    if scope == "workspace" && !crate::application::services::sessions::answers_as_person(ctx)? {
         return Err(VogtError::PersonRequired(format!(
             "the workspace charter reaches every session on every project, so only a person sets it, not an agent ({})",
             ctx.principal.identity_ref
