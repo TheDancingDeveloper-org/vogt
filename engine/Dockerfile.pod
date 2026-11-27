@@ -89,13 +89,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_PREFIX=/usr/local \
     PATH=/usr/local/bin:/usr/local/sbin:/home/vogt/.local/bin:/opt/rust/cargo/bin:/opt/flutter/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:$PATH
 
+# shellcheck comes from the distro package (apt verifies signatures) so
+# workers can run the CI shell gate before landing (WI-4856).
 # Keep the base deterministic at the tool level. Package indexes are not
 # retained in the layer, and no credentials or runtime configuration is copied.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates coreutils curl git git-lfs jq ripgrep fd-find build-essential \
        pkg-config libssl-dev python3 python3-pip python3-venv python3-dev \
-       openssh-client sudo unzip zip xz-utils zstd \
+       openssh-client shellcheck sudo unzip zip xz-utils zstd \
        libfontconfig-dev \
        libfreetype-dev \
        libvulkan-dev \
@@ -106,7 +108,8 @@ RUN apt-get update \
        libxkbcommon-x11-dev \
     && find /var/lib/apt/lists -type f -delete \
     && command -v timeout >/dev/null \
-    && test "$(command -v timeout)" = /usr/bin/timeout
+    && test "$(command -v timeout)" = /usr/bin/timeout \
+    && shellcheck --version
 
 # Kubernetes MCP server (containers/kubernetes-mcp-server), read-only cluster
 # access for agents (docs/ENGINE.md §4). Pinned to one release and verified
