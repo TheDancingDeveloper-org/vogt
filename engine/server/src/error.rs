@@ -55,6 +55,11 @@ pub enum ApiError {
         message: String,
         retry_after: Option<u64>,
     },
+    /// A session route needs the session's live process or pod agent, and
+    /// the session is hibernated or its agent is not attached (WI-4867).
+    /// `id` is the engine session id; the body carries a wake hint.
+    #[error("session {id} is hibernated or has no live agent: {reason}")]
+    SessionHibernated { id: String, reason: String },
     #[error("account at capacity: {0}")]
     AtCapacity(String),
     /// The host already runs `ENGINE_HOST_SESSION_CAP` live host sessions.
@@ -85,7 +90,7 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::UnknownModel(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Conflict(_) | ApiError::SessionHibernated { .. } => StatusCode::CONFLICT,
             ApiError::AtCapacity(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::HostCapacity { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
@@ -115,6 +120,12 @@ impl IntoResponse for ApiError {
         let mut body = json!({ "error": self.to_string() });
         if matches!(self, ApiError::UnknownModel(_)) {
             body["code"] = json!("unknown_model");
+        }
+        if let ApiError::SessionHibernated { id, .. } = &self {
+            body["code"] = json!("session_hibernated");
+            body["hint"] = json!(format!(
+                "wake the session first (POST /api/sessions/{id}/wake, or vogt's session.wake)"
+            ));
         }
         if let ApiError::HostCapacity { cap, counts } = &self {
             body["cap"] = json!(cap);

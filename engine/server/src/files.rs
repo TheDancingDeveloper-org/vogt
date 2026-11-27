@@ -72,10 +72,16 @@ pub async fn list_dir(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<FileEntry>>> {
+    list_dir_in(&state.config.workspace_root, q).await
+}
+
+/// [`list_dir`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn list_dir_in(root: &Path, q: ListQuery) -> Result<Json<Vec<FileEntry>>> {
     let dir = if q.path.trim().is_empty() {
-        state.config.workspace_root.clone()
+        root.to_path_buf()
     } else {
-        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+        workspace_path::resolve_existing(root, &q.path)?
     };
     let meta = tokio::fs::metadata(&dir).await?;
     if !meta.is_dir() {
@@ -98,7 +104,7 @@ pub async fn list_dir(
         let size = ent.metadata().await.map(|m| m.len()).unwrap_or(0);
         entries.push(FileEntry {
             name,
-            path: rel_to(&state.config.workspace_root, &path),
+            path: rel_to(root, &path),
             is_dir: ft.is_dir(),
             size,
         });
@@ -129,8 +135,14 @@ pub async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<FileRead>> {
-    let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
-    workspace_path::may_show(&state.config.workspace_root, &p)?;
+    read_file_in(&state.config.workspace_root, q).await
+}
+
+/// [`read_file`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn read_file_in(root: &Path, q: ReadQuery) -> Result<Json<FileRead>> {
+    let p = workspace_path::resolve_existing_allow_absolute(root, &q.path)?;
+    workspace_path::may_show(root, &p)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -141,7 +153,7 @@ pub async fn read_file(
     let is_binary = looks_binary(&bytes);
     let resp = if is_binary {
         FileRead {
-            path: rel_to(&state.config.workspace_root, &p),
+            path: rel_to(root, &p),
             size: bytes.len() as u64,
             content: None,
             content_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
@@ -154,7 +166,7 @@ pub async fn read_file(
         // files with sprinkled garbage should still load.
         let s = String::from_utf8_lossy(&bytes).into_owned();
         FileRead {
-            path: rel_to(&state.config.workspace_root, &p),
+            path: rel_to(root, &p),
             size: bytes.len() as u64,
             content: Some(s),
             content_base64: None,
@@ -186,8 +198,14 @@ pub async fn download_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Response> {
-    let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
-    workspace_path::may_show(&state.config.workspace_root, &p)?;
+    download_file_in(&state.config.workspace_root, q).await
+}
+
+/// [`download_file`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn download_file_in(root: &Path, q: ReadQuery) -> Result<Response> {
+    let p = workspace_path::resolve_existing_allow_absolute(root, &q.path)?;
+    workspace_path::may_show(root, &p)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -206,24 +224,7 @@ pub async fn download_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".into());
-    // Sanitize the quoted filename: a `"` (or backslash/control byte)
-    // in a workspace filename would break the quoted-string and let the saved
-    // artifact's name be spoofed. Collapse anything unsafe to '_'.
-    let filename: String = raw_name
-        .chars()
-        .map(|c| {
-            if c == '"' || c == '\\' || c.is_control() {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let filename = if filename.trim().is_empty() {
-        "download".to_string()
-    } else {
-        filename
-    };
+    let filename = attachment_name(&raw_name);
     let disposition = format!("attachment; filename=\"{}\"", filename);
     let response = Response::builder()
         .header(
@@ -241,10 +242,37 @@ pub async fn download_file(
     Ok(response)
 }
 
+/// A filename safe inside a quoted `Content-Disposition`: a `"`, backslash
+/// or control byte would break the quoted-string and let the saved name be
+/// spoofed, so each collapses to '_'.
+pub(crate) fn attachment_name(raw: &str) -> String {
+    let name: String = raw
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if name.trim().is_empty() {
+        "download".to_string()
+    } else {
+        name
+    }
+}
+
 pub async fn write_file(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WriteReq>,
 ) -> Result<Json<WriteFileResponse>> {
+    write_file_in(&state.config.workspace_root, req).await
+}
+
+/// [`write_file`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn write_file_in(root: &Path, req: WriteReq) -> Result<Json<WriteFileResponse>> {
     // Decode the payload first so a bad base64 body fails before any mkdir.
     let bytes: Vec<u8> = match &req.content_base64 {
         Some(b64) => base64::engine::general_purpose::STANDARD
@@ -257,13 +285,12 @@ pub async fn write_file(
         // Need to materialise the parent before resolve_for_write can canonicalise it.
         // strip_lexically equivalent via resolve_existing_or_lexical handles the validation
         // of components; we then pull the parent and mkdir-p, asserting it's still under root.
-        let lexical =
-            workspace_path::resolve_existing_or_lexical(&state.config.workspace_root, &req.path)?;
+        let lexical = workspace_path::resolve_existing_or_lexical(root, &req.path)?;
         if let Some(parent) = lexical.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let p = workspace_path::resolve_for_write(&state.config.workspace_root, &req.path)?;
+    let p = workspace_path::resolve_for_write(root, &req.path)?;
 
     // Optimistic-concurrency guard. When the client sends the hash it last
     // read, compare it against the current on-disk bytes and refuse the write
@@ -345,16 +372,25 @@ pub async fn upload_file(
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> Result<Json<WriteFileResponse>> {
+    upload_file_in(&state.config.workspace_root, q, body).await
+}
+
+/// [`upload_file`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn upload_file_in(
+    root: &Path,
+    q: UploadQuery,
+    body: Body,
+) -> Result<Json<WriteFileResponse>> {
     if q.create_parents {
         // Materialise the parent before resolve_for_write can canonicalise it
         // (mirrors write_file).
-        let lexical =
-            workspace_path::resolve_existing_or_lexical(&state.config.workspace_root, &q.path)?;
+        let lexical = workspace_path::resolve_existing_or_lexical(root, &q.path)?;
         if let Some(parent) = lexical.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let target = workspace_path::resolve_for_write(&state.config.workspace_root, &q.path)?;
+    let target = workspace_path::resolve_for_write(root, &q.path)?;
     let parent = target
         .parent()
         .ok_or_else(|| ApiError::BadRequest("path has no parent".into()))?;
@@ -461,7 +497,12 @@ pub async fn operate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FileOpReq>,
 ) -> Result<Json<FileOpResponse>> {
-    let root = &state.config.workspace_root;
+    operate_in(&state.config.workspace_root, req).await
+}
+
+/// [`operate`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn operate_in(root: &Path, req: FileOpReq) -> Result<Json<FileOpResponse>> {
     match req {
         FileOpReq::Move {
             from,
@@ -631,13 +672,19 @@ pub async fn tree(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TreeQuery>,
 ) -> Result<Json<Vec<TreeNode>>> {
+    tree_in(&state.config.workspace_root, q).await
+}
+
+/// [`tree`] under an explicit root: the engine workspace, or a host
+/// session's own cwd (WI-4867).
+pub(crate) async fn tree_in(root: &Path, q: TreeQuery) -> Result<Json<Vec<TreeNode>>> {
     let depth = q.depth.unwrap_or(0).min(3);
     let dir = if q.path.trim().is_empty() {
-        state.config.workspace_root.clone()
+        root.to_path_buf()
     } else {
-        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+        workspace_path::resolve_existing(root, &q.path)?
     };
-    let kids = walk_dir(&state.config.workspace_root, &dir, depth).await?;
+    let kids = walk_dir(root, &dir, depth).await?;
     Ok(Json(kids))
 }
 

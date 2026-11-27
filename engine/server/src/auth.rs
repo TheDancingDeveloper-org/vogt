@@ -574,6 +574,12 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     // `/hibernate` and `/wake` first shipped ungated. The WS attach (also a
     // read of live output) is registered outside this gate and authenticates
     // itself.
+    // A session-scoped file write (WI-4867) needs `filesystem-write` at the
+    // gate, as the global writes do; the handler also requires `sessions`
+    // and refuses a session-bound token any session but its own.
+    if is_session_file_write(method, path) {
+        return Some(TokenCapability::FilesystemWrite);
+    }
     if path.starts_with("/api/sessions/") {
         return Some(TokenCapability::Sessions);
     }
@@ -677,6 +683,20 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
         return Some(TokenCapability::VogtWrite);
     }
     None
+}
+
+/// `PUT /api/sessions/{id}/files`, `PUT …/files/upload`, `POST …/files/op`.
+fn is_session_file_write(method: &Method, path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/sessions/") else {
+        return false;
+    };
+    let Some((_, tail)) = rest.split_once('/') else {
+        return false;
+    };
+    matches!(
+        (method, tail),
+        (&Method::PUT, "files") | (&Method::PUT, "files/upload") | (&Method::POST, "files/op")
+    )
 }
 
 /// The routes that read the workspace tree or its git state. Every git GET
@@ -830,6 +850,65 @@ mod tests {
             TokenCapability::GuiControl,
         );
         assert!(gui.contains("admin scope"), "{gui}");
+    }
+
+    #[test]
+    fn session_file_writes_need_filesystem_write_and_reads_need_sessions() {
+        let id = "0b7a1c9e-0000-4000-8000-000000000001";
+        for (m, tail) in [
+            (Method::PUT, "files"),
+            (Method::PUT, "files/upload"),
+            (Method::POST, "files/op"),
+        ] {
+            assert_eq!(
+                required_capability(&m, &format!("/api/sessions/{id}/{tail}")),
+                Some(TokenCapability::FilesystemWrite),
+                "{m} {tail}"
+            );
+        }
+        for tail in ["files", "files/download", "dir", "tree"] {
+            assert_eq!(
+                required_capability(&Method::GET, &format!("/api/sessions/{id}/{tail}")),
+                Some(TokenCapability::Sessions),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_token_reaches_only_its_own_session_files() {
+        use crate::session_files::authorize;
+        let x = uuid::Uuid::new_v4();
+        let y = uuid::Uuid::new_v4();
+        let token = identity("agent:session:ses_X", &["work.write"]);
+        assert!(authorize(&token, Some(x), x, false).is_ok());
+        assert!(authorize(&token, Some(x), x, true).is_ok());
+        let refused = authorize(&token, Some(x), y, false).unwrap_err();
+        assert!(refused.contains(&y.to_string()), "{refused}");
+        assert!(authorize(&token, Some(x), y, true).is_err());
+        // A session token that resolves to no session reaches none.
+        assert!(authorize(&token, None, x, false).is_err());
+        for name in ["agent:engine:abc", "agent:pod:abc"] {
+            let t = identity(name, &["work.write"]);
+            assert!(authorize(&t, Some(x), y, false).is_err(), "{name}");
+        }
+        // A person may reach any session it could drive.
+        let person = identity("human:ada", &["work.write"]);
+        assert!(authorize(&person, None, y, true).is_ok());
+    }
+
+    #[test]
+    fn session_file_routes_need_sessions_and_writes_need_filesystem_write() {
+        use crate::session_files::authorize;
+        let x = uuid::Uuid::new_v4();
+        let reader = identity("human:ada", &["read"]);
+        assert!(authorize(&reader, None, x, false).is_err());
+        let mut no_fs = identity("human:ada", &["work.write"]);
+        no_fs
+            .capabilities
+            .retain(|c| *c != TokenCapability::FilesystemWrite);
+        assert!(authorize(&no_fs, None, x, false).is_ok());
+        assert!(authorize(&no_fs, None, x, true).is_err());
     }
 
     #[test]
