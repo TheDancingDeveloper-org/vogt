@@ -909,7 +909,7 @@ async fn output_before_attach_is_replayed_to_a_later_attach() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Output {
@@ -950,7 +950,7 @@ async fn output_input_resize_and_stop_round_trip() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
 
     // Output reaches the session's subscribers and is acknowledged.
     put(
@@ -1031,7 +1031,7 @@ async fn excessive_gap_is_rejected_without_poisoning_reconnect() {
     let id = harness.start().await;
     let token = harness.session_token(id).await;
     let mut agent = harness.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Gap {
@@ -1043,7 +1043,7 @@ async fn excessive_gap_is_rejected_without_poisoning_reconnect() {
     assert!(matches!(take(&mut agent).await, Frame::Error { code, .. } if code == "invalid_gap"));
     drop(agent);
     let mut agent = harness.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Output {
@@ -1070,7 +1070,7 @@ async fn reconnect_replays_exactly_the_unacked_bytes() {
     let token = h.session_token(id).await;
 
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Output {
@@ -1085,7 +1085,7 @@ async fn reconnect_replays_exactly_the_unacked_bytes() {
     // The link drops. The agent redials believing only 2 bytes were
     // acknowledged, so it replays from 2: the overlap must not repeat.
     let mut agent = h.dial(id, &token, 2).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 4 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 4 });
     put(
         &mut agent,
         Frame::Output {
@@ -1119,7 +1119,7 @@ async fn reconnect_replays_exactly_the_unacked_bytes() {
         },
     )
     .await;
-    match take(&mut agent).await {
+    match take_skip_resize(&mut agent).await {
         Frame::Error { code, .. } => assert_eq!(code, "output_gap"),
         other => panic!("expected an error frame, got {other:?}"),
     }
@@ -1160,7 +1160,7 @@ async fn reconnect_replays_exactly_the_unacked_bytes() {
 
     // A resume cursor past the stream (now at 102) is refused.
     let mut stale = h.dial(id, &token, 999).await;
-    match take(&mut stale).await {
+    match take_skip_resize(&mut stale).await {
         Frame::Error { code, .. } => assert_eq!(code, "resume_beyond_stream"),
         other => panic!("expected an error frame, got {other:?}"),
     }

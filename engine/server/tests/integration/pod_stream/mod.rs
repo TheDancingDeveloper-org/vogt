@@ -347,6 +347,18 @@ async fn take(ws: &mut Agent) -> Frame {
     .expect("a frame within 10s")
 }
 
+/// The first frame after an attach that is not a `Resize`. The engine replays
+/// the session's PTY size on hello (WI-4567), so a `Resize` may precede the
+/// resume `Ack`; the tests assert the `Ack` and not the replay's presence.
+async fn take_skip_resize(ws: &mut Agent) -> Frame {
+    loop {
+        match take(ws).await {
+            Frame::Resize { .. } => {}
+            frame => return frame,
+        }
+    }
+}
+
 /// A vogt-core stand-in that mints `minted-for-<id>` at
 /// `POST /api/sessions/token`.
 async fn mock_core() -> String {
