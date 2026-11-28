@@ -58,14 +58,26 @@ pub enum FileOp {
         #[serde(default)]
         create_parents: bool,
     },
-    /// One chunk of a larger file. `offset` 0 creates or truncates the file;
-    /// every later chunk must start where the file currently ends.
+    /// One chunk of a larger file. Chunks build a temp sibling of `path`
+    /// (see [`upload_temp`]); the target is only replaced, by a rename, when
+    /// the `last` chunk lands. `offset` 0 starts the temp file afresh; every
+    /// later chunk must start where it currently ends. `if_match` (the
+    /// SHA-256 hex the client last read, the empty hash for a file that
+    /// should not exist) is checked against the target at rename time.
     Upload {
         path: String,
         offset: u64,
         data: Vec<u8>,
         #[serde(default)]
         create_parents: bool,
+        #[serde(default)]
+        last: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_match: Option<String>,
+    },
+    /// Drop the temp file of an upload that will not finish.
+    UploadAbort {
+        path: String,
     },
     Mkdir {
         path: String,
@@ -125,7 +137,8 @@ pub enum FileOpResult {
         size: u64,
         eof: bool,
     },
-    /// A write or upload chunk landed; `size` is the file's length now.
+    /// A write or upload chunk landed; `size` is the file's length now (for an
+    /// upload, the temp file's, until the last chunk renames it into place).
     Written {
         size: u64,
     },
@@ -146,6 +159,8 @@ pub enum FileErrorCode {
     /// The request does not fit the target (a read of a directory, an
     /// upload chunk out of order, a move onto an existing path).
     Invalid,
+    /// The target changed since the client read it (`if_match` mismatch).
+    Conflict,
     Io,
 }
 
@@ -349,12 +364,43 @@ fn write(root: &Path, path: &str, data: &[u8], create_parents: bool) -> OpResult
     })
 }
 
+/// The temp sibling an upload to `target` builds in. Deterministic, so every
+/// chunk of one upload finds it again; hidden, and in the target's own
+/// directory so the final rename stays on one filesystem.
+fn upload_temp(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.vogt-upload"))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The target's content hash as the engine's `if_match` guard computes it:
+/// the empty hash for a missing file.
+fn target_hash(target: &Path) -> OpResult<String> {
+    match fs::read(target) {
+        Ok(bytes) => Ok(hex_sha256(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(hex_sha256(&[])),
+        Err(e) => Err(io(e)),
+    }
+}
+
 fn upload(
     root: &Path,
     path: &str,
     offset: u64,
     data: &[u8],
     create_parents: bool,
+    last: bool,
+    if_match: Option<&str>,
 ) -> OpResult<FileOpResult> {
     if data.len() > UPLOAD_CHUNK_MAX {
         return Err(err(FileErrorCode::TooLarge, "upload chunk over the cap"));
@@ -366,13 +412,36 @@ fn upload(
     if target.is_dir() {
         return Err(err(FileErrorCode::Invalid, "target is a directory"));
     }
+    let temp = upload_temp(&target);
+    let result = upload_chunk(&target, &temp, offset, data, last, if_match);
+    if result.is_err() {
+        // A failed chunk ends the upload: nothing partial stays behind.
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn upload_chunk(
+    target: &Path,
+    temp: &Path,
+    offset: u64,
+    data: &[u8],
+    last: bool,
+    if_match: Option<&str>,
+) -> OpResult<FileOpResult> {
     let mut handle = if offset == 0 {
-        fs::File::create(&target).map_err(io)?
+        fs::File::create(temp).map_err(io)?
     } else {
         let handle = fs::OpenOptions::new()
             .append(true)
-            .open(&target)
-            .map_err(io)?;
+            .open(temp)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => err(
+                    FileErrorCode::Invalid,
+                    format!("chunk at {offset} but the upload has no earlier chunks"),
+                ),
+                _ => io(e),
+            })?;
         let have = handle.metadata().map_err(io)?.len();
         if have != offset {
             return Err(err(
@@ -383,9 +452,34 @@ fn upload(
         handle
     };
     handle.write_all(data).map_err(io)?;
-    Ok(FileOpResult::Written {
-        size: offset + data.len() as u64,
-    })
+    handle.flush().map_err(io)?;
+    drop(handle);
+    let size = offset + data.len() as u64;
+    if last {
+        if let Some(expected) = if_match {
+            let current = target_hash(target)?;
+            if current != expected {
+                return Err(err(
+                    FileErrorCode::Conflict,
+                    format!(
+                        "file changed on disk since it was read (expected {expected}, found {current}); \
+                         reload before saving to avoid clobbering newer content"
+                    ),
+                ));
+            }
+        }
+        fs::rename(temp, target).map_err(io)?;
+    }
+    Ok(FileOpResult::Written { size })
+}
+
+fn upload_abort(root: &Path, path: &str) -> OpResult<FileOpResult> {
+    let target = for_write(root, path, false)?;
+    match fs::remove_file(upload_temp(&target)) {
+        Ok(()) => Ok(FileOpResult::Done),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileOpResult::Done),
+        Err(e) => Err(io(e)),
+    }
 }
 
 fn mkdir(root: &Path, path: &str, parents: bool) -> OpResult<FileOpResult> {
@@ -502,7 +596,18 @@ pub fn handle(root: &Path, op: &FileOp) -> FileOpResult {
             offset,
             data,
             create_parents,
-        } => upload(root, path, *offset, data, *create_parents),
+            last,
+            if_match,
+        } => upload(
+            root,
+            path,
+            *offset,
+            data,
+            *create_parents,
+            *last,
+            if_match.as_deref(),
+        ),
+        FileOp::UploadAbort { path } => upload_abort(root, path),
         FileOp::Mkdir { path, parents } => mkdir(root, path, *parents),
         FileOp::Move { from, to } => rename(root, from, to),
         FileOp::Copy { from, to } => copy(root, from, to),
@@ -703,29 +808,126 @@ mod tests {
         assert_eq!(code(&r), Some(FileErrorCode::NotFound));
     }
 
+    fn upload_op(
+        root: &Path,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        last: bool,
+        if_match: Option<&str>,
+    ) -> FileOpResult {
+        handle(
+            root,
+            &FileOp::Upload {
+                path: s(path),
+                offset,
+                data: data.to_vec(),
+                create_parents: true,
+                last,
+                if_match: if_match.map(s),
+            },
+        )
+    }
+
     #[test]
     fn upload_appends_chunks_in_order() {
         let (_d, root) = root();
-        let up = |offset, data: &[u8]| {
-            handle(
-                &root,
-                &FileOp::Upload {
-                    path: s("up/file.bin"),
-                    offset,
-                    data: data.to_vec(),
-                    create_parents: true,
-                },
-            )
-        };
-        assert_eq!(up(0, b"abc"), FileOpResult::Written { size: 3 });
-        assert_eq!(up(3, b"def"), FileOpResult::Written { size: 6 });
-        assert_eq!(code(&up(2, b"zz")), Some(FileErrorCode::Invalid));
+        let up =
+            |offset, data: &[u8], last| upload_op(&root, "up/file.bin", offset, data, last, None);
+        assert_eq!(up(0, b"abc", false), FileOpResult::Written { size: 3 });
+        // Nothing lands on the target until the last chunk.
+        assert!(!root.join("up/file.bin").exists());
+        assert_eq!(up(3, b"def", true), FileOpResult::Written { size: 6 });
         assert_eq!(fs::read(root.join("up/file.bin")).unwrap(), b"abcdef");
-        // Offset 0 starts the file again.
-        assert_eq!(up(0, b"x"), FileOpResult::Written { size: 1 });
+        assert!(!upload_temp(&root.join("up/file.bin")).exists());
+        // A chunk at the wrong offset ends the upload and leaves no temp file.
+        assert_eq!(up(0, b"x", false), FileOpResult::Written { size: 1 });
+        assert_eq!(code(&up(2, b"zz", false)), Some(FileErrorCode::Invalid));
+        assert!(!upload_temp(&root.join("up/file.bin")).exists());
+        assert_eq!(fs::read(root.join("up/file.bin")).unwrap(), b"abcdef");
+        // Offset 0 starts again, and a one-chunk upload replaces the file.
+        assert_eq!(up(0, b"x", true), FileOpResult::Written { size: 1 });
         assert_eq!(fs::read(root.join("up/file.bin")).unwrap(), b"x");
         let big = vec![0u8; UPLOAD_CHUNK_MAX + 1];
-        assert_eq!(code(&up(1, &big)), Some(FileErrorCode::TooLarge));
+        assert_eq!(code(&up(0, &big, true)), Some(FileErrorCode::TooLarge));
+    }
+
+    #[test]
+    fn aborted_upload_leaves_no_partial_target_or_temp_file() {
+        let (_d, root) = root();
+        fs::write(root.join("keep.bin"), b"original").unwrap();
+        let temp = upload_temp(&root.join("keep.bin"));
+        // Replacing an existing file: the original survives a mid-way abort.
+        assert_eq!(
+            upload_op(&root, "keep.bin", 0, b"new-part-1", false, None),
+            FileOpResult::Written { size: 10 }
+        );
+        assert!(temp.exists());
+        assert_eq!(fs::read(root.join("keep.bin")).unwrap(), b"original");
+        let abort = handle(
+            &root,
+            &FileOp::UploadAbort {
+                path: s("keep.bin"),
+            },
+        );
+        assert_eq!(abort, FileOpResult::Done);
+        assert!(!temp.exists());
+        assert_eq!(fs::read(root.join("keep.bin")).unwrap(), b"original");
+        // A new file: an abort leaves neither target nor temp file.
+        upload_op(&root, "fresh.bin", 0, b"half", false, None);
+        handle(
+            &root,
+            &FileOp::UploadAbort {
+                path: s("fresh.bin"),
+            },
+        );
+        assert!(!root.join("fresh.bin").exists());
+        assert!(!upload_temp(&root.join("fresh.bin")).exists());
+        // Aborting with nothing to abort is fine.
+        assert_eq!(
+            handle(
+                &root,
+                &FileOp::UploadAbort {
+                    path: s("fresh.bin")
+                }
+            ),
+            FileOpResult::Done
+        );
+    }
+
+    #[test]
+    fn upload_if_match_is_checked_at_rename_time() {
+        let (_d, root) = root();
+        fs::write(root.join("f.txt"), b"v1").unwrap();
+        let v1 = hex_sha256(b"v1");
+        // The file changes between the first chunk and the last.
+        assert_eq!(
+            upload_op(&root, "f.txt", 0, b"ab", false, Some(&v1)),
+            FileOpResult::Written { size: 2 }
+        );
+        fs::write(root.join("f.txt"), b"v2").unwrap();
+        let r = upload_op(&root, "f.txt", 2, b"cd", true, Some(&v1));
+        assert_eq!(code(&r), Some(FileErrorCode::Conflict));
+        assert_eq!(fs::read(root.join("f.txt")).unwrap(), b"v2");
+        assert!(!upload_temp(&root.join("f.txt")).exists());
+        // A matching hash renames; the empty hash guards a new file.
+        let v2 = hex_sha256(b"v2");
+        upload_op(&root, "f.txt", 0, b"ok", true, Some(&v2));
+        assert_eq!(fs::read(root.join("f.txt")).unwrap(), b"ok");
+        let r = upload_op(&root, "f.txt", 0, b"no", true, Some(&hex_sha256(&[])));
+        assert_eq!(code(&r), Some(FileErrorCode::Conflict));
+        assert_eq!(fs::read(root.join("f.txt")).unwrap(), b"ok");
+    }
+
+    #[test]
+    fn upload_temp_is_hidden_from_listings() {
+        let (_d, root) = root();
+        upload_op(&root, "a.bin", 0, b"x", false, None);
+        let FileOpResult::Entries { entries, .. } = handle(&root, &FileOp::List { path: s("") })
+        else {
+            panic!("expected entries")
+        };
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -864,6 +1066,8 @@ mod tests {
                 offset: 0,
                 data: vec![],
                 create_parents: false,
+                last: true,
+                if_match: None,
             },
             FileOp::Mkdir {
                 path: s("../d"),
@@ -923,6 +1127,8 @@ mod tests {
                 offset: 0,
                 data: vec![],
                 create_parents: true,
+                last: true,
+                if_match: None,
             },
             FileOp::Mkdir {
                 path: s("out/sub"),
