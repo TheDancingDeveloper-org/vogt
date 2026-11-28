@@ -22,8 +22,10 @@
 # refresh, so pods show "Login expired" every 6-12 hours. For an account the
 # engine runs in pods, mint a token once with `claude setup-token` (about a
 # year, no refresh), store it in the secrets store (from stdin, never argv) and
-# let the agent-auth manifest provide it to the engine as
-# ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT> (account upper-cased, `-` as `_`).
+# give it to the engine as ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT> (account
+# upper-cased, `-` as `_`) in the engine's own process environment (on vogt-dev,
+# an ExternalSecret through an optional secretKeyRef). The agent-auth manifest
+# does not feed the engine's env; it only brokers secrets into session children.
 # The engine then gives it to Claude Code sessions of that account only, as
 # CLAUDE_CODE_OAUTH_TOKEN, and copies no .credentials.json into their pods.
 # Re-run `claude setup-token` before it expires. See docs/ENGINE.md, "Claude
