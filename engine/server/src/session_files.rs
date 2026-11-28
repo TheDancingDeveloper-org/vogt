@@ -679,7 +679,7 @@ async fn pod_upload_body(id: Uuid, q: &UploadQuery, body: Body) -> Result<(u64, 
                     offset,
                     data,
                     create_parents: q.create_parents && offset == 0,
-                    last,
+                    last: Some(last),
                     if_match: if last { q.if_match.clone() } else { None },
                 },
             )
