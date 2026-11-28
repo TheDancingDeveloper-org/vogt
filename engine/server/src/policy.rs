@@ -165,7 +165,16 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
                         here = here.join("\0unresolved");
                         continue;
                     }
-                    if let Some(reason) = worker_branch(policy, pattern, &simple, &here) {
+                    // `env -C <dir> git …` / `env --chdir`: git runs in a
+                    // directory the line names only to the wrapper, so this
+                    // command has no known directory (an explicit own-branch
+                    // refspec still needs none).
+                    let dir = if command_words_ext(&simple).1 {
+                        here.join("\0unresolved")
+                    } else {
+                        here.clone()
+                    };
+                    if let Some(reason) = worker_branch(policy, pattern, &simple, &dir) {
                         return Some(reason);
                     }
                 }
@@ -933,8 +942,12 @@ fn git_dir(words: &[String], cwd: &Path) -> PathBuf {
     match (git_d, work_t) {
         (None, None) => dir,
         // Both named, or one beside `-C`: they may not name different places.
-        (Some(a), Some(b)) if a == b && !conflict && !dash_c => a,
-        (Some(d), None) | (None, Some(d)) if !conflict && !dash_c => d,
+        // A work tree with its own git directory (`<d>` or `<d>/.git`).
+        (Some(g), Some(w)) if (g == w || g == w.join(".git")) && !conflict && !dash_c => g,
+        (Some(d), None) if !conflict && !dash_c => d,
+        // A lone `--work-tree` only sets the checkout: git still finds the
+        // repository (and its HEAD) from the cwd, so it names no directory.
+        (None, Some(_)) if !conflict && !dash_c => dir,
         _ => cwd.join("\0unresolved"),
     }
 }
@@ -5710,8 +5723,10 @@ mod tests {
         let (own_n, other_n) = (name(&own), name(&other));
         let parent = own.parent().unwrap().to_path_buf();
         let cases = [
-            (format!("git --work-tree={own_n} push origin HEAD"), false),
-            (format!("git --work-tree {own_n} push origin HEAD"), false),
+            // A lone --work-tree does not move the repository: from the
+            // parent (no repository) the branch is unknown.
+            (format!("git --work-tree={own_n} push origin HEAD"), true),
+            (format!("git --work-tree {own_n} push origin HEAD"), true),
             (format!("git --git-dir={own_n} push origin HEAD"), false),
             (format!("git --git-dir {own_n} push origin HEAD"), false),
             (
@@ -5798,6 +5813,63 @@ mod tests {
                 parent.display(),
                 check(&worker, &command, &parent)
             );
+        }
+    }
+
+    /// WI-4861 round 3 (review of cdd389fade3ed): a lone `--work-tree` does
+    /// not pick the repository, and `env -C` / `env --chdir` leave the push
+    /// directory unknown.
+    #[test]
+    fn a_worker_push_ignores_a_lone_work_tree_and_env_chdir() {
+        let worker = worker_on_1298();
+        let own = repo("wi-1298-x");
+        let other = repo("wi-1299-x");
+        let (own_s, other_s) = (own.display().to_string(), other.display().to_string());
+        // Run from the other checkout: git takes HEAD from here.
+        let from_other = [
+            (format!("git --work-tree={own_s} push origin HEAD"), true),
+            (format!("git --work-tree {own_s} push origin HEAD"), true),
+            (format!("git --work-tree={own_s} push origin"), true),
+            (
+                format!("git --git-dir={own_s}/.git --work-tree={own_s} push origin HEAD"),
+                false,
+            ),
+            (
+                format!("git --git-dir {own_s}/.git --work-tree {own_s} push origin HEAD"),
+                false,
+            ),
+            (
+                format!("git --work-tree={own_s} push origin wi-1298-x"),
+                false,
+            ),
+        ];
+        // Run from the own checkout: env -C moves git to the other one.
+        let from_own = [
+            (format!("env -C {other_s} git push origin HEAD"), true),
+            (format!("env -C{other_s} git push origin HEAD"), true),
+            (format!("env --chdir={other_s} git push origin HEAD"), true),
+            (format!("env --chdir {other_s} git push origin HEAD"), true),
+            (format!("env --chdir={other_s} git push origin"), true),
+            (format!("env -C {other_s} git push origin wi-1298-x"), false),
+            (
+                format!("env --chdir={other_s} git push origin wi-1298-x"),
+                false,
+            ),
+            (
+                format!("env --chdir={other_s} git push origin wi-1299-x"),
+                true,
+            ),
+        ];
+        for (cases, cwd) in [(&from_other[..], &other), (&from_own[..], &own)] {
+            for (command, want) in cases {
+                assert_eq!(
+                    refused(&worker, command, cwd),
+                    *want,
+                    "worker on WI-1298 in {}: {command} ({:?})",
+                    cwd.display(),
+                    check(&worker, command, cwd)
+                );
+            }
         }
     }
 
