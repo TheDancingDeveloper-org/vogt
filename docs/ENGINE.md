@@ -2315,9 +2315,16 @@ refresh invalidates every other pod's copy, so pods show "Login expired" every
   never print it or put it in argv.
 - **Give it to the engine** as `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT>`: the
   account name upper-cased with `-` as `_` (`acct1` is
-  `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_ACCT1`), through an agent-auth manifest
-  line. It is an `ENGINE_` variable, so it is stripped from every child
-  environment. The engine sets `CLAUDE_CODE_OAUTH_TOKEN` itself, as below.
+  `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_ACCT1`). The engine reads it from its **own
+  process environment** (`std::env::var`), not from the agent-auth manifest. The
+  manifest (`ENGINE_AGENT_AUTH_SECRETS`) only brokers secrets into session
+  children, so a manifest line for this name would leave the engine without a
+  token. On vogt-dev the value comes from the ExternalSecret
+  `vogt-dev-claude-oauth` (Infisical `apps/prod`, key
+  `CLAUDE_CODE_OAUTH_TOKEN_ACCT1`), through an optional `secretKeyRef` on the
+  engine container (ops PR #987). It is an `ENGINE_` variable, so it is stripped
+  from every child environment. The engine sets `CLAUDE_CODE_OAUTH_TOKEN` itself,
+  as below.
 - **Who gets it.** Only a Claude Code session started under that account. A
   shell, Codex or OpenCode session, a session with no account and a session on
   another account get nothing. A caller's `env` cannot override it on a host.
@@ -2339,8 +2346,9 @@ refresh invalidates every other pod's copy, so pods show "Login expired" every
   before). A shell pod that names an account is also unchanged: it still gets
   the credentials copy, because the token goes to Claude Code sessions only.
 - **Rotation.** Re-run `claude setup-token` before the token expires (about a
-  year), store the new value under the same secret name, and restart the engine
-  so it reads it. Running sessions keep the old token until they restart. Note
+  year), store the new value under the same secret name, let ExternalSecrets
+  sync it (within an hour, or force a sync), and restart the engine so it reads
+  it. Running sessions keep the old token until they restart. Note
   the mint date so the renewal is not a surprise.
 
 #### Hibernation

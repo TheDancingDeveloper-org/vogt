@@ -8,8 +8,10 @@
 //!
 //! The engine reads one variable per account,
 //! `ENGINE_AGENT_CLAUDE_OAUTH_TOKEN_<ACCOUNT>` (the account name upper-cased,
-//! `-` as `_`; `acct1` is `..._ACCT1`), filled by an agent-auth manifest line,
-//! and gives its value as `CLAUDE_CODE_OAUTH_TOKEN` only to a Claude Code
+//! `-` as `_`; `acct1` is `..._ACCT1`) from the engine's own process
+//! environment (on vogt-dev, an ExternalSecret through an optional
+//! `secretKeyRef`), not from the agent-auth manifest, which only brokers secrets
+//! into session children. It gives the value as `CLAUDE_CODE_OAUTH_TOKEN` only to a Claude Code
 //! session running under that account. The value is never logged and never
 //! travels in argv or a literal pod `EnvVar`.
 
