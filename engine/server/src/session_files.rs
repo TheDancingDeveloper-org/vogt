@@ -190,6 +190,7 @@ fn map_error(code: FileErrorCode, message: String) -> ApiError {
         FileErrorCode::TooLarge => ApiError::TooLarge(message),
         FileErrorCode::Invalid if message.contains("exists") => ApiError::Conflict(message),
         FileErrorCode::Invalid => ApiError::BadRequest(message),
+        FileErrorCode::Conflict => ApiError::Conflict(message),
         FileErrorCode::Io => ApiError::Internal(message),
     }
 }
@@ -278,6 +279,77 @@ async fn pod_read_all(id: Uuid, path: &str, cap: u64) -> Result<Vec<u8>> {
             return Ok(out);
         }
     }
+}
+
+/// One read chunk at `offset`: its bytes, the file's size and whether it was
+/// the last.
+async fn pod_read_chunk(id: Uuid, path: &str, offset: u64) -> Result<(Vec<u8>, u64, bool)> {
+    match op(
+        id,
+        FileOp::Read {
+            path: pod_path(path),
+            offset,
+            len: Some(READ_CHUNK_MAX),
+        },
+    )
+    .await?
+    {
+        FileOpResult::Data {
+            data, size, eof, ..
+        } => Ok((data, size, eof)),
+        _ => Err(unexpected("read")),
+    }
+}
+
+/// A body stream that yields `first`, then asks `fetch(offset)` for each
+/// following chunk (bytes, eof) until eof or an empty chunk. One chunk is in
+/// memory at a time. A failed fetch ends the stream with an error, which
+/// aborts the HTTP body instead of passing off a short file as complete.
+fn chunk_stream<F, Fut>(
+    first: Vec<u8>,
+    eof: bool,
+    fetch: F,
+) -> impl futures_util::Stream<Item = std::result::Result<Vec<u8>, std::io::Error>>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<(Vec<u8>, bool)>>,
+{
+    struct State<F> {
+        pending: Option<Vec<u8>>,
+        offset: u64,
+        done: bool,
+        fetch: F,
+    }
+    let state = State {
+        pending: Some(first),
+        offset: 0,
+        done: eof,
+        fetch,
+    };
+    futures_util::stream::unfold(state, |mut st| async move {
+        let data = match st.pending.take() {
+            Some(first) => first,
+            None if st.done => return None,
+            None => match (st.fetch)(st.offset).await {
+                Ok((data, eof)) => {
+                    st.done = eof || data.is_empty();
+                    if data.is_empty() {
+                        return None;
+                    }
+                    data
+                }
+                Err(e) => {
+                    st.done = true;
+                    return Some((Err(std::io::Error::other(e.to_string())), st));
+                }
+            },
+        };
+        if data.is_empty() {
+            return None;
+        }
+        st.offset += data.len() as u64;
+        Some((Ok(data), st))
+    })
 }
 
 /// The current content hash, or the empty hash for a missing file, as the
@@ -445,10 +517,24 @@ pub async fn download_file(
             if entry.kind != EntryKind::File {
                 return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
             }
-            // The agent refuses files over its own read cap, so the body is
-            // bounded; it is gathered, then sent.
-            let bytes =
-                pod_read_all(id, &q.path, vogt_session_agent::file_ops::READ_MAX_BYTES).await?;
+            // The first chunk is read before the response starts, so a refusal
+            // (too large, vanished) is still an error status; the rest is
+            // streamed chunk by chunk, never gathered in engine memory.
+            let (first, size, eof) = pod_read_chunk(id, &q.path, 0).await?;
+            if size > vogt_session_agent::file_ops::READ_MAX_BYTES {
+                return Err(ApiError::BadRequest(format!(
+                    "file too large (max {} bytes)",
+                    vogt_session_agent::file_ops::READ_MAX_BYTES
+                )));
+            }
+            let path = q.path.clone();
+            let body = Body::from_stream(chunk_stream(first, eof, move |offset| {
+                let path = path.clone();
+                async move {
+                    let (data, _, eof) = pod_read_chunk(id, &path, offset).await?;
+                    Ok((data, eof))
+                }
+            }));
             let disposition = format!(
                 "attachment; filename=\"{}\"",
                 files::attachment_name(&entry.name)
@@ -463,8 +549,8 @@ pub async fn download_file(
                     HeaderValue::from_str(&disposition)
                         .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
                 )
-                .header(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()))
-                .body(Body::from(bytes))
+                .header(header::CONTENT_LENGTH, HeaderValue::from(size))
+                .body(body)
                 .map_err(|e| ApiError::Internal(e.to_string()))
         }
     }
@@ -519,9 +605,10 @@ pub async fn write_file(
 }
 
 /// The streaming upload. On a pod the body is cut into `Upload` chunks of at
-/// most [`UPLOAD_CHUNK_MAX`]; the `if_match` guard is checked before the
-/// first chunk. Unlike the host route the target is written in place, so a
-/// failed upload can leave a partial file.
+/// most [`UPLOAD_CHUNK_MAX`]. The agent builds them in a temp sibling and
+/// renames it onto the target when the `last` chunk lands, checking
+/// `if_match` again then (it is also checked up front, to refuse early). On
+/// any failure the engine sends `UploadAbort` so no temp file is left.
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     identity: Option<Extension<AuthorizedIdentity>>,
@@ -534,54 +621,77 @@ pub async fn upload_file(
         Target::Host(root) => files::upload_file_in(&root, q, body).await,
         Target::Pod(id) => {
             pod_if_match(id, &q.path, q.if_match.as_deref()).await?;
-            let mut hasher = Sha256::new();
-            let mut offset: u64 = 0;
-            let mut pending: Vec<u8> = Vec::with_capacity(UPLOAD_CHUNK_MAX);
-            let mut stream = body.into_data_stream();
-            let mut sent_any = false;
-            loop {
-                let next = stream.next().await;
-                let done = next.is_none();
-                if let Some(chunk) = next {
-                    let chunk = chunk
-                        .map_err(|e| ApiError::BadRequest(format!("upload stream error: {e}")))?;
-                    hasher.update(&chunk);
-                    pending.extend_from_slice(&chunk);
-                }
-                while pending.len() >= UPLOAD_CHUNK_MAX
-                    || (done && (!pending.is_empty() || !sent_any))
-                {
-                    let take = pending.len().min(UPLOAD_CHUNK_MAX);
-                    let data: Vec<u8> = pending.drain(..take).collect();
-                    let len = data.len() as u64;
-                    match op(
+            let (bytes, hash) = match pod_upload_body(id, &q, body).await {
+                Ok(done) => done,
+                Err(e) => {
+                    // Best effort: the agent also drops the temp file itself
+                    // when one of its chunks fails.
+                    let _ = op(
                         id,
-                        FileOp::Upload {
+                        FileOp::UploadAbort {
                             path: pod_path(&q.path),
-                            offset,
-                            data,
-                            create_parents: q.create_parents && offset == 0,
                         },
                     )
-                    .await?
-                    {
-                        FileOpResult::Written { .. } => {}
-                        _ => return Err(unexpected("upload")),
-                    }
-                    offset += len;
-                    sent_any = true;
+                    .await;
+                    return Err(e);
                 }
-                if done {
-                    break;
-                }
-            }
+            };
             let mtime = pod_stat(id, &q.path).await.map_or(0, |e| mtime_ms(&e));
             Ok(Json(WriteFileResponse {
                 ok: true,
-                bytes: offset as usize,
-                hash: files::hex_digest(hasher.finalize()),
+                bytes: bytes as usize,
+                hash,
                 mtime,
             }))
+        }
+    }
+}
+
+/// Send the body as `Upload` chunks; returns its length and SHA-256.
+async fn pod_upload_body(id: Uuid, q: &UploadQuery, body: Body) -> Result<(u64, String)> {
+    let mut hasher = Sha256::new();
+    let mut offset: u64 = 0;
+    let mut pending: Vec<u8> = Vec::with_capacity(UPLOAD_CHUNK_MAX);
+    let mut stream = body.into_data_stream();
+    loop {
+        let next = stream.next().await;
+        let done = next.is_none();
+        if let Some(chunk) = next {
+            let chunk =
+                chunk.map_err(|e| ApiError::BadRequest(format!("upload stream error: {e}")))?;
+            hasher.update(&chunk);
+            pending.extend_from_slice(&chunk);
+        }
+        // Until the body ends, keep back at least one byte: the final chunk
+        // must be sent flagged `last`, and only the end of the body says
+        // which one that is. An empty body sends one empty `last` chunk.
+        while (!done && pending.len() > UPLOAD_CHUNK_MAX)
+            || (done && (!pending.is_empty() || offset == 0))
+        {
+            let take = pending.len().min(UPLOAD_CHUNK_MAX);
+            let data: Vec<u8> = pending.drain(..take).collect();
+            let len = data.len() as u64;
+            let last = done && pending.is_empty();
+            match op(
+                id,
+                FileOp::Upload {
+                    path: pod_path(&q.path),
+                    offset,
+                    data,
+                    create_parents: q.create_parents && offset == 0,
+                    last,
+                    if_match: if last { q.if_match.clone() } else { None },
+                },
+            )
+            .await?
+            {
+                FileOpResult::Written { .. } => {}
+                _ => return Err(unexpected("upload")),
+            }
+            offset += len;
+        }
+        if done {
+            return Ok((offset, files::hex_digest(hasher.finalize())));
         }
     }
 }
@@ -693,4 +803,79 @@ async fn pod_operate(id: Uuid, req: FileOpReq) -> Result<FileOpResponse> {
     };
     op(id, frame).await?;
     Ok(FileOpResponse { ok: true, path })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type Fetched =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Vec<u8>, bool)>> + Send>>;
+
+    /// A fake file served in `chunk`-byte reads; counts the fetches.
+    fn fake(
+        data: Vec<u8>,
+        chunk: usize,
+        fetches: Arc<AtomicUsize>,
+    ) -> (Vec<u8>, bool, impl FnMut(u64) -> Fetched) {
+        let first = data[..chunk.min(data.len())].to_vec();
+        let eof = first.len() >= data.len();
+        let fetch = move |offset: u64| -> Fetched {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            let start = (offset as usize).min(data.len());
+            let end = (start + chunk).min(data.len());
+            let part = data[start..end].to_vec();
+            let eof = end >= data.len();
+            Box::pin(async move { Ok((part, eof)) })
+        };
+        (first, eof, fetch)
+    }
+
+    #[tokio::test]
+    async fn download_streams_more_than_one_chunk() {
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let (first, eof, fetch) = fake(data.clone(), 4096, fetches.clone());
+        let chunks: Vec<_> = chunk_stream(first, eof, fetch).collect().await;
+        let chunks: Vec<Vec<u8>> = chunks.into_iter().map(|c| c.unwrap()).collect();
+        // 4096 + 4096 + 1808: three body chunks, none larger than one read.
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| c.len() <= 4096));
+        assert_eq!(chunks.concat(), data);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn download_stream_is_lazy_and_stops_at_eof() {
+        let data = vec![7u8; 9000];
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let (first, eof, fetch) = fake(data, 4096, fetches.clone());
+        let mut stream = Box::pin(chunk_stream(first, eof, fetch));
+        // Nothing past the first chunk is read until the body is polled.
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 4096);
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 4096);
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 808);
+        assert!(stream.next().await.is_none());
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn download_stream_errors_rather_than_truncating() {
+        let fetch = |_offset: u64| async { Err::<(Vec<u8>, bool), _>(ApiError::NotFound) };
+        let items: Vec<_> = chunk_stream(vec![1, 2, 3], false, fetch).collect().await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_ref().unwrap(), &vec![1, 2, 3]);
+        assert!(items[1].is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_file_streams_nothing() {
+        let fetch = |_offset: u64| async { Ok::<_, ApiError>((vec![], true)) };
+        let items: Vec<_> = chunk_stream(vec![], true, fetch).collect().await;
+        assert!(items.is_empty());
+    }
 }
