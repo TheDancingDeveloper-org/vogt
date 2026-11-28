@@ -533,7 +533,7 @@ async fn a_running_pods_silent_agent_ends_at_the_heartbeat_timeout() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
 
     *h.launcher.listed.lock().unwrap() = vec![running_pod(id)];
     let env = [("ENGINE_POD_HEARTBEAT_TIMEOUT", "1")];
@@ -584,7 +584,7 @@ async fn hibernate_flushes_the_transcript_deletes_the_pod_and_wake_resumes_it_on
     let conversation = conversation_of(&h, id).await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     let session = h.state.sessions.get(id).unwrap();
     let (_, initial_rows, initial_cols) = session.screen_source(0);
     session.resize(101, 37).unwrap();
@@ -689,7 +689,7 @@ async fn a_wake_right_after_hibernate_waits_for_the_terminating_pod() {
         .cloned()
         .unwrap();
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     h.state
         .sessions
         .secret_broker()
@@ -749,7 +749,7 @@ async fn hibernate_is_refused_when_an_attached_agent_cannot_write_back() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     let hibernate = tokio::spawn({
         let client = h.client.clone();
         let url = format!("{}/api/sessions/{id}/hibernate", h.base);
@@ -823,7 +823,7 @@ async fn restart_adopts_a_pod_before_it_reports_a_conversation() {
     assert!(launcher.deleted.lock().unwrap().is_empty());
     assert!(registry.get(id).unwrap().is_alive());
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(&mut agent, Frame::Exited { status: Some(0) }).await;
     ended(&registry, id).await;
 }
@@ -862,7 +862,7 @@ async fn a_restarted_engine_adopts_the_running_pod_and_replays_exactly() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Output {
@@ -895,7 +895,10 @@ async fn a_restarted_engine_adopts_the_running_pod_and_replays_exactly() {
     // output it last had acknowledged, and replays an overlap plus new
     // bytes. Nothing is dropped or doubled.
     let mut agent = h.dial(id, &token, 6).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 11 });
+    assert_eq!(
+        take_skip_resize(&mut agent).await,
+        Frame::Ack { offset: 11 }
+    );
     put(
         &mut agent,
         Frame::Output {
@@ -936,7 +939,7 @@ async fn a_restarted_engine_keeps_the_adopted_pods_reported_status() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     let report = b"\x1b]7501;state=done:app=claude-code\x1b\\".to_vec();
     let len = report.len() as u64;
     put(
@@ -984,7 +987,10 @@ async fn a_restarted_engine_keeps_the_adopted_pods_reported_status() {
     let after = registry.summary_of(id).unwrap().reported_status;
 
     let mut agent = h.dial(id, &token, len).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: len });
+    assert_eq!(
+        take_skip_resize(&mut agent).await,
+        Frame::Ack { offset: len }
+    );
     put(&mut agent, Frame::Exited { status: Some(0) }).await;
     ended(&registry, id).await;
     assert_eq!(after, Some(before), "the report survives the restart");
@@ -1025,7 +1031,7 @@ async fn a_forced_kill_mid_output_adopts_the_pod_with_no_gap_or_duplicate() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     put(
         &mut agent,
         Frame::Output {
@@ -1096,7 +1102,10 @@ async fn a_forced_kill_mid_output_adopts_the_pod_with_no_gap_or_duplicate() {
     // The agent's last ack was 18, so it resumes there. The engine answers
     // with exactly what its log holds, and the agent resends from there.
     let mut agent = h.dial(id, &token, 18).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 18 });
+    assert_eq!(
+        take_skip_resize(&mut agent).await,
+        Frame::Ack { offset: 18 }
+    );
     put(
         &mut agent,
         Frame::Output {
@@ -1136,7 +1145,7 @@ async fn an_adopted_link_gets_a_full_heartbeat_timeout_from_its_reconnect() {
     let id = h.start().await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     let old_link = h.state.agent_auth.pod(id).unwrap();
     h.state.agent_auth.forget_pod(id);
     drop(agent);
@@ -1165,7 +1174,7 @@ async fn an_adopted_link_gets_a_full_heartbeat_timeout_from_its_reconnect() {
     );
 
     let mut agent = h.dial(id, &token, 0).await;
-    assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     let attached = tokio::time::timeout(Duration::from_secs(5), async {
         while !link.is_connected() {
             tokio::time::sleep(Duration::from_millis(10)).await;
