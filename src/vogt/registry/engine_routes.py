@@ -131,6 +131,14 @@ _WORKSPACE = (
     "gates on `sessions`, `filesystem-write` and `git-write` (WI-1020) and "
     "that the core's own engine credential deliberately does not hold."
 )
+_SESSION_FILES = (
+    "One session's own file browser (WI-4867): the GUI's view of a host "
+    "session's cwd or a pod session's tree, which the pod's session agent "
+    "serves. An agent runs inside that workspace and has its files directly. "
+    "Over MCP these would give a remote token holder a read/write channel "
+    "into another session's tree, which the engine gates on `sessions` and "
+    "`filesystem-write` and the core's engine credential does not hold."
+)
 _GUI = (
     "`gui-control` is arbitrary code execution as the pod user (ENGINE.md "
     "§auth). The core's engine credential does not hold it, and an agent "
@@ -238,6 +246,13 @@ ENGINE_ONLY: Mapping[str, str] = {
     "PUT /api/files/upload": _WORKSPACE,
     "POST /api/files/op": _WORKSPACE,
     "GET /api/files/download": _WORKSPACE,
+    "GET /api/sessions/{id}/files": _SESSION_FILES,
+    "PUT /api/sessions/{id}/files": _SESSION_FILES,
+    "PUT /api/sessions/{id}/files/upload": _SESSION_FILES,
+    "POST /api/sessions/{id}/files/op": _SESSION_FILES,
+    "GET /api/sessions/{id}/files/download": _SESSION_FILES,
+    "GET /api/sessions/{id}/dir": _SESSION_FILES,
+    "GET /api/sessions/{id}/tree": _SESSION_FILES,
     "GET /api/dir": _WORKSPACE,
     "GET /api/tree": _WORKSPACE,
     "GET /api/search": _WORKSPACE,
