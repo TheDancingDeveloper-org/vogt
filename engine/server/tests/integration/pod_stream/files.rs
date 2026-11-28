@@ -59,7 +59,7 @@ async fn pod_files(tweak: impl FnOnce(&mut vogt_engine_server::config::Config)) 
     // The agent is registered once the engine has acked the resume; the
     // frames before it (Resize) need no answer.
     let mut ws = h.dial(id, &token, 0).await;
-    while take(&mut ws).await != (Frame::Ack { offset: 0 }) {}
+    assert_eq!(take_skip_resize(&mut ws).await, Frame::Ack { offset: 0 });
     let work = tempfile::tempdir().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let agent = serve_work(ws, work.path().to_path_buf(), stopped);
@@ -259,7 +259,7 @@ async fn a_hibernated_session_is_a_409_session_hibernated() {
     let conversation = conversation_of(&h, id).await;
     let token = h.session_token(id).await;
     let mut agent = h.dial(id, &token, 0).await;
-    while take(&mut agent).await != (Frame::Ack { offset: 0 }) {}
+    assert_eq!(take_skip_resize(&mut agent).await, Frame::Ack { offset: 0 });
     h.state
         .sessions
         .secret_broker()
